@@ -52,3 +52,17 @@ During live testing, a transient delayed-motion event invalidated calibration an
 All current automated suites and a complete signed build pass. The latest physical checks remain separate from this result.
 
 A 90.2-second live observation of build 3 collected 178 fresh diagnostic snapshots: capture stayed ready in all 178; motion was fresh in 170 and calibrated in 148. Maximum added acquisition lag was 48.7 ms, with no delayed-motion warning in that interval. Eight snapshots were waiting for motion and 22 reported a head-reference jump; 30 snapshots used the protective cover. The wearer was carrying out requested physical checks, so this aggregate does not attribute the interruptions to a specific gesture or prove sustained calibration. Manual feedback is still pending. No head-pose history or screen image was saved in this aggregate.
+
+## Wearer feedback and update 0.3.0 (build 4)
+
+The wearer confirmed fullscreen blur on both connected displays and confirmed that the physical Control–Option–Command–P shortcut immediately clears it. Diagnostics independently recorded one global-pause activation and stopped capture. The wearer also reported a steady ten-second turn followed by a black screen that remained until Set center after reinserting a bud. This was not accepted as satisfactory recovery.
+
+The new recovery policy automatically pauses and clears blur and pointer blockers when tracking becomes invalid. Fresh input alone does not invent a new reference; Set center resumes a pending interrupted effect, while manual Pause or changing display selection cancels that recovery intent. A changed reference therefore no longer leaves a persistent black cover.
+
+The discontinuity detector now considers both adjacent angular velocities so an abrupt physical stop is not assessed using only a low final speed. Actual unexplained low-speed quaternion jumps still invalidate calibration. New referenceJumpCount/lastReferenceJump diagnostics record one event count plus the latest step/threshold/timing/rates, without a pose history. A sensor-origin reset remains unproven until live event evidence identifies it.
+
+User-requested controls now include connected-display count, refresh, per-display selection persisted by UUID, and click/scroll blocking in blurred areas or the whole affected display. Nonactivating panels preserve keyboard focus and reserve menu/escape controls. Drags already started before interception may remain owned by the original application.
+
+Automated validation passes: 2,094 math assertions, 52 motion-delivery assertions, 42 real-AppModel lifecycle assertions with entirely stubbed device/capture/preferences APIs, 690,785 input-region checks, actual-GPU input-mask cross-checks at 1×/2×, and prior live-texture replacement/resize tests. The new selected-display, pointer-interception, and automatic-clear behavior still need installed-app verification.
+
+Build 4 is installed and strict signature validation passes with the existing identity. Actual ScreenCaptureKit access check passed without new permission. The running controls were inspected visually; selecting displays updated 2 → 1 → 0 → 1 → 2, and both were restored. The installed app currently reports two connected/two selected displays and pointer blocking enabled in Blurred area mode. AirPods motion is unavailable at this final setup check, so live selected-display capture, physical pointer interception, and new recovery behavior await the wearer's requested checks.

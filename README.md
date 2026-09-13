@@ -1,6 +1,6 @@
 # AirVeil
 
-AirVeil is a native macOS menu-bar app that uses AirPods head motion to progressively obscure the opposite side of your desktop. Turn left to blur the right side; turn right to blur the left. The untouched side stays fully transparent and interactive.
+AirVeil is a native macOS menu-bar app that uses AirPods head motion to progressively obscure the opposite side of your desktop. Turn left to blur the right side; turn right to blur the left. The untouched side stays transparent. Clicks and scrolling are blocked in blurred areas by default, with a control to block the entire affected display instead.
 
 ## Requirements
 
@@ -43,20 +43,23 @@ Migrating from an older ad hoc build requires one new macOS screen-capture appro
 ## Controls and behavior
 
 - **Directional half / Whole-screen sweep** selects opposite-half blur or a moving blur edge across the full display. Turning left starts at the right edge and sweeps left; turning right mirrors it. At the full-effect angle, the entire display is blurred.
-- **Reset defaults** restores all effect settings without changing permissions or calibration.
+- **Displays** shows connected displays and lets you choose which ones receive blur. Selection is saved by stable display identity. **Check displays** refreshes the list. Changing selection pauses the effect.
+- **Block clicks and scrolling while blurred** intercepts pointer input in the blurred area or the entire affected display. AirVeil settings, the menu bar, and the global pause key remain available. Keyboard focus is unchanged.
+- **Reset defaults** restores effect settings and selects all connected displays, then pauses the effect without changing permissions or calibration.
 - Default onset: 8 degrees; full effect: 32 degrees.
 - Adjustable blur, edge feather, and response time.
 - **Opaque cover** removes source color at full strength for stronger obscuration.
 - AirPods motion starts automatically at launch, reconnects automatically, and retries interruptions with a bounded delay.
 - Calibration is deliberate; holding a turned pose never silently resets center.
 - Sensor gaps, earbud source changes, and detected reference jumps invalidate calibration.
-- Unexpected motion/capture failure while enabled shows an opaque cover. Pause remains available from the menu bar and the registered shortcut.
+- Lost or invalid tracking automatically pauses the effect and clears both blur and input blockers. Once fresh motion returns, face the display and **Set center** to resume. An explicit Pause cancels that automatic resume intent. Capture failures also pause and clear. This recovery policy exposes the normal desktop while paused.
+- Starting a drag before blur appears may leave that already-started drag with the underlying app; the blockers intercept newly delivered pointer events in covered regions.
 - Sleep or session resignation pauses the effect and discards captured frames. AirPods detection resumes automatically after wake; set center and enable to resume.
 - Display reconfiguration requires rebuilding capture with a deliberate pause/re-enable.
 
 ## Privacy and platform limits
 
-Motion and desktop frames are processed locally, in memory. The app captures no audio, runs no server, and includes no analytics or cloud inference. Its own windows are excluded from its capture streams to prevent repeated blur feedback. It does not save recordings.
+Motion and desktop frames are processed locally, in memory. Headphone acquisition runs separately from UI work, and the app coalesces outdated visual poses while retaining real sensor continuity failures. The app captures no audio, runs no server, and includes no analytics or cloud inference. Its own windows are excluded from its capture streams to prevent repeated blur feedback. It does not save recordings.
 
 Software blur changes the same pixels for everyone looking at the display. It is not an optical privacy filter, cannot detect bystanders, and does not guarantee unreadability of all content. Transition edges are partly visible. Secure macOS surfaces and every fullscreen application are not guaranteed to be covered.
 

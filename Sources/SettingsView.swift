@@ -101,6 +101,30 @@ struct SettingsView: View {
                     }.frame(maxWidth:.infinity,alignment:.leading)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
+                VStack(alignment:.leading,spacing:12) {
+                    HStack {
+                        Label("Displays",systemImage:"display.2").font(.headline)
+                        Spacer()
+                        Text("\(model.overlay.availableDisplays.count) connected · \(model.selectedDisplayCount) selected")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Check displays",systemImage:"arrow.clockwise") { model.overlay.refreshDisplays() }
+                    }
+                    ForEach(model.overlay.availableDisplays) { display in
+                        Toggle(isOn:Binding(get:{model.isDisplaySelected(display)},set:{model.selectDisplay(display,selected:$0)})) {
+                            Text(display.name)
+                        }.toggleStyle(.checkbox)
+                    }
+                    Toggle("Block clicks and scrolling while blurred",isOn:$model.blockInput).toggleStyle(.switch).controlSize(.small)
+                    if model.blockInput {
+                        Picker("Block interaction in",selection:$model.blocksEntireDisplay) {
+                            Text("Blurred area").tag(false)
+                            Text("Entire affected display").tag(true)
+                        }.pickerStyle(.segmented)
+                    }
+                    Text("The clear area stays usable in Blurred area mode. AirVeil controls and the menu bar remain available.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+
                 VStack(alignment:.leading,spacing:16) {
                     HStack {
                         Text("Make it feel right").font(.headline)
@@ -134,11 +158,11 @@ struct SettingsView: View {
                         Button("Pause & clear screen") { model.pause() }.buttonStyle(.borderedProminent).controlSize(.large)
                     } else {
                         Button("Enable desktop effect") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(!model.motion.isFresh || !model.motion.isCalibrated)
+                            .disabled(!model.motion.isFresh || !model.motion.isCalibrated || model.selectedDisplayCount == 0)
                     }
                 }
                 HStack(alignment:.top) {
-                    Text("Blur affects everyone viewing this screen. If tracking stops while enabled, an opaque cover appears until you pause or recalibrate.")
+                    Text("Blur affects everyone viewing a selected display. If tracking stops, the effect pauses and clears automatically. Set center to resume.")
                     Spacer()
                     Text(model.pauseHint).fixedSize()
                 }.font(.caption2).foregroundStyle(.secondary)

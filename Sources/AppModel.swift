@@ -13,6 +13,10 @@ final class AppModel: NSObject, ObservableObject {
     @Published var starting = false
     @Published var calibrating = false
     private var calibrationTicket = 0
+    private var resumeAfterRecenter = false
+    @Published private(set) var selectedDisplayKeys: Set<String>?
+    @Published var blockInput = true { didSet { persist() } }
+    @Published var blocksEntireDisplay = false { didSet { persist() } }
     @Published var message = "AirPods are detected automatically. Face the display and set center."
     @Published var previewYaw = 0.0
     @Published var simulate = true
@@ -39,18 +43,32 @@ final class AppModel: NSObject, ObservableObject {
     var showWindow: (() -> Void)?
     var stateChanged: (() -> Void)?
 
+    var selectedDisplayIDs: Set<UInt32>? {
+        guard let selectedDisplayKeys else { return nil }
+        return Set(overlay.availableDisplays.filter { selectedDisplayKeys.contains($0.stableID) }.map(\.id))
+    }
+    var selectedDisplayCount: Int { selectedDisplayIDs?.count ?? overlay.availableDisplays.count }
+    func isDisplaySelected(_ display: VeilDisplayInfo) -> Bool { selectedDisplayKeys?.contains(display.stableID) ?? true }
+    func selectDisplay(_ display: VeilDisplayInfo, selected: Bool) {
+        pause()
+        var keys = selectedDisplayKeys ?? Set(overlay.availableDisplays.map(\.stableID))
+        if selected { keys.insert(display.stableID) } else { keys.remove(display.stableID) }
+        selectedDisplayKeys = keys
+        persist()
+        message = "Display selection updated. Enable the effect when ready."
+    }
     var pauseHint: String { pauseShortcutAvailable ? "Pause anytime  ⌃⌥⌘P" : "Pause from the AirVeil menu" }
     var effectiveYaw: Double { (inverted ? -1 : 1) * motion.yawDegrees }
     var shielded: Bool { enabled && (!motion.trackingValid || !overlay.isRunning || overlay.failureReason != nil) }
     var headline: String {
         if starting { return "Starting desktop effect…" }
-        if shielded { return "Tracking interrupted — screen covered" }
+        if shielded { return "Tracking changed — clearing effect" }
         if enabled && !overlay.isReady { return "Preparing live desktop frames…" }
         if enabled { return "Following your head" }
         return "Desktop effect paused"
     }
     var direction: String {
-        if shielded { return "Screen covered · tracking or capture needs attention" }
+        if shielded { return "Clearing the screen · tracking or capture changed" }
         if enabled && !overlay.isReady { return "Waiting for live desktop frames" }
         let yaw = simulate && !enabled ? previewYaw : effectiveYaw
         if abs(yaw) <= onset { return "Centered · screen clear" }
@@ -68,6 +86,9 @@ final class AppModel: NSObject, ObservableObject {
         inverted = d.bool(forKey: "inverted")
         opaque = d.bool(forKey: "opaque")
         wholeScreen = d.bool(forKey: "wholeScreen")
+        blockInput = d.object(forKey: "blockInput") == nil ? true : d.bool(forKey: "blockInput")
+        blocksEntireDisplay = d.bool(forKey: "blocksEntireDisplay")
+        selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
         loading = false
         refreshPermission()
         motion.objectWillChange.throttle(for: .milliseconds(100), scheduler: RunLoop.main, latest: true).sink { [weak self] _ in
@@ -92,7 +113,8 @@ final class AppModel: NSObject, ObservableObject {
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                self?.message = "Display configuration changed. Pause, set center, and enable again to rebuild the effect."
+                self?.pause()
+                self?.message = "Displays changed. Choose the displays to blur, set center, and enable again."
                 self?.motion.stop()
                 self?.motion.start()
                 self?.installClock()
@@ -109,6 +131,9 @@ final class AppModel: NSObject, ObservableObject {
         guard !loading else { return }
         let d = UserDefaults.standard
         for (k,v) in [("onset",onset),("fullAngle",fullAngle),("blurPoints",blurPoints),("feather",feather),("response",response)] { d.set(v,forKey:k) }
+        d.set(blockInput,forKey:"blockInput"); d.set(blocksEntireDisplay,forKey:"blocksEntireDisplay")
+        if let selectedDisplayKeys { d.set(Array(selectedDisplayKeys).sorted(),forKey:"selectedDisplays") }
+        else { d.removeObject(forKey:"selectedDisplays") }
         d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque"); d.set(wholeScreen,forKey:"wholeScreen")
     }
     private func installClock() {
@@ -119,6 +144,7 @@ final class AppModel: NSObject, ObservableObject {
         lastTime = 0
     }
     @objc private func frame(_ link: CADisplayLink) {
+        checkTrackingSafety()
         let now = CACurrentMediaTime()
         let dt = lastTime == 0 ? 1.0/60 : min(0.1,max(0,now-lastTime))
         lastTime = now
@@ -129,7 +155,21 @@ final class AppModel: NSObject, ObservableObject {
         if abs(next.left-strengths.left) > 0.00001 || abs(next.right-strengths.right) > 0.00001 { strengths = next }
         if enabled {
             overlay.update(left: strengths.left,right: strengths.right,blurPoints: blurPoints,feather: feather,
-                           opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded,wholeScreen: wholeScreen)
+                           opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded,wholeScreen: wholeScreen,blockInput: blockInput,blocksEntireDisplay: blocksEntireDisplay)
+        }
+    }
+    // Signal loss must not leave an unusable black screen or input blockers.
+    // Resume is deliberate because reconnecting can replace the sensor frame.
+    func checkTrackingSafety() {
+        guard enabled else { return }
+        if !motion.trackingValid {
+            pause()
+            resumeAfterRecenter = true
+            message = "Tracking changed, so the screen was cleared. Face the display and Set center to resume."
+        } else if overlay.failureReason != nil {
+            let reason = overlay.failureReason ?? "Capture stopped."
+            pause()
+            message = "Effect paused and screen cleared. " + reason
         }
     }
     func startMotionAutomatically() {
@@ -150,7 +190,11 @@ final class AppModel: NSObject, ObservableObject {
                 if motion.canCalibrate {
                     motion.calibrate()
                     calibrating = false
-                    if motion.isCalibrated { simulate = false; message = "Center set. Turn left and right to confirm the preview follows the opposite side." }
+                    if motion.isCalibrated {
+                        simulate = false
+                        message = "Center set. Turn left and right to confirm the preview follows the opposite side."
+                        if resumeAfterRecenter { resumeAfterRecenter = false; enable() }
+                    }
                     else { message = motion.status }
                     return
                 }
@@ -164,6 +208,9 @@ final class AppModel: NSObject, ObservableObject {
     func resetDefaults() {
         onset = 8; fullAngle = 32; blurPoints = 32; feather = 0.12; response = 0.07
         inverted = false; opaque = false; wholeScreen = false
+        blockInput = true; blocksEntireDisplay = false
+        pause()
+        selectedDisplayKeys = nil; persist()
         message = "Default settings restored."
     }
     // Preflight is advisory. ScreenCaptureKit remains the authority and still
@@ -202,6 +249,7 @@ final class AppModel: NSObject, ObservableObject {
     }
     func enable() {
         guard !enabled && !starting else { return }
+        guard selectedDisplayCount > 0 else { message = "Select at least one display to blur."; return }
         guard motion.isFresh && motion.isCalibrated else { message = "Wear your AirPods and set your center before enabling the desktop effect."; return }
         refreshPermission()
         accessTicket += 1; checkingAccess = false
@@ -210,8 +258,14 @@ final class AppModel: NSObject, ObservableObject {
         Task {
             guard generation == ticket && starting else { return }
             do {
-                try await overlay.start()
+                try await overlay.start(selectedDisplayIDs: selectedDisplayIDs)
                 guard generation == ticket else { return }
+                guard motion.trackingValid else {
+                    pause()
+                    resumeAfterRecenter = true
+                    message = "Tracking changed while starting. Set center to resume."
+                    return
+                }
                 starting = false; enabled = true; simulate = false
                 verifiedScreenAccess = true; permissionGranted = true; captureErrorDetails = ""
                 message = "Head tracking is active. " + pauseHint
@@ -230,6 +284,7 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     func pause() {
+        resumeAfterRecenter = false
         accessTicket += 1; checkingAccess = false
         calibrationTicket += 1; calibrating = false
         generation += 1; enabled = false; starting = false; overlay.stop()

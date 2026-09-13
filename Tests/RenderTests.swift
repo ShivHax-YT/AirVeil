@@ -111,6 +111,25 @@ import CoreVideo
                 precondition(abs(Int(reversalA[offset])-Int(reversalB[offset])) <= 5,
                              "Small reversal progress must never teleport the sweep")
             }
+            // Compare pointer intervals directly with real shader alpha, including
+            // reversals where both directional feathers contribute to coverage.
+            for whole in [false,true] {
+                for (l,r) in [(0.0,0.0),(0.0,0.03),(0.03,0.0),(0.0,0.25),(0.5,0.0),(0.0,0.75),(1.0,0.0),(0.47,0.47),(0.49,0.49),(0.3,0.7),(0.7,0.3)] {
+                    view.setEffect(left:l,right:r,blurPoints:32,feather:0.12,opaque:false,shield:false,wholeScreen:whole)
+                    let shader = bytes(try view.renderOffscreen(width:width,height:height))
+                    let intervals = VeilInputGeometry.intervals(left:l,right:r,feather:0.12,wholeScreen:whole)
+                    for x in 0..<width {
+                        let position = (Double(x)+0.5)/Double(width)
+                        let alpha = Int(pixel(shader,width,x,height/2)[3])
+                        let blocked = intervals.contains { position > $0.lower && position < $0.upper }
+                        // One byte around threshold is deliberately excluded because
+                        // the shader attachment quantizes float alpha to 8 bits.
+                        if alpha <= 11 { precondition(!blocked, "Clear shader pixels must allow pointer input") }
+                        if alpha >= 14 { precondition(blocked, "Visible shader coverage must intercept pointer input") }
+                    }
+                }
+            }
+            print("PASS \(scale)x pointer regions match real GPU alpha for half/full sweep and reversal")
             print("PASS \(scale)x whole-screen: directional quarter/half/three-quarter sweep, mirror, clear/full endpoints, continuous reversal")
             print("PASS \(scale)x: transparent neutral, mirrored/monotonic feather, premultiplied alpha, opaque independence, full shield, image orientation")
         }

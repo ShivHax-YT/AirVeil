@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.calibrating
         if !model.enabled {
             let enable = menu.addItem(withTitle:"Enable Desktop Effect",action:#selector(enable),keyEquivalent:"")
-            enable.target=self; enable.isEnabled=model.motion.isCalibrated && model.motion.isFresh
+            enable.target=self; enable.isEnabled=model.motion.isCalibrated && model.motion.isFresh && model.selectedDisplayCount > 0
         }
         menu.addItem(withTitle:"Settings…",action:#selector(showSettings),keyEquivalent:",").target=self
         menu.addItem(.separator())
@@ -97,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func writeDiagnostics(_ path:String) {
         let snapshot:[String:Any] = ["timestamp":Date().timeIntervalSince1970,
             "build":Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",
+            "referenceJumpCount":model.motion.referenceJumpCount,"lastReferenceJump":model.motion.lastReferenceJump,
+            "activeDisplayCount":model.overlay.activeDisplayCount,
+            "selectedDisplayCount":model.selectedDisplayCount,"connectedDisplayCount":model.overlay.availableDisplays.count,
+            "blockedPointerEventCount":model.overlay.blockedPointerEventCount,
+            "blockInput":model.blockInput,"blocksEntireDisplay":model.blocksEntireDisplay,
             "wholeScreen":model.wholeScreen,"leftStrength":model.strengths.left,"rightStrength":model.strengths.right,
             "captureReady":model.overlay.isReady,"motionStatus":model.motion.status,
             "motionFresh":model.motion.isFresh,"calibrated":model.motion.isCalibrated,"motionRunning":model.motion.isRunning,

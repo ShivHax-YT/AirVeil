@@ -9,13 +9,13 @@ struct MotionDeliveryTests {
             checks += 1
             if !value() { fatalError("FAIL: \(message)") }
         }
-        func reading(_ sourceTime: Double, _ receipt: Double, yaw: Double = 0,
+        func reading(_ sourceTime: Double, _ receipt: Double, yaw: Double = 0, speed: Double = 0,
                      source: CMDeviceMotion.SensorLocation = .headphoneLeft) -> MotionReading {
             // No Core Motion manager, hardware permission, or mutable attitude
             // is needed to test the actual timestamp/continuity delivery path.
             MotionReading(attitude: nil, timestamp: sourceTime, receipt: receipt,
                           quaternion: VeilQuaternion(x: 0, y: 0, z: sin(yaw/2), w: cos(yaw/2)),
-                          speed: 0, source: source)
+                          speed: speed, source: source)
         }
 
         let uiStall = MotionDeliveryBuffer()
@@ -75,8 +75,41 @@ struct MotionDeliveryTests {
         _ = jumping.take()
         jumping.offer(reading(1.01, 10.01, yaw: 1))
         jumping.offer(reading(1.02, 10.02, yaw: 0))
-        check(jumping.take()?.continuityIssue?.contains("jumped") == true,
+        let jumps = jumping.take()!
+        check(jumps.continuityIssue?.contains("jumped") == true,
               "Reference jump cannot disappear when an intermediate pose is dropped")
+        check(jumps.referenceJumpCount == 2, "Two actual quaternion discontinuities counted once each")
+        check(jumps.lastReferenceJump != nil && jumps.lastReferenceJump!.stepRadians > 0.9,
+              "Last jump reports measured step rather than only a latched status")
+        jumping.offer(reading(1.03, 10.03))
+        let quietAfterJump = jumping.take()!
+        check(quietAfterJump.referenceJumpCount == 2 && quietAfterJump.continuityIssue == nil,
+              "Later snapshots do not invent repeated jump events")
+
+        let deceleration = MotionDeliveryBuffer()
+        deceleration.offer(reading(1, 10, speed: 20))
+        _ = deceleration.take()
+        deceleration.offer(reading(1.02, 10.02, yaw: 0.5, speed: 0))
+        let stoppedTurn = deceleration.take()!
+        check(stoppedTurn.continuityIssue == nil && stoppedTurn.referenceJumpCount == 0,
+              "Adjacent high rotation speed accounts for a real turn that just stopped")
+
+        let heldTurn = MotionDeliveryBuffer()
+        heldTurn.offer(reading(1, 10, yaw: 0.7))
+        _ = heldTurn.take()
+        for i in 1...1000 {
+            let elapsed = Double(i)/100
+            heldTurn.offer(reading(1+elapsed, 10+elapsed, yaw: 0.7))
+        }
+        let held = heldTurn.take()!
+        check(held.referenceJumpCount == 0 && held.reading?.quaternion.z == sin(0.35),
+              "Ten-second stationary turned pose is preserved, not recentered")
+        heldTurn.offer(reading(11.01, 20.01, yaw: 0))
+        let resetLike = heldTurn.take()!
+        check(resetLike.referenceJumpCount == 1 && resetLike.continuityIssue?.contains("Set center") == true,
+              "Unexplained stationary reset requires explicit screen reference")
+        check(resetLike.lastReferenceJump?.previousSpeed == 0 && resetLike.lastReferenceJump?.currentSpeed == 0,
+              "Reset-like event records both low speeds without claiming a vendor cause")
 
         let switching = MotionDeliveryBuffer()
         switching.offer(reading(1, 10))

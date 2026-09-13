@@ -40,7 +40,7 @@ The two research reports use different proposed yaw sign conventions. Resolve th
 
 Use an original MPS Gaussian blur pipeline instead of copying macTilt's shader. Keep live desktop pixels flat and aligned. Only the obscuring amount and edge animate; the desktop does not need to fold or distort to achieve the requested behavior. A dark opaque cover remains available as a stronger obscuration style.
 
-Unexpected loss of calibrated motion while an enabled effect is active will show a full opaque fallback and an explicit tracking-loss status. Pause removes it immediately. Place overlays below status-menu controls and keep the settings window above them. Register a global pause shortcut through the public Carbon hotkey API, without an Accessibility permission dependency. On sleep/session resignation, hide overlays and discard captured frames; waking resumes sensor detection automatically and requires deliberate recalibration/re-enabling of the desktop effect.
+Following wearer feedback, unexpected loss of calibrated motion automatically pauses the active effect and clears the screen. Fresh motion plus an explicit Set center can resume it; a manual Pause cancels that recovery intent. Capture failures also clear automatically. This deliberately favors a usable desktop over holding a permanent failure cover. Place overlays below status-menu controls and keep the settings window above them. Register a global pause shortcut through the public Carbon hotkey API, without an Accessibility permission dependency. On sleep/session resignation, hide overlays and discard captured frames; waking resumes sensor detection automatically and requires deliberate recalibration/re-enabling of the desktop effect.
 
 ## Research gate completed
 
@@ -61,3 +61,9 @@ Keep the same signed left/right transfer values in half and whole-screen modes. 
 Acquire headphone samples on a serial background operation queue. Timestamp and validate continuity there, then hand the newest pose to the main actor through a one-slot buffer. Preserve intervening source, timing, and quaternion discontinuities even when intermediate poses are coalesced. UI queue delays must not be mistaken for acquisition delays. Calibration remains an explicit user action; discarding obsolete UI deliveries must never silently establish a new head reference.
 
 Before a queued capture or access-check task begins, verify its generation still matches the user's current intent. Recheck capture generation, failure state, and the display ID/frame/backing-scale snapshot across each asynchronous startup boundary. Pause or a changing display arrangement must not let obsolete startup work publish an active effect.
+
+## Selected displays and pointer interception
+
+Enumerate connected displays locally and persist selections by display UUID. A deliberate selection change pauses capture; an empty selection cannot enable. Build capture only for selected current IDs and retain startup topology revalidation.
+
+Nonactivating AppKit panels intercept clicks and scrolling without keyboard focus or additional monitoring permission. The panels follow the compositor's blur mask above 5% coverage, or cover the selected display when the whole-display blocking option is chosen. Reserve the menu-bar area and keep AirVeil controls higher. Pause, failure recovery, selection changes, and shutdown remove blocker windows synchronously. Do not claim cancellation of a drag already dispatched before the blocker appeared.

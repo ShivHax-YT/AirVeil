@@ -14,8 +14,11 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/VeilMath.swift" \
   "$TASK_ROOT/Tests/AppModelLifecycleTests.swift" -o "$TASK_ROOT/build/tests/appmodel-lifecycle"
 "$TASK_ROOT/build/tests/appmodel-lifecycle"
+swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/VeilInputGeometry.swift" \
+  "$TASK_ROOT/Tests/InputGeometryTests.swift" -o "$TASK_ROOT/build/tests/input-geometry"
+"$TASK_ROOT/build/tests/input-geometry"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
-  "$TASK_ROOT/Sources/VeilMetalView.swift" "$TASK_ROOT/Tests/RenderTests.swift" \
+  "$TASK_ROOT/Sources/VeilMetalView.swift" "$TASK_ROOT/Sources/VeilInputGeometry.swift" "$TASK_ROOT/Tests/RenderTests.swift" \
   -o "$TASK_ROOT/build/tests/render-tests"
 "$TASK_ROOT/build/tests/render-tests" "$TASK_ROOT"
 if [ "${1:-}" = '--performance' ]; then

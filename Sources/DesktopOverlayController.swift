@@ -3,6 +3,57 @@ import Combine
 import ScreenCaptureKit
 import CoreMedia
 
+struct VeilDisplayInfo: Identifiable, Equatable {
+    let id: UInt32
+    let stableID: String
+    let name: String
+    let frame: NSRect
+    let backingScale: CGFloat
+}
+
+private final class VeilPointerBlockerView: NSView {
+    var onBlockedPointer: (() -> Void)?
+    override var isOpaque: Bool { false }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(calibratedWhite:0, alpha:1.0/255.0).setFill()
+        dirtyRect.fill()
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onBlockedPointer?() }
+    override func mouseUp(with event: NSEvent) {}
+    override func mouseDragged(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) { onBlockedPointer?() }
+    override func rightMouseUp(with event: NSEvent) {}
+    override func rightMouseDragged(with event: NSEvent) {}
+    override func otherMouseDown(with event: NSEvent) { onBlockedPointer?() }
+    override func otherMouseUp(with event: NSEvent) {}
+    override func otherMouseDragged(with event: NSEvent) {}
+    override func scrollWheel(with event: NSEvent) { onBlockedPointer?() }
+    override func magnify(with event: NSEvent) {}
+    override func rotate(with event: NSEvent) {}
+    override func swipe(with event: NSEvent) {}
+}
+
+private final class VeilPointerBlockerPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+    init() {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        isOpaque = false
+        // The content view paints one alpha step so its hit area survives
+        // 8-bit surface quantization; never rely on a completely clear panel.
+        backgroundColor = .clear
+        hasShadow = false
+        ignoresMouseEvents = false
+        hidesOnDeactivate = false
+        isMovable = false
+        level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .canJoinAllApplications]
+        contentView = VeilPointerBlockerView(frame: .zero)
+    }
+}
+
 private final class VeilOverlayWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -45,14 +96,20 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     @Published private(set) var isRunning = false
     @Published private(set) var isReady = false
     @Published private(set) var failureReason: String?
+    @Published private(set) var availableDisplays: [VeilDisplayInfo] = []
+    @Published private(set) var blockedPointerEventCount: UInt64 = 0
+    var activeDisplayCount: Int { isRunning ? sessions.count : 0 }
     @MainActor private final class DisplaySession {
         let window: VeilOverlayWindow
         let view: VeilMetalView
         let mailbox = VeilFrameMailbox()
+        let blockers = [VeilPointerBlockerPanel(), VeilPointerBlockerPanel()]
+        let menuBand: CGFloat
         var sink: DisplayCaptureSink?
         var stream: SCStream?
         var ready = false
         init(screen: NSScreen) {
+            menuBand = max(NSStatusBar.system.thickness, screen.safeAreaInsets.top)
             view = VeilMetalView(frame: NSRect(origin: .zero, size: screen.frame.size))
             window = VeilOverlayWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
@@ -66,6 +123,22 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             window.contentView = view
             view.autoresizingMask = [.width, .height]
             view.frameMailbox = mailbox
+        }
+        func observeBlockedPointer(_ callback: @escaping () -> Void) {
+            for blocker in blockers { (blocker.contentView as? VeilPointerBlockerView)?.onBlockedPointer = callback }
+        }
+        func hideBlockers() { for blocker in blockers { blocker.orderOut(nil) } }
+        func setBlockers(_ intervals: [VeilInputInterval], active: Bool) {
+            let frame = window.frame
+            let usableHeight = max(0, frame.height - menuBand)
+            for (index, blocker) in blockers.enumerated() {
+                guard active, index < intervals.count, usableHeight > 0 else { blocker.orderOut(nil); continue }
+                let interval = intervals[index]
+                let rect = NSRect(x:frame.minX+frame.width*interval.lower, y:frame.minY,
+                                  width:frame.width*(interval.upper-interval.lower), height:usableHeight)
+                if blocker.frame != rect { blocker.setFrame(rect, display:false) }
+                if !blocker.isVisible { blocker.order(.above, relativeTo:window.windowNumber) }
+            }
         }
         func coverWithoutGPU() {
             view.isPaused = true
@@ -102,29 +175,54 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     private var generation: UInt64 = 0
     private var failed = false
     private var displayObserver: NSObjectProtocol?
-    private var effect: (left: Double, right: Double, blur: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool) = (0, 0, 32, 0.12, false, false, false)
+    private var selectedDisplayIDs: Set<UInt32>?
+    private var effect: (left: Double, right: Double, blur: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool, blockInput: Bool, blocksEntireDisplay: Bool) = (0, 0, 32, 0.12, false, false, false, false, false)
 
     init() {
+        refreshDisplays()
         displayObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.displaysChanged() }
         }
     }
 
-    func start() async throws {
+    func refreshDisplays() {
+        availableDisplays = NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            let id = number.uint32Value
+            let stableID: String
+            if let uuid = CGDisplayCreateUUIDFromDisplayID(id) {
+                stableID = CFUUIDCreateString(nil, uuid.takeRetainedValue()) as String
+            } else { stableID = "display-id-\(id)" }
+            return VeilDisplayInfo(id:id, stableID:stableID, name:screen.localizedName, frame:screen.frame, backingScale:screen.backingScaleFactor)
+        }
+    }
+
+    func start(selectedDisplayIDs: Set<UInt32>? = nil) async throws {
         stop()
+        self.selectedDisplayIDs = selectedDisplayIDs
+        refreshDisplays()
         // Do not reject an explicit start based only on the advisory CoreGraphics
         // preflight; ScreenCaptureKit performs its own OS authorization check.
         generation &+= 1
         let run = generation
         failed = false
         status = "Preparing display capture…"
-        let screens = NSScreen.screens
-        guard !screens.isEmpty else { throw VeilRenderError.unavailable("No active displays found.") }
-        let initialDisplays = try Self.identities(for: screens)
+        let allScreens = NSScreen.screens
+        let initialDisplays = try Self.identities(for: allScreens)
+        let screens = allScreens.filter { screen in
+            guard let selectedDisplayIDs else { return true }
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
+            return selectedDisplayIDs.contains(number.uint32Value)
+        }
+        guard !screens.isEmpty else { throw VeilRenderError.unavailable("Select at least one connected display before enabling AirVeil.") }
         let fresh = screens.map { DisplaySession(screen: $0) }
         sessions = fresh
         do {
             for session in fresh {
+                session.observeBlockedPointer { [weak self] in
+                    guard let self, self.generation == run, self.isRunning else { return }
+                    self.blockedPointerEventCount &+= 1
+                }
                 if let error = session.view.initializationError { throw VeilRenderError.unavailable(error) }
             }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -162,7 +260,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 session.view.onFirstFrame = { [weak self, weak session] in
                     guard let self, self.generation == run, !self.failed else { return }
                     session?.ready = true
-                    if self.sessions.allSatisfy({ $0.ready }) { self.isReady = true; self.status = "Live desktop capture" }
+                    if self.sessions.allSatisfy({ $0.ready }) { self.isReady = true; self.status = "Live desktop capture"; self.updateBlockers() }
                 }
                 try stream.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "app.airveil.capture.\(number.uint32Value)", qos: .userInteractive))
                 try await stream.startCapture()
@@ -174,6 +272,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             status = "Waiting for first desktop frames…"
             applyEffect()
             for session in fresh { session.window.orderFrontRegardless() }
+            updateBlockers()
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, self.generation == run, !self.isReady else { return }
@@ -198,6 +297,8 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             session.view.onFirstFrame = nil
             session.view.onRenderFailure = nil
             session.window.orderOut(nil)
+            session.hideBlockers()
+            for blocker in session.blockers { blocker.close() }
             session.view.releaseCapturedResources()
         }
         Task {
@@ -208,9 +309,14 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         }
     }
 
-    func update(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool = false) {
-        effect = (left, right, blurPoints, feather, opaque, shield, wholeScreen)
+    func update(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool = false, blockInput: Bool = false, blocksEntireDisplay: Bool = false) {
+        effect = (left, right, blurPoints, feather, opaque, shield, wholeScreen, blockInput, blocksEntireDisplay)
         applyEffect()
+        updateBlockers()
+    }
+    private func updateBlockers() {
+        let regions = VeilInputGeometry.intervals(left:effect.left, right:effect.right, feather:effect.feather, wholeScreen:effect.wholeScreen, blocksEntireDisplay:effect.blocksEntireDisplay, shield:effect.shield || failed)
+        for session in sessions { session.setBlockers(regions, active:isRunning && effect.blockInput && (isReady || effect.shield || failed)) }
     }
     private func applyEffect() {
         for session in sessions {
@@ -225,6 +331,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         status = "Covered — \(message)"
         // A solid AppKit backing remains effective even if the GPU caused this failure.
         for session in sessions { session.mailbox.invalidate(); session.coverWithoutGPU() }
+        updateBlockers()
         let stoppedSessions = sessions
         Task {
             for session in stoppedSessions {
@@ -233,13 +340,34 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         }
     }
     private func displaysChanged() {
+        refreshDisplays()
         guard isRunning else { return }
         captureFailed("Display arrangement changed. Pause and enable again to rebuild capture.", generation: generation)
-        // Cover newly attached/resized screens too, without trusting obsolete capture geometry.
-        for screen in NSScreen.screens where !sessions.contains(where: { $0.window.frame == screen.frame }) {
+        // Disconnected-screen windows can be moved by AppKit onto another screen.
+        // Replace fault covers using only the user's currently connected selection.
+        let old = sessions
+        sessions = []
+        for session in old {
+            session.window.orderOut(nil)
+            session.hideBlockers()
+            session.window.close()
+            for blocker in session.blockers { blocker.close() }
+        }
+        for screen in NSScreen.screens {
+            if let selectedDisplayIDs {
+                guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                      selectedDisplayIDs.contains(number.uint32Value) else { continue }
+            }
             let session = DisplaySession(screen: screen)
+            let run = generation
+            session.observeBlockedPointer { [weak self] in
+                guard let self, self.generation == run, self.isRunning else { return }
+                self.blockedPointerEventCount &+= 1
+            }
             session.coverWithoutGPU()
             sessions.append(session)
         }
+        updateBlockers()
+        if sessions.isEmpty { status = "Selected display disconnected — enable again after connecting it" }
     }
 }

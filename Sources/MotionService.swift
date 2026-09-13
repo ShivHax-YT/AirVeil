@@ -17,6 +17,10 @@ final class MotionService: NSObject, ObservableObject {
     /// Added delay relative to this source session's best observed offset;
     /// deliberately not called absolute source age before epoch verification.
     @Published private(set) var addedDeliveryLag = 0.0
+    /// Session count and one aggregate event description, never a pose history.
+    /// A latched status may be read many times; that does not mean many jumps.
+    @Published private(set) var referenceJumpCount = 0
+    @Published private(set) var lastReferenceJump = "No reference jump observed"
 
     private var manager: CMHeadphoneMotionManager?
     private var connectionDelegate: MotionConnectionDelegate?
@@ -198,6 +202,8 @@ final class MotionService: NSObject, ObservableObject {
 
     private func drainMotionMailbox(fromScheduledCallback: Bool = false) {
         guard let delivery = mailbox?.take(releaseNotification: fromScheduledCallback) else { return }
+        referenceJumpCount = delivery.referenceJumpCount
+        if let jump = delivery.lastReferenceJump { lastReferenceJump = jump.summary }
         if let error = delivery.error {
             handleStreamError(NSError(domain: "AirVeil.Motion", code: 2,
                                       userInfo: [NSLocalizedDescriptionKey: error]))
@@ -274,6 +280,8 @@ final class MotionService: NSObject, ObservableObject {
         latest = nil
         mailbox = nil
         addedDeliveryLag = 0
+        referenceJumpCount = 0
+        lastReferenceJump = "No reference jump observed"
         lastReceipt = nil
         sourceName = "No headphone sensor"
         sampleRate = 0
@@ -304,6 +312,26 @@ struct MotionDelivery {
     let stableSince: TimeInterval?
     let sampleRate: Double
     let addedLag: Double
+    let referenceJumpCount: Int
+    let lastReferenceJump: MotionJumpDiagnostic?
+}
+
+/// Evidence of an unexplained orientation step, not proof of an Apple reset.
+/// We cannot reconstruct the lost screen reference from this event alone.
+struct MotionJumpDiagnostic {
+    let stepRadians: Double
+    let thresholdRadians: Double
+    let sourceInterval: TimeInterval
+    let receiptInterval: TimeInterval
+    let previousSpeed: Double
+    let currentSpeed: Double
+
+    var summary: String {
+        String(format: "Attitude step %.1f°; limit %.1f°; sensor %.0f ms; receipt %.0f ms; rotation %.1f→%.1f°/s",
+               stepRadians * 180 / .pi, thresholdRadians * 180 / .pi,
+               sourceInterval * 1000, receiptInterval * 1000,
+               previousSpeed * 180 / .pi, currentSpeed * 180 / .pi)
+    }
 }
 
 /// Bounded acquisition/UI handoff. Every sensor sample is validated before
@@ -325,6 +353,8 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
     private var rateSamples = 0
     private var sampleRate = 0.0
     private var addedLag = 0.0
+    private var referenceJumpCount = 0
+    private var lastReferenceJump: MotionJumpDiagnostic?
 
     init(staleAfter: TimeInterval = 0.65) { self.staleAfter = staleAfter }
 
@@ -360,9 +390,20 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
             }
             if receiptGap >= staleAfter || sourceGap >= staleAfter {
                 fail("Motion resumed after a sensor gap — Set center")
-            } else if let distance = reading.quaternion.angularDistance(to: previous.quaternion),
-                      distance > max(0.35, reading.speed * sourceGap * 3 + 0.15) {
-                fail("Head reference jumped — hold still and Set center")
+            } else if let distance = reading.quaternion.angularDistance(to: previous.quaternion) {
+                // Using only the newest rotation speed misclassifies a real
+                // turn that stops between samples. Both bounding samples matter.
+                // This remains a conservative heuristic, not a reference-reset
+                // API or a drift guarantee. Never correct the reference here.
+                let threshold = max(0.35, max(previous.speed, reading.speed) * sourceGap * 3 + 0.15)
+                if distance > threshold {
+                    referenceJumpCount += 1
+                    lastReferenceJump = MotionJumpDiagnostic(stepRadians: distance,
+                        thresholdRadians: threshold, sourceInterval: sourceGap,
+                        receiptInterval: receiptGap, previousSpeed: previous.speed,
+                        currentSpeed: reading.speed)
+                    fail("Head reference jumped — face the screen and Set center")
+                }
             }
         }
         guard let lag = clock.addedLag(source: reading.timestamp, receipt: reading.receipt) else {
@@ -417,7 +458,8 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
         if releaseNotification { notificationPending = false }
         guard updatePending else { return nil }
         let delivery = MotionDelivery(reading: latest, continuityIssue: issue,
-            error: error, stableSince: stableSince, sampleRate: sampleRate, addedLag: addedLag)
+            error: error, stableSince: stableSince, sampleRate: sampleRate, addedLag: addedLag,
+            referenceJumpCount: referenceJumpCount, lastReferenceJump: lastReferenceJump)
         updatePending = false
         issue = nil
         latest = nil
