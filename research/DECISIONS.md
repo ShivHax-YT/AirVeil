@@ -10,7 +10,7 @@ App implementation starts after the four sensor and animation research reports h
 
 ## Product interaction
 
-Working title: AirVeil. A menu-bar utility with a native settings window. First-run actions are connect motion, calibrate while facing the screen, authorize screen capture, then enable the desktop effect. A clearly labeled local preview must work before screen recording is authorized. Settings include activation angle, full effect angle, blur strength, feather width, responsiveness, and invert direction. Pause and Quit remain accessible from the menu bar.
+Working title: AirVeil. A menu-bar utility with a native settings window. Motion connects automatically at launch and after wake. First-run actions are calibrate while facing the screen, authorize screen capture, then enable the desktop effect. A clearly labeled local preview must work before screen recording is authorized. Settings include activation angle, full effect angle, blur strength, feather width, responsiveness, and invert direction. Pause and Quit remain accessible from the menu bar.
 
 ## Privacy model
 
@@ -40,10 +40,18 @@ The two research reports use different proposed yaw sign conventions. Resolve th
 
 Use an original MPS Gaussian blur pipeline instead of copying macTilt's shader. Keep live desktop pixels flat and aligned. Only the obscuring amount and edge animate; the desktop does not need to fold or distort to achieve the requested behavior. A dark opaque cover remains available as a stronger obscuration style.
 
-Unexpected loss of calibrated motion while an enabled effect is active will show a full opaque fallback and an explicit tracking-loss status. Pause removes it immediately. Place overlays below status-menu controls and keep the settings window above them. Register a global pause shortcut through the public Carbon hotkey API, without an Accessibility permission dependency. On sleep/session resignation, hide overlays and discard captured frames; waking requires deliberate restart/recalibration.
+Unexpected loss of calibrated motion while an enabled effect is active will show a full opaque fallback and an explicit tracking-loss status. Pause removes it immediately. Place overlays below status-menu controls and keep the settings window above them. Register a global pause shortcut through the public Carbon hotkey API, without an Accessibility permission dependency. On sleep/session resignation, hide overlays and discard captured frames; waking resumes sensor detection automatically and requires deliberate recalibration/re-enabling of the desktop effect.
 
 ## Research gate completed
 
 All four research assignments were reviewed before application implementation began. The animation report selects independent left/right exponential responses and a cached MPS Gaussian level bank with variance interpolation. This produces continuous variable softness without temporal accumulation. Provisional defaults are onset 8 degrees, full effect 32 degrees, attack 70 ms, release 140 ms, feather 12% of display width. The positive-left convention above is authoritative.
 
 Render the synthetic preview through the same Metal compositor as the live desktop. Expose a clearly labeled simulation slider; synthetic preview is not sensor verification. Add opaque concealment and reduced-transparency support. Test alpha-zero neutral, alpha-one covered edges, source independence in opaque mode, mirrored masks, and finite/timing behavior before live acceptance.
+
+## Stable signing and full-display sweep
+
+Use a persistent self-signed certificate in a dedicated local keychain for development builds. Keep the default designated requirement bound to `com.shivhax.airveil` and the signing certificate; fail if that identity is absent. Never use an identifier-only requirement or fall back to ad hoc signing. Apple describes self-signed identities and stable designated requirements in [TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html) and [Code Signing Tasks](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html). No globally trusted root is needed in the verified local signing workflow. Certificate-chain lookup required temporary inclusion of the keychain in the existing user search list; the helper restores that list and locks the keychain after signing.
+
+Capture preflight is advisory, while an actual ScreenCaptureKit request determines access. Report authorization denial separately from rendering or display failures so those failures do not tell the user to grant permission again.
+
+Keep the same signed left/right transfer values in half and whole-screen modes. Half mode scales a fixed opposite-half mask. Whole-screen mode moves a feathered boundary from the opposite edge across the entire display. Independent left/right masks combine by alpha union during reversals, with exact clear and full-cover endpoints. The shader is shared by preview and desktop overlays.

@@ -63,7 +63,8 @@ enum VeilMath {
               onset >= 0, full > onset else { return .zero }
         let t = min(1, max(0, (abs(yawDegrees) - onset) / (full - onset)))
         let strength = t * t * (3 - 2*t)
-        if wholeScreen { return VeilStrength(left: strength, right: strength) }
+        // Both modes retain direction. The renderer uses the coverage choice to
+        // interpret each channel as half-screen strength or full-screen sweep progress.
         return yawDegrees > 0 ? VeilStrength(left: 0, right: strength)
                               : VeilStrength(left: strength, right: 0)
     }

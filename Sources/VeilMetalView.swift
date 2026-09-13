@@ -51,6 +51,7 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
     private var feather: Double = 0.12
     private var concealOpaque = false
     private var shield = false
+    private var wholeScreen = false
     private var didReportFailure = false
 
     convenience init(frame: NSRect) { self.init(frame: frame, device: MTLCreateSystemDefaultDevice()) }
@@ -119,20 +120,20 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         blurDirty = true; hasFrame = true; needsRender = true
     }
 
-    func setEffect(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool) {
+    func setEffect(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool = false) {
         func finite(_ value: Double, _ fallback: Double) -> Double { value.isFinite ? value : fallback }
         let nextLeft = min(1, max(0, finite(left, 0)))
         let nextRight = min(1, max(0, finite(right, 0)))
         let sigma = min(80, max(1, finite(blurPoints, 32)))
         let nextFeather = min(0.5, max(0.001, finite(feather, 0.12)))
         if self.left != nextLeft || self.right != nextRight || self.blurPoints != sigma ||
-            self.feather != nextFeather || concealOpaque != opaque || self.shield != shield {
+            self.feather != nextFeather || concealOpaque != opaque || self.shield != shield || self.wholeScreen != wholeScreen {
             needsRender = true
         }
         self.left = nextLeft; self.right = nextRight
         if self.blurPoints != sigma { self.blurPoints = sigma; blurDirty = true }
         self.feather = nextFeather
-        self.concealOpaque = opaque; self.shield = shield
+        self.concealOpaque = opaque; self.shield = shield; self.wholeScreen = wholeScreen
     }
 
     private func encode(to target: MTLTexture, command: MTLCommandBuffer) throws {
@@ -181,7 +182,7 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(source, index: 0)
         for i in 0..<3 { encoder.setFragmentTexture(levels[i], index: i + 1) }
-        var values: [Float] = [Float(left), Float(right), Float(feather), 0, concealOpaque ? 1 : 0, (shield || !hasFrame) ? 1 : 0, rendersBaseImage ? 1 : 0, 0]
+        var values: [Float] = [Float(left), Float(right), Float(feather), 0, concealOpaque ? 1 : 0, (shield || !hasFrame) ? 1 : 0, rendersBaseImage ? 1 : 0, wholeScreen ? 1 : 0]
         values.withUnsafeMutableBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()

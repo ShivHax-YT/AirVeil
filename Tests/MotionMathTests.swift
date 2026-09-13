@@ -48,10 +48,10 @@ struct MotionMathTests {
             check(VeilMath.target(yawDegrees: -angle) == VeilStrength(left: 1, right: 0), "Right saturates left \(angle)")
         }
         check(VeilMath.target(yawDegrees: 0, wholeScreen: true) == .zero, "Whole screen is clear at center")
-        check(VeilMath.target(yawDegrees: 20, wholeScreen: true) == VeilStrength(left: 0.5, right: 0.5), "Whole screen maps midpoint equally")
-        check(VeilMath.target(yawDegrees: -20, wholeScreen: true) == VeilStrength(left: 0.5, right: 0.5), "Whole screen is direction symmetric")
-        check(VeilMath.target(yawDegrees: 32, wholeScreen: true) == .full, "Whole screen saturates both sides")
-        check(VeilMath.target(yawDegrees: -50, wholeScreen: true) == .full, "Whole screen right turn saturates both sides")
+        check(VeilMath.target(yawDegrees: 20, wholeScreen: true) == VeilStrength(left: 0, right: 0.5), "Whole screen left turn drives right-to-left sweep")
+        check(VeilMath.target(yawDegrees: -20, wholeScreen: true) == VeilStrength(left: 0.5, right: 0), "Whole screen right turn drives left-to-right sweep")
+        check(VeilMath.target(yawDegrees: 32, wholeScreen: true) == VeilStrength(left: 0, right: 1), "Whole screen left turn completes directional sweep")
+        check(VeilMath.target(yawDegrees: -50, wholeScreen: true) == VeilStrength(left: 1, right: 0), "Whole screen right turn completes directional sweep")
         check(VeilMath.target(yawDegrees: .nan, wholeScreen: true) == .zero, "Whole screen rejects invalid input")
         var previous = 0.0
         for step in 0...1000 {

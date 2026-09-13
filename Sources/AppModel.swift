@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 import QuartzCore
+import ScreenCaptureKit
 
 @MainActor
 final class AppModel: NSObject, ObservableObject {
@@ -12,7 +13,7 @@ final class AppModel: NSObject, ObservableObject {
     @Published var starting = false
     @Published var calibrating = false
     private var calibrationTicket = 0
-    @Published var message = "Connect your AirPods to get started."
+    @Published var message = "AirPods are detected automatically. Face the display and set center."
     @Published var previewYaw = 0.0
     @Published var simulate = true
     @Published var strengths = VeilStrength(left: 0, right: 0)
@@ -25,6 +26,10 @@ final class AppModel: NSObject, ObservableObject {
     @Published var wholeScreen = false { didSet { persist() } }
     @Published var opaque = false { didSet { persist() } }
     @Published var permissionGranted = false
+    @Published private(set) var checkingAccess = false
+    private(set) var captureErrorDetails = ""
+    private var verifiedScreenAccess = false
+    private var accessTicket = 0
     private var clock: CADisplayLink?
     private var lastTime = 0.0
     private var generation = 0
@@ -49,7 +54,7 @@ final class AppModel: NSObject, ObservableObject {
         if enabled && !overlay.isReady { return "Waiting for live desktop frames" }
         let yaw = simulate && !enabled ? previewYaw : effectiveYaw
         if abs(yaw) <= onset { return "Centered · screen clear" }
-        if wholeScreen { return "Head turned · whole screen obscured" }
+        if wholeScreen { return yaw > 0 ? "Looking left · blur sweeps right to left" : "Looking right · blur sweeps left to right" }
         return yaw > 0 ? "Looking left · right side obscured" : "Looking right · left side obscured"
     }
     override init() {
@@ -69,7 +74,10 @@ final class AppModel: NSObject, ObservableObject {
             DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
         }.store(in: &subscriptions)
         overlay.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.objectWillChange.send(); self.stateChanged?()
+            }
         }.store(in: &subscriptions)
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
@@ -77,10 +85,16 @@ final class AppModel: NSObject, ObservableObject {
                 Task { @MainActor in self?.suspend() }
             })
         }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.startMotionAutomatically() }
+            })
+        }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                self?.message = "Display configuration changed. Pause, reconnect, and enable again to rebuild the effect."
+                self?.message = "Display configuration changed. Pause, set center, and enable again to rebuild the effect."
                 self?.motion.stop()
+                self?.motion.start()
                 self?.installClock()
             }
         })
@@ -115,10 +129,14 @@ final class AppModel: NSObject, ObservableObject {
         if abs(next.left-strengths.left) > 0.00001 || abs(next.right-strengths.right) > 0.00001 { strengths = next }
         if enabled {
             overlay.update(left: strengths.left,right: strengths.right,blurPoints: blurPoints,feather: feather,
-                           opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded)
+                           opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded,wholeScreen: wholeScreen)
         }
     }
-    func connectMotion() { calibrationTicket += 1; calibrating = false; motion.stop(); motion.start(); message = "Wear your AirPods, face the display, then choose Set center." }
+    func startMotionAutomatically() {
+        guard !motion.isRunning else { return }
+        motion.start()
+        message = "AirPods are detected automatically. Face the display, then choose Set center."
+    }
     func calibrate() {
         guard motion.isFresh else { message = "Wait for fresh AirPods motion before setting center."; return }
         calibrationTicket += 1
@@ -128,7 +146,7 @@ final class AppModel: NSObject, ObservableObject {
         Task {
             for _ in 0..<50 {
                 guard ticket == calibrationTicket else { return }
-                guard motion.isFresh else { calibrating = false; message = "Motion stopped. Reconnect and try Set center again."; return }
+                guard motion.isFresh else { calibrating = false; message = "Waiting for AirPods to resume. Set center when motion returns."; return }
                 if motion.canCalibrate {
                     motion.calibrate()
                     calibrating = false
@@ -148,19 +166,44 @@ final class AppModel: NSObject, ObservableObject {
         inverted = false; opaque = false; wholeScreen = false
         message = "Default settings restored."
     }
-    func refreshPermission() { permissionGranted = CGPreflightScreenCaptureAccess() }
+    // Preflight is advisory. ScreenCaptureKit remains the authority and still
+    // enforces macOS consent when an explicit access check or Enable is requested.
+    func refreshPermission() {
+        permissionGranted = overlay.isReady || verifiedScreenAccess || CGPreflightScreenCaptureAccess()
+    }
     func requestScreenPermission() {
-        permissionGranted = CGRequestScreenCaptureAccess()
-        if !permissionGranted {
-            message = "Allow AirVeil in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen AirVeil if macOS requests it."
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+        guard !checkingAccess else { return }
+        accessTicket += 1
+        let ticket = accessTicket
+        checkingAccess = true
+        message = "Checking screen access with macOS…"
+        Task {
+            defer { if ticket == accessTicket { checkingAccess = false } }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                guard ticket == accessTicket else { return }
+                guard !content.displays.isEmpty else { throw VeilRenderError.unavailable("No displays are available for capture.") }
+                verifiedScreenAccess = true; permissionGranted = true; captureErrorDetails = ""
+                message = "Screen access check passed. Set center and enable the effect to start live capture."
+            } catch {
+                guard ticket == accessTicket else { return }
+                let detail = error as NSError
+                let denied = detail.domain == SCStreamErrorDomain && detail.code == SCStreamError.Code.userDeclined.rawValue
+                if denied { verifiedScreenAccess = false; permissionGranted = false }
+                captureErrorDetails = "\(detail.domain) (\(detail.code)): \(detail.localizedDescription)"
+                message = "Screen access could not be verified: \(detail.localizedDescription)"
+                if denied {
+                    message += " Allow AirVeil in Screen & System Audio Recording, then reopen if requested."
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+                }
+            }
         }
     }
     func enable() {
         guard !enabled && !starting else { return }
-        guard motion.isFresh && motion.isCalibrated else { message = "Connect AirPods and set your center before enabling the desktop effect."; return }
+        guard motion.isFresh && motion.isCalibrated else { message = "Wear your AirPods and set your center before enabling the desktop effect."; return }
         refreshPermission()
-        guard permissionGranted else { requestScreenPermission(); return }
+        accessTicket += 1; checkingAccess = false
         starting = true; generation += 1
         let ticket = generation
         Task {
@@ -168,17 +211,24 @@ final class AppModel: NSObject, ObservableObject {
                 try await overlay.start()
                 guard generation == ticket else { return }
                 starting = false; enabled = true; simulate = false
+                verifiedScreenAccess = true; permissionGranted = true; captureErrorDetails = ""
                 message = "Head tracking is active. " + pauseHint
                 stateChanged?()
             } catch {
                 guard generation == ticket else { return }
                 starting = false; enabled = false; overlay.stop()
+                let detail = error as NSError
+                captureErrorDetails = "\(detail.domain) (\(detail.code)): \(detail.localizedDescription)"
+                if detail.domain == SCStreamErrorDomain && detail.code == SCStreamError.Code.userDeclined.rawValue {
+                    verifiedScreenAccess = false; permissionGranted = false
+                }
                 message = "Could not start desktop capture: \(error.localizedDescription)"
                 stateChanged?()
             }
         }
     }
     func pause() {
+        accessTicket += 1; checkingAccess = false
         calibrationTicket += 1; calibrating = false
         generation += 1; enabled = false; starting = false; overlay.stop()
         strengths = VeilStrength(left: 0,right: 0)
@@ -187,7 +237,7 @@ final class AppModel: NSObject, ObservableObject {
     }
     private func suspend() {
         pause(); motion.stop()
-        message = "Paused for sleep or session change. Reconnect and set center to resume."
+        message = "Paused for sleep or session change. AirPods detection resumes automatically; set center to resume the effect."
     }
     func shutdown() { pause(); motion.stop(); clock?.invalidate() }
 }

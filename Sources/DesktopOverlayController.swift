@@ -79,7 +79,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     private var generation: UInt64 = 0
     private var failed = false
     private var displayObserver: NSObjectProtocol?
-    private var effect: (left: Double, right: Double, blur: Double, feather: Double, opaque: Bool, shield: Bool) = (0, 0, 32, 0.12, false, false)
+    private var effect: (left: Double, right: Double, blur: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool) = (0, 0, 32, 0.12, false, false, false)
 
     init() {
         displayObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -87,14 +87,10 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         }
     }
 
-    func requestPermission() -> Bool { CGRequestScreenCaptureAccess() }
-
     func start() async throws {
         stop()
-        guard CGPreflightScreenCaptureAccess() else {
-            status = "Screen Recording permission is required"
-            throw VeilRenderError.unavailable(status)
-        }
+        // Do not reject an explicit start based only on the advisory CoreGraphics
+        // preflight; ScreenCaptureKit performs its own OS authorization check.
         generation &+= 1
         let run = generation
         failed = false
@@ -187,13 +183,13 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         }
     }
 
-    func update(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool) {
-        effect = (left, right, blurPoints, feather, opaque, shield)
+    func update(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool = false) {
+        effect = (left, right, blurPoints, feather, opaque, shield, wholeScreen)
         applyEffect()
     }
     private func applyEffect() {
         for session in sessions {
-            session.view.setEffect(left: effect.left, right: effect.right, blurPoints: effect.blur, feather: effect.feather, opaque: effect.opaque, shield: effect.shield || failed)
+            session.view.setEffect(left: effect.left, right: effect.right, blurPoints: effect.blur, feather: effect.feather, opaque: effect.opaque, shield: effect.shield || failed, wholeScreen: effect.wholeScreen)
         }
     }
     private func captureFailed(_ message: String, generation run: UInt64) {

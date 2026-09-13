@@ -12,41 +12,46 @@ AirVeil is a native macOS menu-bar app that uses AirPods head motion to progress
 ## Build and run
 
 ```sh
+# Once per Mac, before the first build:
+python3 scripts/setup-signing.py
 ./scripts/install.sh
 ```
 
-This builds an app for the current Mac's architecture, signs it ad hoc, installs it at `/Applications/AirVeil.app`, and opens settings. An existing AirVeil install is retained in the ignored build directory. The build script prefers the installed macOS 26.5 SDK to avoid a missing SwiftUI macro plugin in this Mac's default SDK; set `AIRVEIL_SDK` to use another complete SDK.
+This builds an app for the current Mac's architecture, signs it with a persistent local development identity, installs it at `/Applications/AirVeil.app`, and opens settings. An existing AirVeil install is retained in the ignored build directory. The build script prefers the installed macOS 26.5 SDK to avoid a missing SwiftUI macro plugin in this Mac's default SDK; set `AIRVEIL_SDK` to use another complete SDK.
 
 To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVeil.app` to return to settings later.
 
 ## Setup
 
 1. Connect and wear the AirPods on this Mac.
-2. Choose **Connect AirPods** and allow Motion access when requested.
+2. AirVeil detects connected, worn AirPods automatically. Allow Motion access when requested.
 3. Face the center of the display and hold still briefly. Choose **Set center**.
 4. Confirm in the preview that a physical left turn obscures the right side. Use **Invert direction** if needed.
-5. Choose **Allow screen capture** and enable AirVeil in the macOS privacy settings. Reopen the app if macOS requests it. Ad hoc development rebuilds can require renewed permission approval.
+5. Choose **Allow screen capture** and enable AirVeil in the macOS privacy settings. Reopen the app if macOS requests it. Subsequent builds use the same signing identity to preserve this approval.
 6. Choose **Enable desktop effect**.
 
 **Pause & Clear Screen** in the menu bar immediately removes all overlays. The app also registers **Control–Option–Command–P** as a global pause shortcut and reports when registration fails. Quitting removes the effect.
 
 The preview slider uses a synthetic sample desktop and requires no screen capture. Its simulation is separate from live sensor verification.
 
-## Permission recovery after a development rebuild
+## Stable permissions across updates
 
-If AirVeil says capture is unavailable even though its switch is on, quit and reopen AirVeil first. If it still reports unavailable, switch **AirVeil** off and back on in **System Settings → Privacy & Security → Screen & System Audio Recording**, and use **Quit & Reopen** if macOS offers it. This local build is signed ad hoc; its designated requirement includes its binary hash, so an updated executable can need renewed approval. No permission database reset or system security changes are needed for this recovery attempt.
+Builds reuse one certificate and private key in a dedicated keychain under `~/Library/Application Support/AirVeil/Signing`, outside this repository. The keychain password is a random value stored in that private directory for local build automation. Do not share this directory or delete it between builds. The build fails if its identity is missing; it never silently falls back to ad hoc signing. The signing helper temporarily includes this keychain in the user search list, restores the original list, and locks it afterward. It does not add a trusted root or change system trust settings.
+
+Migrating from an older ad hoc build requires one new macOS screen-capture approval for the persistent identity. The app checks actual ScreenCaptureKit access; the preflight indicator alone no longer prevents capture. macOS still controls consent and may require it again after revocation, an identity replacement, or OS policy changes. This local certificate is for development on this Mac, not a notarized public release.
 
 ## Controls and behavior
 
-- **Directional half / Whole screen** selects opposite-side blur or blur across the entire display.
+- **Directional half / Whole-screen sweep** selects opposite-half blur or a moving blur edge across the full display. Turning left starts at the right edge and sweeps left; turning right mirrors it. At the full-effect angle, the entire display is blurred.
 - **Reset defaults** restores all effect settings without changing permissions or calibration.
 - Default onset: 8 degrees; full effect: 32 degrees.
 - Adjustable blur, edge feather, and response time.
 - **Opaque cover** removes source color at full strength for stronger obscuration.
+- AirPods motion starts automatically at launch, reconnects automatically, and retries interruptions with a bounded delay.
 - Calibration is deliberate; holding a turned pose never silently resets center.
 - Sensor gaps, earbud source changes, and detected reference jumps invalidate calibration.
 - Unexpected motion/capture failure while enabled shows an opaque cover. Pause remains available from the menu bar and the registered shortcut.
-- Sleep or session resignation pauses the effect and discards captured frames. Reconnect and recalibrate to resume.
+- Sleep or session resignation pauses the effect and discards captured frames. AirPods detection resumes automatically after wake; set center and enable to resume.
 - Display reconfiguration requires rebuilding capture with a deliberate pause/re-enable.
 
 ## Privacy and platform limits

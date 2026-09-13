@@ -21,7 +21,19 @@ fragment float4 veilFragment(RasterVertex v [[stage_in]],
     if (u.options.y > 0.5) return float4(concealment, 1);
     float w = max(u.effect.z, 0.001);
     float rightMask = smoothstep(0.5-w*0.5, 0.5+w*0.5, v.uv.x);
-    float coverage = clamp(mix(u.effect.x, u.effect.y, rightMask), 0.0, 1.0);
+    float coverage;
+    if (u.options.w > 0.5) {
+        // The feather travels from beyond one edge to beyond the other. This
+        // yields exactly clear/full endpoints without snapping edge opacity.
+        float rightBoundary = 1.0 + w*0.5 - (1.0+w)*u.effect.y;
+        float leftBoundary = 1.0 + w*0.5 - (1.0+w)*u.effect.x;
+        float fromRight = smoothstep(rightBoundary-w*0.5, rightBoundary+w*0.5, v.uv.x);
+        float fromLeft = smoothstep(leftBoundary-w*0.5, leftBoundary+w*0.5, 1.0-v.uv.x);
+        // Independently smoothed channels overlap continuously on reversal.
+        coverage = 1.0 - (1.0-fromRight)*(1.0-fromLeft);
+    } else {
+        coverage = clamp(mix(u.effect.x, u.effect.y, rightMask), 0.0, 1.0);
+    }
     bool base = u.options.z > 0.5;
     float3 original = sharp.sample(linearClamp, v.uv).rgb;
     if (coverage <= 0.000001) return base ? float4(original, 1) : float4(0);

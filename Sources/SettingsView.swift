@@ -7,6 +7,7 @@ struct VeilPreview: NSViewRepresentable {
     var blur: Double
     var feather: Double
     var opaque: Bool
+    var wholeScreen: Bool
     var shield: Bool
     func makeNSView(context: Context) -> VeilMetalView {
         let view = VeilMetalView(frame: NSRect(x:0,y:0,width:660,height:280))
@@ -15,7 +16,7 @@ struct VeilPreview: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: VeilMetalView, context: Context) {
-        view.setEffect(left:left,right:right,blurPoints:blur,feather:feather,opaque:opaque,shield:shield)
+        view.setEffect(left:left,right:right,blurPoints:blur,feather:feather,opaque:opaque,shield:shield,wholeScreen:wholeScreen)
     }
 }
 
@@ -50,7 +51,7 @@ struct SettingsView: View {
                     }
                     VeilPreview(left:model.strengths.left,right:model.strengths.right,blur:model.blurPoints,
                                 feather:model.feather,opaque:model.opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
-                                shield:model.shielded || (model.enabled && !model.overlay.isReady))
+                                wholeScreen:model.wholeScreen,shield:model.shielded || (model.enabled && !model.overlay.isReady))
                         .frame(height:280).clipShape(RoundedRectangle(cornerRadius:14))
                         .overlay(RoundedRectangle(cornerRadius:14).stroke(.primary.opacity(0.08)))
                         .accessibilityLabel("Directional blur preview. " + model.direction)
@@ -77,8 +78,8 @@ struct SettingsView: View {
                     VStack(alignment:.leading,spacing:10) {
                         Label("Head tracking",systemImage:"airpodspro").font(.headline)
                         Text(model.motion.status).font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
+                        Text("Detected automatically when worn").font(.caption2).foregroundStyle(.secondary)
                         HStack {
-                            Button(model.motion.isRunning ? "Reconnect" : "Connect AirPods") { model.connectMotion() }
                             Button(model.calibrating ? "Hold still…" : "Set center") { model.calibrate() }.disabled(!model.motion.isFresh || model.calibrating)
                         }.controlSize(.large)
                         if model.motion.isFresh {
@@ -92,9 +93,9 @@ struct SettingsView: View {
                         Text(model.permissionGranted ? "Screen capture allowed. Frames stay on this Mac." : "Allow screen capture for live blur. Preview needs no permission.")
                             .font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
                         HStack {
-                            Button(model.permissionGranted ? "Check access" : "Allow screen capture") {
-                                if model.permissionGranted { model.refreshPermission() } else { model.requestScreenPermission() }
-                            }.controlSize(.large)
+                            Button(model.checkingAccess ? "Checking…" : (model.permissionGranted ? "Check access" : "Allow screen capture")) {
+                                model.requestScreenPermission()
+                            }.controlSize(.large).disabled(model.checkingAccess)
                         }
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                     }.frame(maxWidth:.infinity,alignment:.leading)
@@ -108,7 +109,7 @@ struct SettingsView: View {
                     }
                     Picker("Screen coverage",selection:$model.wholeScreen) {
                         Text("Directional half").tag(false)
-                        Text("Whole screen").tag(true)
+                        Text("Whole-screen sweep").tag(true)
                     }.pickerStyle(.segmented).accessibilityLabel("Screen coverage")
                     setting("Starts blurring",value:$model.onset,range:0...25,unit:"°")
                     setting("Fully obscured",value:$model.fullAngle,range:26...70,unit:"°")
@@ -120,7 +121,7 @@ struct SettingsView: View {
                     DisclosureGroup("Fine-tune the animation",isExpanded:$advanced) {
                         VStack(spacing:14) {
                             setting("Blur strength",value:$model.blurPoints,range:8...64,unit:" pt")
-                            setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%").disabled(model.wholeScreen)
+                            setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%")
                             setting("Response",value:Binding(get:{model.response*1000},set:{model.response=$0/1000}),range:25...200,unit:" ms")
                         }.padding(.top,14)
                     }.font(.subheadline)

@@ -34,6 +34,7 @@ final class MotionService: NSObject, ObservableObject {
     private var rateStart: TimeInterval?
     private var rateSamples = 0
     private var streamRequested = false
+    private var streamStartedAt: TimeInterval?
     private var nextRetryTime: TimeInterval = 0
     private var errorRetryCount = 0
     private var sourceClock = VeilSampleClock()
@@ -118,18 +119,20 @@ final class MotionService: NSObject, ObservableObject {
         if connected {
             // A connect callback may follow the first valid sample at startup.
             // Only restart when no stream is already requested.
+            errorRetryCount = 0
+            nextRetryTime = 0
             beginStreamIfAvailable()
         } else {
             streamGeneration &+= 1
             manager?.stopDeviceMotionUpdates()
             streamRequested = false
             resetSamples()
-            status = "AirPods disconnected — reconnect and Set center"
+            status = "AirPods disconnected — waiting to reconnect automatically"
         }
     }
 
     private func beginStreamIfAvailable() {
-        guard isRunning, let manager, !streamRequested, errorRetryCount <= 3,
+        guard isRunning, let manager, !streamRequested,
               ProcessInfo.processInfo.systemUptime >= nextRetryTime else { return }
         switch CMHeadphoneMotionManager.authorizationStatus() {
         case .denied:
@@ -145,6 +148,7 @@ final class MotionService: NSObject, ObservableObject {
         }
         guard manager.isDeviceMotionAvailable else { return }
         streamRequested = true
+        streamStartedAt = ProcessInfo.processInfo.systemUptime
         streamGeneration &+= 1
         let run = generation, stream = streamGeneration
         status = "Waiting for AirPods motion and permission"
@@ -165,15 +169,16 @@ final class MotionService: NSObject, ObservableObject {
 
     private func handleStreamError(_ error: Error) {
         // A terminal Core Motion error may not be followed by a disconnect.
-        // Retire this callback generation before stopping, then allow a bounded
-        // retry. Denied/restricted authorization is checked before every start.
+        // Retire this callback generation before stopping, then retry with a
+        // bounded delay. Denied/restricted access is checked before each start.
         streamGeneration &+= 1
         manager?.stopDeviceMotionUpdates()
         streamRequested = false
-        errorRetryCount += 1
-        nextRetryTime = ProcessInfo.processInfo.systemUptime + 2
+        errorRetryCount = min(errorRetryCount + 1, 5)
+        let retryDelay = min(30.0, pow(2.0, Double(errorRetryCount)))
+        nextRetryTime = ProcessInfo.processInfo.systemUptime + retryDelay
         resetSamples()
-        let recovery = errorRetryCount <= 3 ? "Retrying in 2 seconds; Set center after recovery" : "Choose Reconnect to retry"
+        let recovery = "Retrying automatically in \(Int(retryDelay)) seconds"
         status = "Motion error: \(error.localizedDescription). \(recovery)"
     }
 
@@ -189,7 +194,7 @@ final class MotionService: NSObject, ObservableObject {
             return
         }
         if let previousTimestamp, sample.timestamp <= previousTimestamp {
-            invalidateCalibration("Motion clock changed — Reconnect if it persists, then Set center")
+            invalidateCalibration("Motion clock changed — waiting for recovery; then Set center")
             isFresh = false
             // Drop this sample and reset ordering so a restarted source clock can
             // recover, while refusing to use the out-of-order pose as direction.
@@ -206,7 +211,7 @@ final class MotionService: NSObject, ObservableObject {
             sourceClock.reset()
         }
         guard let lag = sourceClock.addedLag(source: sample.timestamp, receipt: now) else {
-            invalidateCalibration("Invalid motion delivery timing — Reconnect")
+            invalidateCalibration("Invalid motion delivery timing — waiting for recovery")
             isFresh = false
             return
         }
@@ -243,6 +248,7 @@ final class MotionService: NSObject, ObservableObject {
         }
         updateStability(q, speed: speed, now: now)
         updateRate(now)
+        errorRetryCount = 0
         isFresh = true
         if let reference, let relative = attitude.copy() as? CMAttitude {
             relative.multiply(byInverseOf: reference)
@@ -279,9 +285,15 @@ final class MotionService: NSObject, ObservableObject {
 
     private func checkFreshness() {
         if !streamRequested { beginStreamIfAvailable() }
+        let now = ProcessInfo.processInfo.systemUptime
+        if streamRequested, let receipt = lastReceipt ?? streamStartedAt, now - receipt > 5 {
+            handleStreamError(NSError(domain: "AirVeil.Motion", code: 1,
+                                      userInfo: [NSLocalizedDescriptionKey: "No motion received"]))
+            return
+        }
         guard let lastReceipt else { return }
         if ProcessInfo.processInfo.systemUptime - lastReceipt > staleAfter {
-            if isFresh { invalidateCalibration("Motion stalled — reconnect or Set center after recovery") }
+            if isFresh { invalidateCalibration("Motion stalled — waiting for recovery; then Set center") }
             isFresh = false
             sampleRate = 0
             rateStart = nil

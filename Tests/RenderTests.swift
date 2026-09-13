@@ -66,6 +66,51 @@ import UniformTypeIdentifiers
             try save(view.renderOffscreen(width: width, height: height), to: output.appendingPathComponent("right-blur-\(scale)x.png"))
             view.setEffect(left: 1, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
             try save(view.renderOffscreen(width: width, height: height), to: output.appendingPathComponent("left-blur-\(scale)x.png"))
+            view.rendersBaseImage = false
+            view.setEffect(left: 0, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+            let wholeNeutral = bytes(try view.renderOffscreen(width: width, height: height))
+            precondition(wholeNeutral.allSatisfy { $0 == 0 },
+                         "Whole-screen neutral must be entirely transparent")
+            for progress in [0.25, 0.5, 0.75] {
+                view.setEffect(left: 0, right: progress, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+                let sweptRight = bytes(try view.renderOffscreen(width: width, height: height))
+                let boundary = 1.06 - 1.12 * progress
+                var previousAlpha: UInt8 = 0
+                for x in 0..<width {
+                    let alpha = pixel(sweptRight,width,x,height/2)[3]
+                    let normalized = (Double(x) + 0.5) / Double(width)
+                    precondition(alpha >= previousAlpha, "Whole-screen right sweep must be spatially monotonic")
+                    if normalized < boundary - 0.06 { precondition(alpha == 0, "Ahead of sweep must stay clear") }
+                    if normalized > boundary + 0.06 { precondition(alpha == 255, "Behind sweep must reach full blur coverage") }
+                    previousAlpha = alpha
+                }
+                view.setEffect(left: progress, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+                let sweptLeft = bytes(try view.renderOffscreen(width: width, height: height))
+                for x in 0..<width {
+                    precondition(abs(Int(pixel(sweptRight,width,x,height/2)[3])-Int(pixel(sweptLeft,width,width-1-x,height/2)[3])) <= 1,
+                                 "Whole-screen sweeps must mirror at every progress")
+                }
+                view.rendersBaseImage = true
+                view.setEffect(left: 0, right: progress, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+                try save(view.renderOffscreen(width: width, height: height), to: output.appendingPathComponent("whole-right-\(Int(progress*100))-\(scale)x.png"))
+                view.rendersBaseImage = false
+            }
+            for leftward in [false, true] {
+                view.setEffect(left: leftward ? 1 : 0, right: leftward ? 0 : 1, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+                let full = bytes(try view.renderOffscreen(width: width, height: height))
+                for offset in stride(from: 3, to: full.count, by: 4) {
+                    precondition(full[offset] == 255, "Completed whole-screen sweep must cover every pixel, including both edges")
+                }
+            }
+            view.setEffect(left: 0.3, right: 0.7, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+            let reversalA = bytes(try view.renderOffscreen(width: width, height: height))
+            view.setEffect(left: 0.301, right: 0.699, blurPoints: 32, feather: 0.12, opaque: false, shield: false, wholeScreen: true)
+            let reversalB = bytes(try view.renderOffscreen(width: width, height: height))
+            for offset in stride(from: 3, to: reversalA.count, by: 4) {
+                precondition(abs(Int(reversalA[offset])-Int(reversalB[offset])) <= 5,
+                             "Small reversal progress must never teleport the sweep")
+            }
+            print("PASS \(scale)x whole-screen: directional quarter/half/three-quarter sweep, mirror, clear/full endpoints, continuous reversal")
             print("PASS \(scale)x: transparent neutral, mirrored/monotonic feather, premultiplied alpha, opaque independence, full shield, image orientation")
         }
         print("Synthetic render artifacts: \(output.path)")

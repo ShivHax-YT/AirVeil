@@ -4,6 +4,13 @@ TASK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TASK_SDK="${AIRVEIL_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk}"
 if [ ! -d "$TASK_SDK" ]; then TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
 TASK_ARCH="$(uname -m)"
+TASK_SIGNING="$HOME/Library/Application Support/AirVeil/Signing"
+if [ ! -f "$TASK_SIGNING/identity-sha1" ]; then
+  echo 'Set up a persistent identity first: python3 scripts/setup-signing.py'
+  exit 1
+fi
+TASK_IDENTITY="$(cat "$TASK_SIGNING/identity-sha1")"
+if [[ ! "$TASK_IDENTITY" =~ ^[A-Fa-f0-9]{40}$ ]]; then echo 'Invalid signing identity fingerprint'; exit 1; fi
 TASK_APP="$TASK_ROOT/build/AirVeil.app"
 mkdir -p "$TASK_APP/Contents/MacOS" "$TASK_APP/Contents/Resources"
 swiftc -sdk "$TASK_SDK" -target "$TASK_ARCH-apple-macos14.0" -swift-version 5 -O \
@@ -22,6 +29,6 @@ for TASK_SIZE in 16 32 128 256 512; do
   sips -z "$TASK_DOUBLE" "$TASK_DOUBLE" "$TASK_ROOT/build/AppIcon.png" --out "$TASK_ICONSET/icon_${TASK_SIZE}x${TASK_SIZE}@2x.png" >/dev/null
 done
 iconutil -c icns "$TASK_ICONSET" -o "$TASK_APP/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$TASK_APP"
+swift -suppress-warnings -sdk "$TASK_SDK" "$TASK_ROOT/scripts/signing-keychain.swift" sign "$TASK_SIGNING" "$TASK_APP"
 codesign --verify --strict "$TASK_APP"
 echo "Built $TASK_APP"

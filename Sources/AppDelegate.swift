@@ -26,12 +26,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
         let menu = NSMenu(); menu.delegate = self; item.menu = menu
         refreshStatus(); configureAppMenu(); installHotKey(); showSettings()
+        model.startMotionAutomatically()
         if let index = CommandLine.arguments.firstIndex(of:"--diagnostics"),CommandLine.arguments.count > index+1 {
             let path = CommandLine.arguments[index+1]
             diagnosticTimer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
                 Task { @MainActor in self?.writeDiagnostics(path) }
             }
-            model.connectMotion()
         }
     }
     private func configureAppMenu() {
@@ -91,11 +91,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else { model.pauseShortcutAvailable = true }
     }
     private func writeDiagnostics(_ path:String) {
-        let snapshot:[String:Any] = ["timestamp":Date().timeIntervalSince1970,"motionStatus":model.motion.status,
+        let snapshot:[String:Any] = ["timestamp":Date().timeIntervalSince1970,
+            "build":Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",
+            "wholeScreen":model.wholeScreen,"leftStrength":model.strengths.left,"rightStrength":model.strengths.right,
+            "captureReady":model.overlay.isReady,"motionStatus":model.motion.status,
             "motionFresh":model.motion.isFresh,"calibrated":model.motion.isCalibrated,"motionRunning":model.motion.isRunning,
             "yawDegrees":model.effectiveYaw,"addedDeliveryLag":model.motion.addedDeliveryLag,"sampleRate":model.motion.sampleRate,"source":model.motion.sourceName,
             "captureStatus":model.overlay.status,"captureRunning":model.overlay.isRunning,"enabled":model.enabled,
-            "shielded":model.shielded,"screenPermission":model.permissionGranted,"globalPauseRegistered":hotKey != nil]
+            "shielded":model.shielded,"screenPermission":model.permissionGranted,"captureErrorDetails":model.captureErrorDetails,"globalPauseRegistered":hotKey != nil]
         if let data=try? JSONSerialization.data(withJSONObject:snapshot,options:[.prettyPrinted,.sortedKeys]) {
             try? data.write(to:URL(fileURLWithPath:path),options:.atomic)
         }
