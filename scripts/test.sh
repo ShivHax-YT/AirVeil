@@ -24,9 +24,13 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
 "$TASK_ROOT/build/tests/camera-service"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" \
-  "$TASK_ROOT/Sources/CameraHeadingCoordinator.swift" "$TASK_ROOT/Tests/CameraHeadingCoordinatorTests.swift" \
+  "$TASK_ROOT/Sources/NotchCoachState.swift" "$TASK_ROOT/Sources/CameraHeadingCoordinator.swift" "$TASK_ROOT/Tests/CameraHeadingCoordinatorTests.swift" \
   -o "$TASK_ROOT/build/tests/camera-coordinator"
 "$TASK_ROOT/build/tests/camera-coordinator"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/NotchCoachState.swift" \
+  "$TASK_ROOT/Tests/NotchCoachStateTests.swift" -o "$TASK_ROOT/build/tests/notch-coach-state"
+"$TASK_ROOT/build/tests/notch-coach-state"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/TrackingPresentation.swift" \
   "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \

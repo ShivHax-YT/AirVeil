@@ -3,6 +3,7 @@ import Combine
 import AVFoundation
 import Vision
 import ImageIO
+import CoreImage
 
 enum CameraAuthorization: String, Sendable { case notDetermined, authorized, denied, restricted }
 
@@ -27,6 +28,7 @@ struct CameraAnchorFrame: Sendable {
     let captureHostTime: TimeInterval?
     let receiptHostTime: TimeInterval
     let processedHostTime: TimeInterval
+    var luminance: Double? = nil
 }
 
 enum CameraAnchorError: LocalizedError {
@@ -46,6 +48,7 @@ enum CameraAnchorError: LocalizedError {
     var authorization: CameraAuthorization { get }
     func requestPermission() async -> Bool
     func start(onFrame: @escaping @MainActor (CameraAnchorFrame) -> Void,
+               onPreview: @escaping @MainActor (CGImage) -> Void,
                onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration
     func stop()
 }
@@ -57,6 +60,8 @@ enum CameraAnchorError: LocalizedError {
     @Published private(set) var isRunning = false
     @Published private(set) var authorization: CameraAuthorization
     @Published private(set) var configuration: CameraAnchorConfiguration?
+    /// Unmirrored ephemeral thumbnail; the notch mirrors it for the wearer.
+    @Published private(set) var previewImage: CGImage?
     var deviceID: String? { configuration?.cameraID }
     private let capture: any CameraAnchorCapturing
     private var generation: UInt64 = 0
@@ -101,6 +106,9 @@ enum CameraAnchorError: LocalizedError {
             let result = try await capture.start(onFrame: { [weak self] frame in
                 guard let self, self.generation == run, self.isRunning else { return }
                 onFrame(frame)
+            }, onPreview: { [weak self] image in
+                guard let self, self.generation == run, self.isRunning else { return }
+                self.previewImage = image
             }, onFailure: { [weak self] detail in
                 guard let self, self.generation == run else { return }
                 self.stop()
@@ -119,6 +127,7 @@ enum CameraAnchorError: LocalizedError {
         generation &+= 1
         timeout?.cancel(); timeout = nil
         isRunning = false
+        previewImage = nil
         capture.stop()
         status = "Camera is off."
     }
@@ -140,10 +149,13 @@ enum CameraAnchorError: LocalizedError {
         return await AVCaptureDevice.requestAccess(for: .video)
     }
     func start(onFrame: @escaping @MainActor (CameraAnchorFrame) -> Void,
+               onPreview: @escaping @MainActor (CGImage) -> Void,
                onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration {
         stop()
         let worker = CameraAnchorWorker(onFrame: { frame in
             Task { @MainActor in onFrame(frame) }
+        }, onPreview: { image in
+            Task { @MainActor in onPreview(image) }
         }, onFailure: { detail in
             Task { @MainActor in onFailure(detail) }
         })
@@ -163,12 +175,16 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
     private var device: AVCaptureDevice?
     private var configuration: CameraAnchorConfiguration?
     private var lastAnalysis: TimeInterval = -.infinity
+    private var lastPreview: TimeInterval = -.infinity
+    private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private var observers: [NSObjectProtocol] = []
     private let onFrame: @Sendable (CameraAnchorFrame) -> Void
+    private let onPreview: @Sendable (CGImage) -> Void
     private let onFailure: @Sendable (String) -> Void
     init(onFrame: @escaping @Sendable (CameraAnchorFrame) -> Void,
+         onPreview: @escaping @Sendable (CGImage) -> Void,
          onFailure: @escaping @Sendable (String) -> Void) {
-        self.onFrame = onFrame; self.onFailure = onFailure
+        self.onFrame = onFrame; self.onPreview = onPreview; self.onFailure = onFailure
     }
     private var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
     private static func hostTime() -> TimeInterval { CMClockGetTime(CMClockGetHostTimeClock()).seconds }
@@ -198,6 +214,9 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
             guard session.canAddInput(input) else { throw CameraAnchorError.unsupportedConfiguration }
             session.addInput(input)
             let output = AVCaptureVideoDataOutput()
+            let pixelFormat = output.availableVideoPixelFormatTypes.contains(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+                ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
             output.alwaysDiscardsLateVideoFrames = true
             output.setSampleBufferDelegate(self, queue: queue)
             guard session.canAddOutput(output) else { throw CameraAnchorError.unsupportedConfiguration }
@@ -210,15 +229,15 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
         try device.lockForConfiguration()
         let ranges = device.activeFormat.videoSupportedFrameRateRanges
         let usableRanges = ranges.filter { $0.minFrameRate.isFinite && $0.maxFrameRate.isFinite && $0.minFrameRate > 0 }
-        func requestedRate(_ range: AVFrameRateRange) -> Double { min(range.maxFrameRate, max(range.minFrameRate, 3)) }
-        guard let range = usableRanges.min(by: { abs(requestedRate($0) - 3) < abs(requestedRate($1) - 3) }) else {
+        func requestedRate(_ range: AVFrameRateRange) -> Double { min(range.maxFrameRate, max(range.minFrameRate, 15)) }
+        guard let range = usableRanges.min(by: { abs(requestedRate($0) - 15) < abs(requestedRate($1) - 15) }) else {
             device.unlockForConfiguration(); throw CameraAnchorError.unsupportedConfiguration
         }
         let fps = requestedRate(range)
         // Use the device's exact endpoint durations. Rounding 1/30 upward or
         // downward can otherwise accidentally request an unsupported endpoint.
         let duration = fps == range.minFrameRate ? range.maxFrameDuration :
-            (fps == range.maxFrameRate ? range.minFrameDuration : CMTime(value: 1, timescale: 3))
+            (fps == range.maxFrameRate ? range.minFrameDuration : CMTime(value: 1, timescale: 15))
         device.activeVideoMinFrameDuration = duration
         device.activeVideoMaxFrameDuration = duration
         device.unlockForConfiguration()
@@ -253,19 +272,31 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard !isCancelled, let session, let device, let configuration else { return }
         let receipt = Self.hostTime()
-        guard receipt - lastAnalysis >= 1 / 3.0 else { return }
-        lastAnalysis = receipt
         let configNow = "vision3-up-unmirrored-vga-centerStage:\(device.isCenterStageActive)"
         guard configNow == configuration.configurationID, !connection.isVideoMirrored else {
             onFailure("Camera framing changed. Set up its reference again."); stop(); return
         }
+        guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        if receipt - lastPreview >= 1 / 15.0 - 0.005 {
+            lastPreview = receipt
+            let source = CIImage(cvPixelBuffer: pixels)
+            let scale = min(1, 320 / source.extent.width)
+            let thumbnail = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            if let image = imageContext.createCGImage(thumbnail, from: thumbnail.extent), !isCancelled {
+                onPreview(image)
+            }
+        }
+        // Preview and Vision share this one bounded capture session. More
+        // preview frames never create additional heading evidence.
+        guard receipt - lastAnalysis >= 1 / 3.0 else { return }
+        lastAnalysis = receipt
         var captureTime: Double?
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if let clock = session.synchronizationClock, pts.isNumeric {
             let converted = CMSyncConvertTime(pts, from: clock, to: CMClockGetHostTimeClock()).seconds
             if converted.isFinite, converted >= 0, converted <= receipt + 0.05 { captureTime = converted }
         }
-        guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let luminance = CameraLuminance.mean(pixels)
         let request = VNDetectFaceRectanglesRequest()
         request.revision = VNDetectFaceRectanglesRequestRevision3
         do {
@@ -281,9 +312,36 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
                 faceCount: faces.count, yawDegrees: degrees(face?.yaw), pitchDegrees: degrees(face?.pitch),
                 rollDegrees: degrees(face?.roll), detectionConfidence: face?.confidence ?? 0,
                 faceBounds: face?.boundingBox, captureHostTime: captureTime,
-                receiptHostTime: receipt, processedHostTime: Self.hostTime()))
+                receiptHostTime: receipt, processedHostTime: Self.hostTime(), luminance: luminance))
         } catch {
             onFailure("Face analysis could not complete."); stop()
         }
+    }
+}
+
+/// Sparse brightness measurement from the existing analysis frame. It is used
+/// only alongside a failed face scan, never as a replacement for confidence.
+enum CameraLuminance {
+    static func mean(_ pixels: CVPixelBuffer) -> Double? {
+        guard CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return nil }
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        let format = CVPixelBufferGetPixelFormatType(pixels)
+        let fullRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        guard fullRange || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+              CVPixelBufferGetPlaneCount(pixels) > 0,
+              let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return nil }
+        let width = CVPixelBufferGetWidthOfPlane(pixels, 0), height = CVPixelBufferGetHeightOfPlane(pixels, 0)
+        guard width > 0, height > 0 else { return nil }
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var total = 0.0, count = 0.0
+        for y in Swift.stride(from: 0, to: height, by: max(1, height / 12)) {
+            for x in Swift.stride(from: 0, to: width, by: max(1, width / 16)) {
+                let value = Double(bytes[y * stride + x])
+                total += min(1, max(0, fullRange ? value / 255 : (value - 16) / 219))
+                count += 1
+            }
+        }
+        return count > 0 ? total / count : nil
     }
 }

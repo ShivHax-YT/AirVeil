@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Carbon
+import ScreenCaptureKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -12,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var diagnosticTimer: Timer?
     private var globalPauseActivations = 0
     private var lastIconName: String?
+    private var notch: NotchOverlayController?
+    private var settingsVisibleAtLaunch = false
+    private var diagnosticCaptureExclusion = "Not checked"
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = AppModel()
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
@@ -28,12 +32,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         model.stateChanged = { [weak self] in self?.refreshStatus() }
         item = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
         let menu = NSMenu(); menu.delegate = self; item.menu = menu
-        refreshStatus(); configureAppMenu(); installHotKey(); showSettings()
+        notch = NotchOverlayController(model: model)
+        refreshStatus(); configureAppMenu(); installHotKey()
+        model.setPreviewVisible(false)
+        if CommandLine.arguments.contains("--settings") { showSettings() }
+        settingsVisibleAtLaunch = window.isVisible
         model.startMotionAutomatically()
         if let index = CommandLine.arguments.firstIndex(of:"--diagnostics"),CommandLine.arguments.count > index+1 {
             let path = CommandLine.arguments[index+1]
             diagnosticTimer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
                 Task { @MainActor in self?.writeDiagnostics(path) }
+            }
+        }
+        if CommandLine.arguments.contains("--verify-capture-exclusion") {
+            Task {
+                guard CGPreflightScreenCaptureAccess() else {
+                    diagnosticCaptureExclusion = "Skipped: existing screen permission required"
+                    return
+                }
+                do {
+                    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                    diagnosticCaptureExclusion = content.applications.contains { $0.processID == ProcessInfo.processInfo.processIdentifier }
+                        ? "Own application available for exclusion" : "Own application missing"
+                } catch { diagnosticCaptureExclusion = "Check failed: \(error.localizedDescription)" }
             }
         }
     }
@@ -42,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let appItem = NSMenuItem(); let appMenu = NSMenu()
         appMenu.addItem(withTitle:"AirVeil Settings…",action:#selector(showSettings),keyEquivalent:",").target = self
         appMenu.addItem(withTitle:"Pause & Clear Screen",action:#selector(pause),keyEquivalent:"p").target = self
+        appMenu.addItem(withTitle:"Show Notch Controls",action:#selector(showNotch),keyEquivalent:"").target = self
+        appMenu.addItem(withTitle:"Preview Notch Animation",action:#selector(previewNotch),keyEquivalent:"").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle:"Quit AirVeil",action:#selector(quit),keyEquivalent:"q").target = self
         appItem.submenu = appMenu; menu.addItem(appItem); NSApp.mainMenu = menu
@@ -58,10 +81,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             enable.target=self; enable.isEnabled=model.trackingValid && model.selectedDisplayCount > 0
         }
         menu.addItem(withTitle:"Settings…",action:#selector(showSettings),keyEquivalent:",").target=self
+        menu.addItem(withTitle:"Show Notch Controls",action:#selector(showNotch),keyEquivalent:"").target=self
+        let preview = menu.addItem(withTitle:"Preview Notch Animation",action:#selector(previewNotch),keyEquivalent:"")
+        preview.target=self; preview.isEnabled = !model.cameraHeading.isBusy
         menu.addItem(.separator())
         menu.addItem(withTitle:"Quit AirVeil",action:#selector(quit),keyEquivalent:"q").target=self
     }
     private func refreshStatus() {
+        notch?.updateControls()
         let level: NSWindow.Level = model.enabled || model.starting ? NSWindow.Level(rawValue:NSWindow.Level.statusBar.rawValue+1) : .normal
         if window?.level != level { window?.level = level }
         let icon = model.shielded ? "exclamationmark.shield.fill" : "circle.lefthalf.filled"
@@ -88,10 +115,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func pause() { model.pause() }
     @objc private func calibrate() { model.calibrate() }
     @objc private func enable() { model.enable() }
+    @objc private func showNotch() { notch?.showControls() }
+    @objc private func previewNotch() { notch?.previewAnimation() }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool { showSettings(); return true }
     func applicationWillTerminate(_ notification:Notification) {
-        diagnosticTimer?.invalidate(); model.shutdown()
+        diagnosticTimer?.invalidate(); notch?.shutdown(); model.shutdown()
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let hotHandler { RemoveEventHandler(hotHandler) }
     }
@@ -132,6 +161,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "cameraCenterRevision":model.cameraHeading.centerRevision,
             "cameraAlignmentRevision":model.cameraHeading.alignmentRevision,
             "cameraStatus":model.cameraHeading.status,
+            "notchPhase":model.cameraHeading.coach.phase.rawValue,
+            "notchTitle":model.cameraHeading.coach.title,
+            "notchVisible":notch?.presentation.expanded ?? false,
+            "settingsVisible":window?.isVisible ?? false,
+            "settingsVisibleAtLaunch":settingsVisibleAtLaunch,
+            "captureExclusionPreflight":diagnosticCaptureExclusion,
             "trackingValid":model.trackingValid,
             "drawSubmissionCount":model.overlay.drawSubmissionCount,
             "sourceBlitCount":model.overlay.sourceBlitCount,

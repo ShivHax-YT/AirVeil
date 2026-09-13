@@ -1,5 +1,15 @@
 # AirVeil validation status
 
+## Notch recenter coach, 0.8.0 (build 9)
+
+Implemented a native notch-attached camera coach and quiet menu-bar startup. Manual camera setup and automatic recovery drive the same panel: circular mirrored preview, live alignment rail, directional/red guidance, measured low-light messages, paired-evidence progress, and short green confirmation. Hover controls provide Set center, Enable/Pause and settings; the menu provides an explicit controls action and labeled camera-free animation preview. The physical notch is excluded from content; unnotched screens use a floating fallback. Existing camera identity/calibration, bounded checks and AirPods removal/wake policy are retained.
+
+Before testing was deferred, the complete existing test suite passed with the initial coach integration. Subsequent focused runs passed 70 coordinator checks, 22 guide checks, 18 screen geometry checks and 16 native controller lifecycle checks; nine SwiftUI states were rendered at 2x and inspected. Independent review found retry-intent and sleep/preview cancellation defects, which were corrected and covered. Final source builds and signs with the existing identity.
+
+Installed runtime diagnostics confirmed settings hidden at launch, no camera while waiting for AirPods, and the app available to ScreenCaptureKit for self-exclusion without opening Settings. The native controller checks cover nonactivating panel flags and actual attached-screen positioning. These checks do not establish physical calibration or comprehensive fullscreen/hover behavior.
+
+On 13 September 2026, the wearer explicitly asked to finish implementation and leave all further testing for later. Physical camera/AirPods recenter, removal and wake, actual hover/click behavior across Spaces, and subjective animation acceptance are deferred accordingly. Existing saved preferences and center were retained; no new wearer-driven calibration result is claimed. See [notch research](../research/NOTCH-RESEARCH.md) and [recording analysis](../research/NOTCH-MOTION-STUDY.md).
+
 ## Verified
 
 - Four cited research reports completed and reviewed before app implementation.

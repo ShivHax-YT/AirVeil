@@ -18,9 +18,21 @@ python3 scripts/setup-signing.py
 ./scripts/install.sh
 ```
 
-This builds an app for the current Mac's architecture, signs it with a persistent local development identity, installs it at `/Applications/AirVeil.app`, and opens settings. An existing AirVeil install is retained in the ignored build directory. The build script prefers the installed macOS 26.5 SDK to avoid a missing SwiftUI macro plugin in this Mac's default SDK; set `AIRVEIL_SDK` to use another complete SDK.
+This builds an app for the current Mac's architecture, signs it with a persistent local development identity, installs it at `/Applications/AirVeil.app`, and starts it quietly in the menu bar. An existing AirVeil install is retained in the ignored build directory. The build script prefers the installed macOS 26.5 SDK to avoid a missing SwiftUI macro plugin in this Mac's default SDK; set `AIRVEIL_SDK` to use another complete SDK.
 
 To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVeil.app` to return to settings later.
+
+## Notch recenter coach
+
+Hover near the notch to reveal **Set center**, **Enable/Pause**, and settings. **Show Notch Controls** in the AirVeil menu is an alternative to hovering. With camera assistance enabled, automatic wake/rewear checks and manual Set center show a circular mirrored preview beneath the hardware cutout. Directional guidance and a fine alignment rail turn red when a correction is needed and green while the accepted pose is held. Measured dim frames with failed face detection produce a specific lighting message. No-face, multiple-face, motion, and camera errors have separate guidance.
+
+The coach shows confirmation only when the existing camera/AirPods coordinator has restored a valid heading. It then dismisses after a short settle. Progress reflects accepted paired samples; it is not an arbitrary animation timer. A first setup can include the existing prompted head turn. Recovery still measures the current angle against the saved reference, without replacing zero. Camera images are released on stop, cancel, timeout, and sleep.
+
+The native panel opens downward, keeps important content outside the dead camera cutout, and does not become the key window. It selects the notched display even when an external monitor is the main display, with a floating top-center fallback on unnotched screens. Reduce Motion removes springs and scale motion. Settings remain available for advanced controls, and normal startup keeps them hidden. Use `open /Applications/AirVeil.app --args --settings` for explicit settings at launch.
+
+**Preview Notch Animation** in the AirVeil menu shows a labeled demonstration without starting a camera check or changing calibration. Cancel closes it. This preview is a visual demonstration, not sensor validation.
+
+Run `bash scripts/test-notch-ui.sh` for geometry and native controller lifecycle checks plus nine 2x rendered states in `build/notch-previews/`. The regular test script covers the camera/coach evidence, low light, crop mapping, preview lifetime and cancellation. [Notch engineering research](research/NOTCH-RESEARCH.md) and the [reference motion study](research/NOTCH-MOTION-STUDY.md) document the implementation decisions.
 
 ## Setup
 

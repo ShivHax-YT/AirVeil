@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import CoreVideo
 
 @MainActor private final class FakeCameraCapture: CameraAnchorCapturing {
     var authorization = CameraAuthorization.authorized
@@ -8,6 +10,7 @@ import Foundation
     var holdStart = false
     var continuation: CheckedContinuation<CameraAnchorConfiguration, Error>?
     var frameHandlers: [@MainActor (CameraAnchorFrame) -> Void] = []
+    var previewHandlers: [@MainActor (CGImage) -> Void] = []
     var failureHandlers: [@MainActor (String) -> Void] = []
     let configuration = CameraAnchorConfiguration(cameraID: "fake-camera", cameraName: "Fake",
         configurationID: "vision3-up-unmirrored", captureFramesPerSecond: 3)
@@ -15,8 +18,9 @@ import Foundation
         permissionRequests += 1; authorization = .authorized; return true
     }
     func start(onFrame: @escaping @MainActor (CameraAnchorFrame) -> Void,
+               onPreview: @escaping @MainActor (CGImage) -> Void,
                onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration {
-        starts += 1; frameHandlers.append(onFrame); failureHandlers.append(onFailure)
+        starts += 1; frameHandlers.append(onFrame); previewHandlers.append(onPreview); failureHandlers.append(onFailure)
         if holdStart { return try await withCheckedThrowingContinuation { continuation = $0 } }
         return configuration
     }
@@ -36,6 +40,9 @@ import Foundation
             faceCount: 1, yawDegrees: -35, pitchDegrees: 0, rollDegrees: 0,
             detectionConfidence: 0.9, faceBounds: CGRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3),
             captureHostTime: 10, receiptHostTime: 10.01, processedHostTime: 10.03)
+        let context = CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let thumbnail = context.makeImage()!
         do {
             let capture = FakeCameraCapture(); capture.authorization = .notDetermined
             let service = CameraAnchorService(capture: capture)
@@ -53,19 +60,29 @@ import Foundation
             var received: [Double] = []
             try await tested.startBurst { sample in received.append(sample.yawDegrees!) }
             check(tested.isRunning && tested.deviceID == "fake-camera", "Configured identity is published")
+            capture.previewHandlers[0](thumbnail)
+            check(tested.previewImage != nil, "Active capture provides its ephemeral preview through the same session")
             capture.frameHandlers[0](frame)
             check(received == [-35], "Vision turned angle is forwarded without recentering or sign guessing")
             tested.stop()
+            check(tested.previewImage == nil, "Stop discards the preview immediately")
             capture.frameHandlers[0](frame)
+            capture.previewHandlers[0](thumbnail)
+            check(tested.previewImage == nil, "Late preview from a stopped capture cannot reappear")
             check(received.count == 1 && !tested.isRunning, "Stop rejects queued old frames")
             try await tested.startBurst { sample in received.append(sample.yawDegrees!) }
             capture.failureHandlers[0]("obsolete failure")
             capture.frameHandlers[0](frame)
+            capture.previewHandlers[0](thumbnail)
             check(tested.isRunning && received.count == 1, "Old run cannot cancel or feed a new run")
+            check(tested.previewImage == nil, "New run cannot display a queued preview from the old generation")
+            capture.previewHandlers[1](thumbnail)
+            check(tested.previewImage != nil && capture.starts == 2, "Current generation preview uses no additional camera start")
             capture.frameHandlers[1](frame)
             check(received.count == 2, "New run accepts its own frames")
             capture.failureHandlers[1]("unplugged")
             check(!tested.isRunning && tested.status.contains("unplugged"), "Runtime interruption stops current capture")
+            check(tested.previewImage == nil, "Interruption clears the live preview")
         }
         do {
             let capture = FakeCameraCapture(); capture.holdStart = true
@@ -89,6 +106,18 @@ import Foundation
             do { try await task.value; fatalError("Timed out startup completed successfully") }
             catch CameraAnchorError.cancelled {}
             check(service.configuration == nil, "Timed out startup cannot publish a camera configuration")
+        }
+        for (pixelValue, expected) in [(UInt8(0), 0.0), (UInt8(128), 128.0 / 255), (UInt8(255), 1.0)] {
+            var pixels: CVPixelBuffer?
+            check(CVPixelBufferCreate(kCFAllocatorDefault, 32, 24, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                nil, &pixels) == kCVReturnSuccess, "Synthetic luma plane allocated")
+            let buffer = pixels!
+            CVPixelBufferLockBaseAddress(buffer, [])
+            memset(CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!, Int32(pixelValue),
+                CVPixelBufferGetBytesPerRowOfPlane(buffer, 0) * CVPixelBufferGetHeightOfPlane(buffer, 0))
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            check(abs(CameraLuminance.mean(buffer)! - expected) < 0.001,
+                  "Brightness is measured from pixel luma rather than inferred from missing faces")
         }
         print("PASS: \(checks) CameraAnchorService lifecycle checks with injected camera; no hardware or permission access")
     }
