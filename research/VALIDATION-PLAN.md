@@ -12,6 +12,7 @@ The macOS deliverable must satisfy the following checks before completion can be
 | Display selection | Connected count and refresh work; selected displays alone receive effect; persisted selection survives runtime display-ID changes |
 | No recursive capture | Own application excluded from ScreenCaptureKit filter; live visual check |
 | Disconnect and stale input | Deterministic lifecycle tests plus unplug/reconnect hardware validation; interrupted effect automatically pauses/clears, and explicit center resumes without a persistent black cover |
+| Optional display off after removal | Actual delegate disconnect after fresh motion triggers once after delay; brief reconnect cancels; stale/reference changes never trigger; all displays turn off; normal wake works without an immediate repeat; password behavior follows Mac settings |
 | Permissions | Clear denied/missing UI; successful capture only with user-granted permission |
 | Display changes | Attached-display lifecycle and overlay frame mapping checked |
 | Pause/quit | Overlay and capture fully stop; obvious controls available |
@@ -29,5 +30,6 @@ The macOS deliverable must satisfy the following checks before completion can be
 5. Click and scroll in another application while one side is covered; verify interception in the configured area and normal interaction in clear/exempt areas.
 6. Remove a bud, disconnect/reconnect, sleep/wake, and change audio spatialization modes.
 7. Confirm pause and quit immediately clear all overlays.
+8. Enable **Turn off displays when AirPods are removed**, with Automatic Ear Detection on. After live motion arms it, remove both buds. Confirm all displays turn off, wake normally, and confirm no repeated sleep while buds remain absent. Reinsert to rearm; a brief remove/reinsert must cancel the delayed request. Verify password behavior separately if Require password is set to Immediately.
 
 A preview or synthetic sensor test does not prove AirPods Pro 3 hardware integration. A build passing does not prove visual privacy. Software obscuring changes the display for all observers.

@@ -25,12 +25,27 @@ struct VeilDisplayInfo {
     let stableID: String
 }
 
+enum MotionConnectionState { case unknown, connected, disconnected }
+
+@MainActor final class DisplaySleepService {
+    private(set) var requests = 0
+    private(set) var cancellations = 0
+    var failRequest = false
+    func requestDisplaySleep() async throws {
+        requests += 1
+        if failRequest { throw NSError(domain: "TestSleep", code: 1) }
+    }
+    func cancel() { cancellations += 1 }
+}
+
 @MainActor final class MotionService: ObservableObject {
     @Published var isFresh = true
     @Published var isCalibrated = true
     @Published var isRunning = true
     @Published var yawDegrees = 0.0
     @Published var status = "Test motion"
+    var connectionState = MotionConnectionState.connected
+    var disconnectEventCount: UInt64 = 0
     var canCalibrate = true
     var trackingValid: Bool { isRunning && isFresh && isCalibrated }
     private(set) var calibrateCalls = 0
@@ -334,6 +349,75 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(!restored.blockInput && restored.blocksEntireDisplay, "Pointer policy persists without real preferences")
             restored.shutdown()
         }
-        print("PASS: \(checks) real AppModel lifecycle assertions; motion, capture, permissions, and preferences stubbed")
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            check(!model.sleepDisplaysOnRemoval, "Removal action starts off until chosen")
+            model.sleepDisplaysOnRemoval = true
+            model.checkAirPodsRemoval(now: now)
+            model.motion.isFresh = false
+            model.motion.isCalibrated = false
+            model.checkAirPodsRemoval(now: now + 10)
+            await drainTasks()
+            check(model.displaySleep.requests == 0, "A stale stream or lost calibration never turns off displays")
+            model.motion.connectionState = .disconnected
+            model.motion.disconnectEventCount = 1
+            model.checkAirPodsRemoval(now: now + 11)
+            model.checkAirPodsRemoval(now: now + 12.4)
+            check(model.displaySleep.requests == 0, "Actual disconnect waits for debounce")
+            model.checkAirPodsRemoval(now: now + 12.6)
+            await drainTasks()
+            check(model.displaySleep.requests == 1 && !model.enabled, "Confirmed disconnect requests display sleep with blur paused")
+            model.checkAirPodsRemoval(now: now + 100)
+            await drainTasks()
+            check(model.displaySleep.requests == 1, "Remaining disconnected does not repeatedly sleep displays")
+            model.shutdown()
+            let restored = AppModel()
+            check(restored.sleepDisplaysOnRemoval, "Chosen removal behavior persists")
+            restored.resetDefaults()
+            check(!restored.sleepDisplaysOnRemoval, "Reset defaults disables removal action")
+            restored.shutdown()
+        }
+        for cancellation in ["reconnect", "new-disconnect", "pause", "off", "shutdown"] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            model.sleepDisplaysOnRemoval = true
+            model.checkAirPodsRemoval(now: now)
+            model.motion.isFresh = false
+            model.motion.connectionState = .disconnected
+            model.motion.disconnectEventCount = 1
+            model.checkAirPodsRemoval(now: now + 1)
+            model.checkAirPodsRemoval(now: now + 3)
+            switch cancellation {
+            case "reconnect": model.motion.connectionState = .connected
+            case "new-disconnect": model.motion.disconnectEventCount = 2
+            case "pause": model.pause()
+            case "off": model.sleepDisplaysOnRemoval = false
+            default: model.shutdown()
+            }
+            await drainTasks()
+            check(model.displaySleep.requests == 0, "\(cancellation) cancels queued display-off action before launch")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            model.sleepDisplaysOnRemoval = true
+            model.enable()
+            await drainTasks()
+            model.checkAirPodsRemoval(now: now)
+            model.motion.isFresh = false
+            model.motion.isCalibrated = false
+            model.motion.connectionState = .disconnected
+            model.motion.disconnectEventCount = 1
+            model.checkTrackingSafety()
+            check(!model.enabled, "Tracking loss clears blur promptly before removal delay")
+            model.checkAirPodsRemoval(now: now + 1)
+            model.checkAirPodsRemoval(now: now + 3)
+            await drainTasks()
+            check(model.displaySleep.requests == 1, "Automatic blur recovery does not cancel the chosen removal action")
+            model.shutdown()
+        }
+        print("PASS: \(checks) real AppModel lifecycle assertions; motion, capture, display sleep, permissions, and preferences stubbed")
     }
 }

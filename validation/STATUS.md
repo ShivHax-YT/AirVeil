@@ -5,7 +5,7 @@
 - Four cited research reports completed and reviewed before app implementation.
 - Native macOS app builds against macOS 26.5 SDK with deployment target 14.0.
 - App installed at `/Applications/AirVeil.app`, signature verified, and launched.
-- 2,094 deterministic synthetic motion/math assertions, 45 motion-delivery lifecycle assertions, and 16 real-AppModel lifecycle assertions pass. The lifecycle suites use synthetic input or stubbed device/capture APIs.
+- Build 5: 2,094 deterministic synthetic motion/math assertions, 52 motion-delivery lifecycle assertions, 56 real-AppModel lifecycle assertions, 22 removal-policy assertions, 24 injected display-sleep service assertions, and 690,785 input-region assertions pass. Device, capture, preferences, and display-sleep APIs are stubbed in lifecycle tests.
 - Actual GPU render tests pass at 1x and 2x for transparent neutral pixels, opposite-side masks, monotonic/mirrored feather, premultiplied alpha, opaque source independence, full shield, and top-left image orientation.
 - Running native settings window inspected visually; simulated left turn produces right-side blur with a clear left side.
 - Independent reviews found and fixed run-loop freshness, terminal retry, buffered-sample lag, display-change reveal, preview failure-state, and shortcut-advertising issues.
@@ -15,11 +15,11 @@
 
 The first integrated build received AirPods Pro 3 motion at approximately 49–52 samples/s from the left bud. The wearer confirmed that physical head motion blurred the in-app preview. The running app then reported successful live desktop capture and calibrated tracking. The Pause button was exercised and returned the capture status to paused. These are real runtime observations, separate from synthetic tests.
 
-The newest build adds whole-screen coverage, reset defaults, clearer calibration, and idle rendering improvements. Whole-screen preview and reset to 8° onset / 32° full angle / 32 pt blur / 12% feather / 70 ms response were verified through the running UI. Paused static app CPU was observed near 1.1% after optimization, compared with a prior snapshot near 38%; these snapshots are not a controlled energy benchmark.
+An earlier update added whole-screen coverage, reset defaults, clearer calibration, and idle rendering improvements. Whole-screen preview and reset to 8° onset / 32° full angle / 32 pt blur / 12% feather / 70 ms response were verified through the running UI. Paused static app CPU was observed near 1.1% after optimization, compared with a prior snapshot near 38%; these snapshots are not a controlled energy benchmark.
 
 Synthetic native-resolution GPU benchmark at the main display's 1920×1080, 1x mode: 120 changed frames, last observed median 0.773 ms and p95 2.995 ms. This measures blit + three Gaussian passes + composition, not real display FPS or sensor latency. Eight repeated renderer release/reuse cycles pass; late frames are rejected. See Tests/PerformanceTests.swift to reproduce.
 
-Persistent permission across a changed signed build, live desktop capture, and the wearer-confirmed left/right whole-screen sweep now pass. Sustained calibration, fullscreen/Spaces coverage, display reconfiguration, physical reconnect/wake behavior, and manual global-shortcut confirmation remain pending. No broader hardware-completion claim is made.
+Persistent permission across a changed signed build, live desktop capture, wearer-confirmed left/right whole-screen sweep, fullscreen coverage on two displays, and the physical global shortcut pass. The wearer subsequently confirmed build 4 blur blocks clicks and scrolling; its diagnostics recorded 88 blocked pointer events. Sustained calibration, selected-display-only capture, physical reconnect/wake behavior, and the new removal display-off action remain separate physical checks. No broader hardware-completion claim is made.
 
 The oldest startup sample's absolute acquisition age remains unverified because headphone timestamp-to-host epoch was not assumed. Increasing delivery lag is detected relative to the best observed offset within a source session.
 
@@ -66,3 +66,13 @@ User-requested controls now include connected-display count, refresh, per-displa
 Automated validation passes: 2,094 math assertions, 52 motion-delivery assertions, 42 real-AppModel lifecycle assertions with entirely stubbed device/capture/preferences APIs, 690,785 input-region checks, actual-GPU input-mask cross-checks at 1×/2×, and prior live-texture replacement/resize tests. The new selected-display, pointer-interception, and automatic-clear behavior still need installed-app verification.
 
 Build 4 is installed and strict signature validation passes with the existing identity. Actual ScreenCaptureKit access check passed without new permission. The running controls were inspected visually; selecting displays updated 2 → 1 → 0 → 1 → 2, and both were restored. The installed app currently reports two connected/two selected displays and pointer blocking enabled in Blurred area mode. AirPods motion is unavailable at this final setup check, so live selected-display capture, physical pointer interception, and new recovery behavior await the wearer's requested checks.
+
+## Removal display off, 0.4.0 (build 5)
+
+The wearer confirmed that blur works and clicks/scrolling are blocked. Build 4 diagnostics independently recorded 88 blocked pointer events. A temporary synthetic pointer fixture was closed without running its blocker because physical acceptance supplied the requested evidence.
+
+The new optional removal action uses explicit Core Motion disconnect events, armed only by live motion. A 1.5-second debounce allows reconnect or earbud handoff; new disconnect events restart that delay. Stale motion, reference jumps, and startup without worn headphones do not trigger display sleep. The action works independently of blur, is one-shot until fresh motion rearms it, and does not automatically unlock the Mac. Reset defaults disables it. It uses the documented `pmset displaysleepnow` command; all tests use injected runners and never execute that power action.
+
+All automated suites pass, including 56 actual-AppModel assertions, 22 removal-policy assertions, and 24 injected command-service assertions. Build 5 is installed, strict signing verification passes, and the installed designated requirement matches build 4. Actual ScreenCaptureKit access check passed without renewed approval. The new controls were visually inspected and automatic display off was enabled for the wearer.
+
+The Lock Screen settings button opened the correct page. Read-only inspection showed Require password is already Immediately, and Automatic Ear Detection is already on. No Mac power or authentication settings were changed. Actual both-earbud removal, physical display-off, normal wake/unlock, and lack of repeated sleeping remain pending the wearer check. At install inspection only the built-in display was connected; no current two-display removal claim is made.

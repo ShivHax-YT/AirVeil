@@ -45,6 +45,8 @@ Migrating from an older ad hoc build requires one new macOS screen-capture appro
 - **Directional half / Whole-screen sweep** selects opposite-half blur or a moving blur edge across the full display. Turning left starts at the right edge and sweeps left; turning right mirrors it. At the full-effect angle, the entire display is blurred.
 - **Displays** shows connected displays and lets you choose which ones receive blur. Selection is saved by stable display identity. **Check displays** refreshes the list. Changing selection pauses the effect.
 - **Block clicks and scrolling while blurred** intercepts pointer input in the blurred area or the entire affected display. AirVeil settings, the menu bar, and the global pause key remain available. Keyboard focus is unchanged.
+- **Turn off displays when AirPods are removed** is an optional, separate control that works even while blur is paused. After live headphone motion has been received, a headphone disconnect turns off all displays after a 1.5-second reconnect delay. Keep Automatic Ear Detection enabled; removing one bud may hand tracking to the other, so test by removing both. Bluetooth disconnection also triggers it. Motion gaps and calibration jumps alone do not.
+- Automatic display off uses macOS display sleep, without changing brightness or power preferences. Whether a password is required on wake follows **System Settings → Lock Screen → Require password after screen saver begins or display is turned off**. Choose **Immediately** for password protection. AirVeil never unlocks the Mac on reconnection. The app's **Lock Screen settings** button opens that page.
 - **Reset defaults** restores effect settings and selects all connected displays, then pauses the effect without changing permissions or calibration.
 - Default onset: 8 degrees; full effect: 32 degrees.
 - Adjustable blur, edge feather, and response time.
@@ -55,6 +57,7 @@ Migrating from an older ad hoc build requires one new macOS screen-capture appro
 - Lost or invalid tracking automatically pauses the effect and clears both blur and input blockers. Once fresh motion returns, face the display and **Set center** to resume. An explicit Pause cancels that automatic resume intent. Capture failures also pause and clear. This recovery policy exposes the normal desktop while paused.
 - Starting a drag before blur appears may leave that already-started drag with the underlying app; the blockers intercept newly delivered pointer events in covered regions.
 - Sleep or session resignation pauses the effect and discards captured frames. AirPods detection resumes automatically after wake; set center and enable to resume.
+- Display off is requested once per removal. Reconnecting during the delay, pressing Pause, switching this setting off, or quitting cancels a pending request. Waking while the AirPods remain absent does not immediately turn the displays off again. Reset defaults disables this option.
 - Display reconfiguration requires rebuilding capture with a deliberate pause/re-enable.
 
 ## Privacy and platform limits

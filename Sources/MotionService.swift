@@ -2,6 +2,12 @@ import Foundation
 import Combine
 import CoreMotion
 
+enum MotionConnectionState: String {
+    case unknown
+    case connected
+    case disconnected
+}
+
 /// Local, in-memory headphone pose. Positive relative yaw is provisionally
 /// physical LEFT; that adapter convention must be checked with the wearer's
 /// actual AirPods, and the UI exposes inversion. It is not an eye-gaze sensor.
@@ -13,6 +19,11 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var isCalibrated = false
     @Published private(set) var isFresh = false
     @Published private(set) var isRunning = false
+    @Published private(set) var connectionState: MotionConnectionState = .unknown
+    /// Lifetime-monotonic count of actual delegate disconnect callbacks. With
+    /// Automatic Ear Detection this can indicate removal; it does not prove
+    /// both buds were removed. Stream errors and stale data are not removal.
+    @Published private(set) var disconnectEventCount: UInt64 = 0
     @Published private(set) var sourceName = "No headphone sensor"
     /// Added delay relative to this source session's best observed offset;
     /// deliberately not called absolute source age before epoch verification.
@@ -63,6 +74,7 @@ final class MotionService: NSObject, ObservableObject {
 
     func start() {
         guard !isRunning else { return }
+        connectionState = .unknown
         generation &+= 1
         let run = generation
         resetSamples()
@@ -103,6 +115,7 @@ final class MotionService: NSObject, ObservableObject {
         errorRetryCount = 0
         nextRetryTime = 0
         isRunning = false
+        connectionState = .unknown
         resetSamples()
         status = "Motion paused"
     }
@@ -122,6 +135,7 @@ final class MotionService: NSObject, ObservableObject {
     fileprivate func connectionChanged(connected: Bool, generation run: UInt64) {
         guard isRunning, generation == run else { return }
         if connected {
+            connectionState = .connected
             // A connect callback may follow the first valid sample at startup.
             // Only restart when no stream is already requested.
             errorRetryCount = 0
@@ -133,6 +147,10 @@ final class MotionService: NSObject, ObservableObject {
             streamRequested = false
             resetSamples()
             status = "AirPods disconnected — waiting to reconnect automatically"
+            connectionState = .disconnected
+            // Publish the event after the disconnected state and stream cleanup
+            // so a debounced coordinator observes a consistent service state.
+            if disconnectEventCount < UInt64.max { disconnectEventCount += 1 }
         }
     }
 
@@ -235,6 +253,8 @@ final class MotionService: NSObject, ObservableObject {
         }
         errorRetryCount = 0
         isFresh = true
+        // Some systems deliver usable motion before the startup connect event.
+        connectionState = .connected
         if let reference, let relative = attitude.copy() as? CMAttitude {
             relative.multiply(byInverseOf: reference)
             guard let yaw = VeilMath.yawRadians(Self.quaternion(relative)) else {

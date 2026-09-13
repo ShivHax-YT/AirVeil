@@ -67,3 +67,11 @@ Before a queued capture or access-check task begins, verify its generation still
 Enumerate connected displays locally and persist selections by display UUID. A deliberate selection change pauses capture; an empty selection cannot enable. Build capture only for selected current IDs and retain startup topology revalidation.
 
 Nonactivating AppKit panels intercept clicks and scrolling without keyboard focus or additional monitoring permission. The panels follow the compositor's blur mask above 5% coverage, or cover the selected display when the whole-display blocking option is chosen. Reserve the menu-bar area and keep AirVeil controls higher. Pause, failure recovery, selection changes, and shutdown remove blocker windows synchronously. Do not claim cancellation of a drag already dispatched before the blocker appeared.
+
+## Display off after AirPods removal
+
+Following wearer confirmation of blur and pointer interception, add optional display sleep after AirPods removal. Apple documents headphone disconnect/connect callbacks for removal/reinsertion with Automatic Ear Detection enabled in [WWDC23](https://developer.apple.com/videos/play/wwdc2023/10179/). The callback has no reason field, and one earbud can hand motion to the other. Therefore removal and Bluetooth disconnection share this action; stale motion, reference changes, and stream errors do not count as removal.
+
+Arm only after live motion in the current monitoring session. Debounce an explicit disconnect for 1.5 seconds, cancel on reconnect, and execute once until fresh motion rearms it. Explicit pause, stop, sleep, settings-off, reset, and shutdown cancel pending work. Automatic blur recovery must not erase this independent removal request.
+
+Run the documented local `pmset displaysleepnow` command through Foundation Process with fixed arguments and bounded execution. This turns off all displays; it does not establish that the session locked. Password protection follows the user's current [Lock Screen setting](https://support.apple.com/guide/mac-help/mchlp2270/mac). Do not alter those preferences, synthesize a lock shortcut, use private lock APIs, or automatically unlock on reconnect. Command acceptance and actual physical display/wake behavior are separate evidence.

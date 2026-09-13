@@ -125,6 +125,21 @@ struct SettingsView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
+                VStack(alignment:.leading,spacing:12) {
+                    Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
+                    Toggle("Turn off displays when AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
+                        .toggleStyle(.switch).controlSize(.small)
+                    Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
+                    Text("Keep Automatic Ear Detection on. Removing both earbuds or disconnecting AirPods turns off all displays after a brief delay. A short tracking interruption will only pause the blur.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    HStack(alignment:.top) {
+                        Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Lock Screen settings") { model.openLockScreenSettings() }
+                    }
+                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+
                 VStack(alignment:.leading,spacing:16) {
                     HStack {
                         Text("Make it feel right").font(.headline)

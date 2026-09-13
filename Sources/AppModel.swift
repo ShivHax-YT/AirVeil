@@ -8,6 +8,20 @@ import ScreenCaptureKit
 final class AppModel: NSObject, ObservableObject {
     let motion = MotionService()
     let overlay = DesktopOverlayController()
+    let displaySleep = DisplaySleepService()
+    @Published var sleepDisplaysOnRemoval = false {
+        didSet {
+            cancelRemovalAction()
+            persist()
+        }
+    }
+    @Published private(set) var removalStatus = "Automatic display off is off."
+    private(set) var displaySleepRequestCount = 0
+    private var removalGuard = AirPodsRemovalGuard()
+    private var removalTimer: Timer?
+    private var removalTicket = 0
+    private var removalActionPending = false
+    private var pendingDisconnectCount: UInt64?
     @Published var pauseShortcutAvailable = false
     @Published var enabled = false
     @Published var starting = false
@@ -88,6 +102,7 @@ final class AppModel: NSObject, ObservableObject {
         wholeScreen = d.bool(forKey: "wholeScreen")
         blockInput = d.object(forKey: "blockInput") == nil ? true : d.bool(forKey: "blockInput")
         blocksEntireDisplay = d.bool(forKey: "blocksEntireDisplay")
+        sleepDisplaysOnRemoval = d.bool(forKey: "sleepDisplaysOnRemoval")
         selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
         loading = false
         refreshPermission()
@@ -121,6 +136,11 @@ final class AppModel: NSObject, ObservableObject {
             }
         })
         installClock()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkAirPodsRemoval() }
+        }
+        removalTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
     private static func read(_ d: UserDefaults, _ key: String, _ fallback: Double, _ range: ClosedRange<Double>) -> Double {
         guard d.object(forKey: key) != nil else { return fallback }
@@ -132,6 +152,7 @@ final class AppModel: NSObject, ObservableObject {
         let d = UserDefaults.standard
         for (k,v) in [("onset",onset),("fullAngle",fullAngle),("blurPoints",blurPoints),("feather",feather),("response",response)] { d.set(v,forKey:k) }
         d.set(blockInput,forKey:"blockInput"); d.set(blocksEntireDisplay,forKey:"blocksEntireDisplay")
+        d.set(sleepDisplaysOnRemoval,forKey:"sleepDisplaysOnRemoval")
         if let selectedDisplayKeys { d.set(Array(selectedDisplayKeys).sorted(),forKey:"selectedDisplays") }
         else { d.removeObject(forKey:"selectedDisplays") }
         d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque"); d.set(wholeScreen,forKey:"wholeScreen")
@@ -163,13 +184,76 @@ final class AppModel: NSObject, ObservableObject {
     func checkTrackingSafety() {
         guard enabled else { return }
         if !motion.trackingValid {
-            pause()
+            pause(cancelRemoval: false)
             resumeAfterRecenter = true
             message = "Tracking changed, so the screen was cleared. Face the display and Set center to resume."
         } else if overlay.failureReason != nil {
             let reason = overlay.failureReason ?? "Capture stopped."
-            pause()
+            pause(cancelRemoval: false)
             message = "Effect paused and screen cleared. " + reason
+        }
+    }
+    /// Separate from tracking safety: a reference jump clears the blur but
+    /// cannot turn off displays. Only a debounced delegate disconnect can.
+    func checkAirPodsRemoval(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        if removalActionPending && (!sleepDisplaysOnRemoval || !motion.isRunning ||
+            motion.connectionState != .disconnected || pendingDisconnectCount != motion.disconnectEventCount) {
+            cancelRemovalAction()
+        }
+        guard !removalActionPending else { return }
+        let shouldSleep = removalGuard.update(enabled: sleepDisplaysOnRemoval,
+            running: motion.isRunning, connected: motion.connectionState == .connected,
+            disconnected: motion.connectionState == .disconnected, freshMotion: motion.isFresh,
+            disconnectCount: motion.disconnectEventCount, now: now)
+        if shouldSleep {
+            pause(cancelRemoval: false)
+            removalActionPending = true
+            removalTicket += 1
+            let ticket = removalTicket
+            let event = motion.disconnectEventCount
+            pendingDisconnectCount = event
+            setRemovalStatus("AirPods removed or disconnected. Turning off displays…")
+            Task {
+                guard removalTicket == ticket, sleepDisplaysOnRemoval, motion.isRunning,
+                      motion.connectionState == .disconnected, motion.disconnectEventCount == event else {
+                    if removalTicket == ticket { removalActionPending = false }
+                    return
+                }
+                do {
+                    displaySleepRequestCount += 1
+                    try await displaySleep.requestDisplaySleep()
+                    guard removalTicket == ticket else { return }
+                    setRemovalStatus("Display off requested. Wake your Mac normally when you return.")
+                } catch {
+                    guard removalTicket == ticket else { return }
+                    setRemovalStatus("Could not turn off displays: \(error.localizedDescription)")
+                }
+                removalActionPending = false
+            }
+        } else if !sleepDisplaysOnRemoval {
+            setRemovalStatus("Automatic display off is off.")
+        } else if removalGuard.deadline != nil {
+            setRemovalStatus("AirPods disconnected. Waiting briefly for a reconnect…")
+        } else if removalGuard.armed {
+            setRemovalStatus("Ready. Displays turn off after AirPods removal or disconnection.")
+        } else if motion.connectionState != .disconnected {
+            setRemovalStatus("Wear your AirPods to arm automatic display off.")
+        }
+    }
+    private func cancelRemovalAction() {
+        removalTicket += 1
+        removalActionPending = false
+        pendingDisconnectCount = nil
+        removalGuard.reset(disconnectCount: motion.disconnectEventCount)
+        displaySleep.cancel()
+        setRemovalStatus(sleepDisplaysOnRemoval ? "Wear your AirPods to arm automatic display off." : "Automatic display off is off.")
+    }
+    private func setRemovalStatus(_ value: String) {
+        if removalStatus != value { removalStatus = value }
+    }
+    func openLockScreenSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Lock-Screen-Settings.extension") {
+            NSWorkspace.shared.open(url)
         }
     }
     func startMotionAutomatically() {
@@ -209,6 +293,7 @@ final class AppModel: NSObject, ObservableObject {
         onset = 8; fullAngle = 32; blurPoints = 32; feather = 0.12; response = 0.07
         inverted = false; opaque = false; wholeScreen = false
         blockInput = true; blocksEntireDisplay = false
+        sleepDisplaysOnRemoval = false
         pause()
         selectedDisplayKeys = nil; persist()
         message = "Default settings restored."
@@ -261,7 +346,7 @@ final class AppModel: NSObject, ObservableObject {
                 try await overlay.start(selectedDisplayIDs: selectedDisplayIDs)
                 guard generation == ticket else { return }
                 guard motion.trackingValid else {
-                    pause()
+                    pause(cancelRemoval: false)
                     resumeAfterRecenter = true
                     message = "Tracking changed while starting. Set center to resume."
                     return
@@ -283,7 +368,8 @@ final class AppModel: NSObject, ObservableObject {
             }
         }
     }
-    func pause() {
+    func pause(cancelRemoval: Bool = true) {
+        if cancelRemoval { cancelRemovalAction() }
         resumeAfterRecenter = false
         accessTicket += 1; checkingAccess = false
         calibrationTicket += 1; calibrating = false
@@ -296,5 +382,5 @@ final class AppModel: NSObject, ObservableObject {
         pause(); motion.stop()
         message = "Paused for sleep or session change. AirPods detection resumes automatically; set center to resume the effect."
     }
-    func shutdown() { pause(); motion.stop(); clock?.invalidate() }
+    func shutdown() { pause(); motion.stop(); clock?.invalidate(); removalTimer?.invalidate() }
 }
