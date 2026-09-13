@@ -6,6 +6,7 @@ The macOS deliverable must satisfy the following checks before completion can be
 |---|---|
 | Four research assignments before app implementation | Two sensor reports and two rendering/animation reports, all cited and reviewed |
 | Native headphone input | Build against public Core Motion API and observe live connected AirPods Pro 3 callbacks |
+| Automatic center | First stable fresh pose after new wear/reconnect session centers once; active effect resumes after session activation; manual pause stays paused; a held turn or same-session reference jump never silently becomes center |
 | Look left obscures right; look right obscures left | Physical turn test following neutral calibration, plus deterministic mapping tests |
 | Smooth angle-dependent blur | Rendered intermediate frames, transition tests, sustained runtime observation |
 | Live desktop and pointer policy | Capture changes reflected while covered; clear side transparent; new clicks/scrolls blocked in blurred regions or entire selected display as configured; controls remain available |
@@ -24,12 +25,13 @@ The macOS deliverable must satisfy the following checks before completion can be
 ## Physical test sequence
 
 1. Connect and wear AirPods Pro 3, open AirVeil, and grant requested motion permission.
-2. Confirm fresh samples and calibrate while looking at the center of the Mac display.
+2. Confirm fresh samples and hold still facing the Mac until Automatic center completes; verify manual Set center can correct a pose.
 3. Turn left slowly, hold, return to center, turn right, hold, and return.
 4. Compare covered side, magnitude, latency, and whether small motion causes jitter.
 5. Click and scroll in another application while one side is covered; verify interception in the configured area and normal interaction in clear/exempt areas.
 6. Remove a bud, disconnect/reconnect, sleep/wake, and change audio spatialization modes.
 7. Confirm pause and quit immediately clear all overlays.
 8. Enable **Turn off displays when AirPods are removed**, with Automatic Ear Detection on. After live motion arms it, remove both buds. Confirm all displays turn off, wake normally, and confirm no repeated sleep while buds remain absent. Reinsert to rearm; a brief remove/reinsert must cancel the delayed request. Verify password behavior separately if Require password is set to Immediately.
+9. With blur enabled and Automatic center on, remove/reinsert the AirPods, wake if needed, and hold still facing the screen. Confirm centering and blur resume without Set center. Repeat after a manual Pause and confirm blur stays paused. Hold a turn during a continuous session and confirm the center does not shift.
 
 A preview or synthetic sensor test does not prove AirPods Pro 3 hardware integration. A build passing does not prove visual privacy. Software obscuring changes the display for all observers.

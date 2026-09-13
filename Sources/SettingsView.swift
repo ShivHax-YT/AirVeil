@@ -77,8 +77,12 @@ struct SettingsView: View {
                 HStack(alignment:.top,spacing:16) {
                     VStack(alignment:.leading,spacing:10) {
                         Label("Head tracking",systemImage:"airpodspro").font(.headline)
-                        Text(model.motion.status).font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
+                        Text(model.autoCenter && model.motion.isFresh ? model.autoCenterStatus : model.motion.status)
+                            .font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
                         Text("Detected automatically when worn").font(.caption2).foregroundStyle(.secondary)
+                        Toggle("Automatic center",isOn:$model.autoCenter).toggleStyle(.switch).controlSize(.small)
+                        Text(model.autoCenter ? "After putting them on, face the screen and hold still briefly. Set center is available for corrections." : "Face the screen and choose Set center before enabling blur.")
+                            .font(.caption2).foregroundStyle(.secondary)
                         HStack {
                             Button(model.calibrating ? "Hold still…" : "Set center") { model.calibrate() }.disabled(!model.motion.isFresh || model.calibrating)
                         }.controlSize(.large)
@@ -177,7 +181,7 @@ struct SettingsView: View {
                     }
                 }
                 HStack(alignment:.top) {
-                    Text("Blur affects everyone viewing a selected display. If tracking stops, the effect pauses and clears automatically. Set center to resume.")
+                    Text("Blur affects everyone viewing a selected display. Tracking loss clears the blur. With Automatic center on, wearing AirPods again centers once while you hold still facing the screen.")
                     Spacer()
                     Text(model.pauseHint).fixedSize()
                 }.font(.caption2).foregroundStyle(.secondary)

@@ -9,6 +9,30 @@ final class AppModel: NSObject, ObservableObject {
     let motion = MotionService()
     let overlay = DesktopOverlayController()
     let displaySleep = DisplaySleepService()
+    @Published var autoCenter = true {
+        didSet {
+            autoCenterSteadySince = nil
+            if !autoCenter {
+                resumeAfterRecenter = false
+                if automaticResumeStarting { pause(cancelRemoval: false) }
+            }
+            setAutoCenterStatus(autoCenter ? "Face the display briefly after putting on your AirPods." : "Automatic center is off. Use Set center.")
+            persist()
+        }
+    }
+    @Published private(set) var autoCenterStatus = "Face the display briefly after putting on your AirPods."
+    private(set) var automaticCenterCount = 0
+    private var autoCenterEligible = true
+    private var autoCenterSteadySince: TimeInterval?
+    private var autoCenterLastCheck: TimeInterval?
+    private var observedDisconnectCount: UInt64 = 0
+    private var observedConnection = MotionConnectionState.unknown
+    private var automaticResumeStarting = false
+    private var systemAwake = true
+    private var screensAwake = true
+    private var sessionActive = true
+    private var isShuttingDown = false
+    private var isMacSessionActive: Bool { systemAwake && screensAwake && sessionActive }
     @Published var sleepDisplaysOnRemoval = false {
         didSet {
             cancelRemovalAction()
@@ -31,7 +55,7 @@ final class AppModel: NSObject, ObservableObject {
     @Published private(set) var selectedDisplayKeys: Set<String>?
     @Published var blockInput = true { didSet { persist() } }
     @Published var blocksEntireDisplay = false { didSet { persist() } }
-    @Published var message = "AirPods are detected automatically. Face the display and set center."
+    @Published var message = "AirPods are detected automatically. Face the display and hold still briefly."
     @Published var previewYaw = 0.0
     @Published var simulate = true
     @Published var strengths = VeilStrength(left: 0, right: 0)
@@ -103,7 +127,11 @@ final class AppModel: NSObject, ObservableObject {
         blockInput = d.object(forKey: "blockInput") == nil ? true : d.bool(forKey: "blockInput")
         blocksEntireDisplay = d.bool(forKey: "blocksEntireDisplay")
         sleepDisplaysOnRemoval = d.bool(forKey: "sleepDisplaysOnRemoval")
+        autoCenter = d.object(forKey: "autoCenter") == nil ? true : d.bool(forKey: "autoCenter")
         selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
+        autoCenterEligible = !motion.isCalibrated
+        observedDisconnectCount = motion.disconnectEventCount
+        observedConnection = motion.connectionState
         loading = false
         refreshPermission()
         motion.objectWillChange.throttle(for: .milliseconds(100), scheduler: RunLoop.main, latest: true).sink { [weak self] _ in
@@ -118,26 +146,29 @@ final class AppModel: NSObject, ObservableObject {
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.suspend() }
+                MainActor.assumeIsolated { self?.handleWorkspaceEvent(name) }
             })
         }
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.startMotionAutomatically() }
+                MainActor.assumeIsolated { self?.handleWorkspaceEvent(name) }
             })
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.pause()
-                self?.message = "Displays changed. Choose the displays to blur, set center, and enable again."
+                self?.message = "Displays changed. Choose the displays to blur and enable again once centered."
                 self?.motion.stop()
-                self?.motion.start()
+                self?.startMotionAutomatically()
                 self?.installClock()
             }
         })
         installClock()
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.checkAirPodsRemoval() }
+            MainActor.assumeIsolated {
+                self?.checkAutomaticCenter()
+                self?.checkAirPodsRemoval()
+            }
         }
         removalTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -153,6 +184,7 @@ final class AppModel: NSObject, ObservableObject {
         for (k,v) in [("onset",onset),("fullAngle",fullAngle),("blurPoints",blurPoints),("feather",feather),("response",response)] { d.set(v,forKey:k) }
         d.set(blockInput,forKey:"blockInput"); d.set(blocksEntireDisplay,forKey:"blocksEntireDisplay")
         d.set(sleepDisplaysOnRemoval,forKey:"sleepDisplaysOnRemoval")
+        d.set(autoCenter,forKey:"autoCenter")
         if let selectedDisplayKeys { d.set(Array(selectedDisplayKeys).sorted(),forKey:"selectedDisplays") }
         else { d.removeObject(forKey:"selectedDisplays") }
         d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque"); d.set(wholeScreen,forKey:"wholeScreen")
@@ -186,7 +218,7 @@ final class AppModel: NSObject, ObservableObject {
         if !motion.trackingValid {
             pause(cancelRemoval: false)
             resumeAfterRecenter = true
-            message = "Tracking changed, so the screen was cleared. Face the display and Set center to resume."
+            message = "Tracking changed, so the screen was cleared. Follow the head-tracking guidance to resume."
         } else if overlay.failureReason != nil {
             let reason = overlay.failureReason ?? "Capture stopped."
             pause(cancelRemoval: false)
@@ -206,7 +238,9 @@ final class AppModel: NSObject, ObservableObject {
             disconnected: motion.connectionState == .disconnected, freshMotion: motion.isFresh,
             disconnectCount: motion.disconnectEventCount, now: now)
         if shouldSleep {
+            let restoreEffect = enabled || starting || resumeAfterRecenter
             pause(cancelRemoval: false)
+            resumeAfterRecenter = restoreEffect
             removalActionPending = true
             removalTicket += 1
             let ticket = removalTicket
@@ -257,9 +291,103 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     func startMotionAutomatically() {
-        guard !motion.isRunning else { return }
+        guard !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
+        autoCenterEligible = true
+        autoCenterSteadySince = nil
+        autoCenterLastCheck = nil
         motion.start()
-        message = "AirPods are detected automatically. Face the display, then choose Set center."
+        message = autoCenter ? "AirPods are detected automatically. Face the display and hold still briefly." : "AirPods are detected automatically. Face the display, then choose Set center."
+    }
+
+    /// One automatic reference per wear/start session. Stillness cannot identify
+    /// the display; this explicitly assumes the wearer is facing it. A reference
+    /// jump in an existing connection must never silently center a held turn.
+    func checkAutomaticCenter(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard !isShuttingDown else { return }
+        let newDisconnect = motion.disconnectEventCount != observedDisconnectCount
+        let restarted = motion.connectionState == .unknown && observedConnection != .unknown
+        observedDisconnectCount = motion.disconnectEventCount
+        observedConnection = motion.connectionState
+        if newDisconnect || restarted || !motion.isRunning {
+            autoCenterEligible = true
+            autoCenterSteadySince = nil
+            autoCenterLastCheck = nil
+        }
+        guard autoCenter else {
+            setAutoCenterStatus("Automatic center is off. Use Set center.")
+            return
+        }
+        guard isMacSessionActive, motion.isRunning, !removalActionPending else {
+            autoCenterSteadySince = nil
+            autoCenterLastCheck = nil
+            setAutoCenterStatus("Waiting for an active Mac session and AirPods.")
+            return
+        }
+        if motion.isCalibrated {
+            autoCenterEligible = false
+            autoCenterSteadySince = nil
+            setAutoCenterStatus("Center is set. It stays fixed while you turn your head.")
+            return
+        }
+        guard autoCenterEligible else {
+            setAutoCenterStatus("Head reference changed during this connection. Face the display and use Set center.")
+            return
+        }
+        guard now.isFinite, now >= 0, motion.connectionState == .connected,
+              motion.isFresh, motion.canCalibrate, !calibrating else {
+            autoCenterSteadySince = nil
+            autoCenterLastCheck = nil
+            setAutoCenterStatus("Face the display and hold still briefly to set center automatically.")
+            return
+        }
+        // A coordinator/UI gap cannot stand in for observed continuous stability.
+        if let last = autoCenterLastCheck, now < last || now - last > 0.3 {
+            autoCenterSteadySince = nil
+        }
+        autoCenterLastCheck = now
+        guard let steadySince = autoCenterSteadySince else {
+            autoCenterSteadySince = now
+            setAutoCenterStatus("Hold still facing the display. Setting center automatically…")
+            return
+        }
+        guard now - steadySince >= 0.8 else { return }
+        motion.calibrate()
+        guard motion.isCalibrated else {
+            autoCenterSteadySince = nil
+            setAutoCenterStatus(motion.status)
+            return
+        }
+        automaticCenterCount += 1
+        autoCenterEligible = false
+        autoCenterSteadySince = nil
+        simulate = false
+        setAutoCenterStatus("Center set automatically, assuming you faced the display. Set center can correct it.")
+        message = "Center set automatically. Your existing blur settings are ready."
+        if resumeAfterRecenter {
+            resumeAfterRecenter = false
+            enable(automatically: true)
+        }
+    }
+
+    private func setAutoCenterStatus(_ value: String) {
+        if autoCenterStatus != value { autoCenterStatus = value }
+    }
+
+    /// Separate sleep, display, and login-session state prevents a display wake
+    /// from restarting capture while the Mac's user session remains inactive.
+    func handleWorkspaceEvent(_ name: Notification.Name) {
+        guard !isShuttingDown else { return }
+        switch name {
+        case NSWorkspace.willSleepNotification: systemAwake = false
+        case NSWorkspace.screensDidSleepNotification: screensAwake = false
+        case NSWorkspace.sessionDidResignActiveNotification: sessionActive = false
+        case NSWorkspace.didWakeNotification: systemAwake = true
+        case NSWorkspace.screensDidWakeNotification: screensAwake = true
+        case NSWorkspace.sessionDidBecomeActiveNotification: sessionActive = true
+        default: return
+        }
+        if isMacSessionActive { startMotionAutomatically() }
+        else { suspend() }
     }
     func calibrate() {
         guard motion.isFresh else { message = "Wait for fresh AirPods motion before setting center."; return }
@@ -275,6 +403,8 @@ final class AppModel: NSObject, ObservableObject {
                     motion.calibrate()
                     calibrating = false
                     if motion.isCalibrated {
+                        autoCenterEligible = false
+                        autoCenterSteadySince = nil
                         simulate = false
                         message = "Center set. Turn left and right to confirm the preview follows the opposite side."
                         if resumeAfterRecenter { resumeAfterRecenter = false; enable() }
@@ -294,6 +424,7 @@ final class AppModel: NSObject, ObservableObject {
         inverted = false; opaque = false; wholeScreen = false
         blockInput = true; blocksEntireDisplay = false
         sleepDisplaysOnRemoval = false
+        autoCenter = true
         pause()
         selectedDisplayKeys = nil; persist()
         message = "Default settings restored."
@@ -317,7 +448,7 @@ final class AppModel: NSObject, ObservableObject {
                 guard ticket == accessTicket else { return }
                 guard !content.displays.isEmpty else { throw VeilRenderError.unavailable("No displays are available for capture.") }
                 verifiedScreenAccess = true; permissionGranted = true; captureErrorDetails = ""
-                message = "Screen access check passed. Set center and enable the effect to start live capture."
+                message = autoCenter ? "Screen access check passed. Face the display briefly, then enable the desktop effect." : "Screen access check passed. Set center and enable the effect to start live capture."
             } catch {
                 guard ticket == accessTicket else { return }
                 let detail = error as NSError
@@ -332,13 +463,16 @@ final class AppModel: NSObject, ObservableObject {
             }
         }
     }
-    func enable() {
+    func enable(automatically: Bool = false) {
         guard !enabled && !starting else { return }
         guard selectedDisplayCount > 0 else { message = "Select at least one display to blur."; return }
         guard motion.isFresh && motion.isCalibrated else { message = "Wear your AirPods and set your center before enabling the desktop effect."; return }
+        guard !automatically || (autoCenter && isMacSessionActive) else { return }
+        autoCenterEligible = false
         refreshPermission()
         accessTicket += 1; checkingAccess = false
         starting = true; generation += 1
+        automaticResumeStarting = automatically
         let ticket = generation
         Task {
             guard generation == ticket && starting else { return }
@@ -348,16 +482,18 @@ final class AppModel: NSObject, ObservableObject {
                 guard motion.trackingValid else {
                     pause(cancelRemoval: false)
                     resumeAfterRecenter = true
-                    message = "Tracking changed while starting. Set center to resume."
+                    message = "Tracking changed while starting. Follow the head-tracking guidance to resume."
                     return
                 }
                 starting = false; enabled = true; simulate = false
+                automaticResumeStarting = false
                 verifiedScreenAccess = true; permissionGranted = true; captureErrorDetails = ""
                 message = "Head tracking is active. " + pauseHint
                 stateChanged?()
             } catch {
                 guard generation == ticket else { return }
                 starting = false; enabled = false; overlay.stop()
+                automaticResumeStarting = false
                 let detail = error as NSError
                 captureErrorDetails = "\(detail.domain) (\(detail.code)): \(detail.localizedDescription)"
                 if detail.domain == SCStreamErrorDomain && detail.code == SCStreamError.Code.userDeclined.rawValue {
@@ -371,6 +507,9 @@ final class AppModel: NSObject, ObservableObject {
     func pause(cancelRemoval: Bool = true) {
         if cancelRemoval { cancelRemovalAction() }
         resumeAfterRecenter = false
+        automaticResumeStarting = false
+        autoCenterSteadySince = nil
+        autoCenterLastCheck = nil
         accessTicket += 1; checkingAccess = false
         calibrationTicket += 1; calibrating = false
         generation += 1; enabled = false; starting = false; overlay.stop()
@@ -379,8 +518,11 @@ final class AppModel: NSObject, ObservableObject {
         stateChanged?()
     }
     private func suspend() {
+        let restoreEffect = enabled || starting || resumeAfterRecenter
         pause(); motion.stop()
-        message = "Paused for sleep or session change. AirPods detection resumes automatically; set center to resume the effect."
+        resumeAfterRecenter = restoreEffect
+        autoCenterEligible = true
+        message = "Paused for sleep or session change. Face the display after returning; automatic center can restore the effect."
     }
-    func shutdown() { pause(); motion.stop(); clock?.invalidate(); removalTimer?.invalidate() }
+    func shutdown() { isShuttingDown = true; pause(); motion.stop(); clock?.invalidate(); removalTimer?.invalidate() }
 }

@@ -25,7 +25,7 @@ To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVe
 
 1. Connect and wear the AirPods on this Mac.
 2. AirVeil detects connected, worn AirPods automatically. Allow Motion access when requested.
-3. Face the center of the display and hold still briefly. Choose **Set center**.
+3. Face the center of the display and hold still for about 1.25 seconds. **Automatic center** is on by default. Use **Set center** if you need to correct the starting direction.
 4. Confirm in the preview that a physical left turn obscures the right side. Use **Invert direction** if needed.
 5. Choose **Allow screen capture** and enable AirVeil in the macOS privacy settings. Reopen the app if macOS requests it. Subsequent builds use the same signing identity to preserve this approval.
 6. Choose **Enable desktop effect**.
@@ -52,11 +52,12 @@ Migrating from an older ad hoc build requires one new macOS screen-capture appro
 - Adjustable blur, edge feather, and response time.
 - **Opaque cover** removes source color at full strength for stronger obscuration.
 - AirPods motion starts automatically at launch, reconnects automatically, and retries interruptions with a bounded delay.
-- Calibration is deliberate; holding a turned pose never silently resets center.
+- **Automatic center** establishes a neutral pose once after startup, reinsertion/reconnection, or wake, after about 1.25 seconds of fresh steady motion. Face the display during that moment. It preserves effect settings, but does not claim to learn the location of your screen or reuse an unverified old sensor reference. Switch it off for manual calibration.
+- Holding a turned pose during an established session never silently resets center. An unexplained mid-session reference jump still needs **Set center**; stillness alone cannot distinguish a deliberate held turn from facing the screen.
 - Sensor gaps, earbud source changes, and detected reference jumps invalidate calibration.
-- Lost or invalid tracking automatically pauses the effect and clears both blur and input blockers. Once fresh motion returns, face the display and **Set center** to resume. An explicit Pause cancels that automatic resume intent. Capture failures also pause and clear. This recovery policy exposes the normal desktop while paused.
+- Lost or invalid tracking automatically pauses the effect and clears both blur and input blockers. After reinsertion/reconnection, Automatic center can restore a previously active effect once the Mac session is active and you face the display briefly. An explicit Pause, display selection change, or reset cancels that resume intent. Manual **Set center** remains available. Capture failures also pause and clear. This recovery policy exposes the normal desktop while paused.
 - Starting a drag before blur appears may leave that already-started drag with the underlying app; the blockers intercept newly delivered pointer events in covered regions.
-- Sleep or session resignation pauses the effect and discards captured frames. AirPods detection resumes automatically after wake; set center and enable to resume.
+- Sleep or session resignation pauses the effect and discards captured frames. AirPods detection and automatic centering resume after wake. A previously active effect resumes only after centering and session activation; a manually paused effect stays paused.
 - Display off is requested once per removal. Reconnecting during the delay, pressing Pause, switching this setting off, or quitting cancels a pending request. Waking while the AirPods remain absent does not immediately turn the displays off again. Reset defaults disables this option.
 - Display reconfiguration requires rebuilding capture with a deliberate pause/re-enable.
 

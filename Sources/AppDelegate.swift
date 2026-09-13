@@ -105,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "sleepDisplaysOnRemoval":model.sleepDisplaysOnRemoval,"removalStatus":model.removalStatus,
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
             "displaySleepRequestCount":model.displaySleepRequestCount,
+            "autoCenter":model.autoCenter,"autoCenterStatus":model.autoCenterStatus,
+            "automaticCenterCount":model.automaticCenterCount,
             "wholeScreen":model.wholeScreen,"leftStrength":model.strengths.left,"rightStrength":model.strengths.right,
             "captureReady":model.overlay.isReady,"motionStatus":model.motion.status,
             "motionFresh":model.motion.isFresh,"calibrated":model.motion.isCalibrated,"motionRunning":model.motion.isRunning,
