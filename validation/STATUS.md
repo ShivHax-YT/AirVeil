@@ -24,3 +24,7 @@ Final rebuilt-binary permission recovery and desktop behavior, explicit anatomic
 The oldest startup sample's absolute acquisition age remains unverified because headphone timestamp-to-host epoch was not assumed. Increasing delivery lag is detected relative to the best observed offset within a source session.
 
 No iPhone/iPad system-wide version is claimed. No confidentiality guarantee is claimed for blur.
+
+## Current permission recovery check
+
+After the final feature build, System Settings showed AirVeil's Screen & System Audio Recording switch on, while the running app reported capture preflight false. Relaunching the same installed binary did not resolve that discrepancy. The installed ad hoc designated requirement is tied to a code hash. An off/on approval refresh for this app has been requested; its result is pending. No permission settings or TCC database were changed by the agent. The app remains paused, receiving fresh AirPods samples around 50/s, while desktop capture is unavailable.

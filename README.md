@@ -32,6 +32,10 @@ To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVe
 
 The preview slider uses a synthetic sample desktop and requires no screen capture. Its simulation is separate from live sensor verification.
 
+## Permission recovery after a development rebuild
+
+If AirVeil says capture is unavailable even though its switch is on, quit and reopen AirVeil first. If it still reports unavailable, switch **AirVeil** off and back on in **System Settings → Privacy & Security → Screen & System Audio Recording**, and use **Quit & Reopen** if macOS offers it. This local build is signed ad hoc; its designated requirement includes its binary hash, so an updated executable can need renewed approval. No permission database reset or system security changes are needed for this recovery attempt.
+
 ## Controls and behavior
 
 - **Directional half / Whole screen** selects opposite-side blur or blur across the entire display.
