@@ -1,0 +1,162 @@
+import AppKit
+import SwiftUI
+import Combine
+import QuartzCore
+
+@MainActor
+final class AppModel: NSObject, ObservableObject {
+    let motion = MotionService()
+    let overlay = DesktopOverlayController()
+    @Published var pauseShortcutAvailable = false
+    @Published var enabled = false
+    @Published var starting = false
+    @Published var message = "Connect your AirPods to get started."
+    @Published var previewYaw = 0.0
+    @Published var simulate = true
+    @Published var strengths = VeilStrength(left: 0, right: 0)
+    @Published var onset = 8.0 { didSet { persist() } }
+    @Published var fullAngle = 32.0 { didSet { persist() } }
+    @Published var blurPoints = 32.0 { didSet { persist() } }
+    @Published var feather = 0.12 { didSet { persist() } }
+    @Published var response = 0.07 { didSet { persist() } }
+    @Published var inverted = false { didSet { persist() } }
+    @Published var opaque = false { didSet { persist() } }
+    @Published var permissionGranted = false
+    private var clock: CADisplayLink?
+    private var lastTime = 0.0
+    private var generation = 0
+    private var observers: [NSObjectProtocol] = []
+    private var subscriptions = Set<AnyCancellable>()
+    private var loading = true
+    var showWindow: (() -> Void)?
+    var stateChanged: (() -> Void)?
+
+    var pauseHint: String { pauseShortcutAvailable ? "Pause anytime  ⌃⌥⌘P" : "Pause from the AirVeil menu" }
+    var effectiveYaw: Double { (inverted ? -1 : 1) * motion.yawDegrees }
+    var shielded: Bool { enabled && (!motion.trackingValid || !overlay.isRunning || overlay.failureReason != nil) }
+    var headline: String {
+        if starting { return "Starting desktop effect…" }
+        if shielded { return "Tracking interrupted — screen covered" }
+        if enabled && !overlay.isReady { return "Preparing live desktop frames…" }
+        if enabled { return "Following your head" }
+        return "Desktop effect paused"
+    }
+    var direction: String {
+        if shielded { return "Screen covered · tracking or capture needs attention" }
+        if enabled && !overlay.isReady { return "Waiting for live desktop frames" }
+        let yaw = simulate && !enabled ? previewYaw : effectiveYaw
+        if abs(yaw) <= onset { return "Centered · screen clear" }
+        return yaw > 0 ? "Looking left · right side obscured" : "Looking right · left side obscured"
+    }
+    override init() {
+        super.init()
+        let d = UserDefaults.standard
+        onset = Self.read(d, "onset", 8, 0...25)
+        fullAngle = Self.read(d, "fullAngle", 32, 26...70)
+        blurPoints = Self.read(d, "blurPoints", 32, 8...64)
+        feather = Self.read(d, "feather", 0.12, 0.02...0.30)
+        response = Self.read(d, "response", 0.07, 0.025...0.20)
+        inverted = d.bool(forKey: "inverted")
+        opaque = d.bool(forKey: "opaque")
+        loading = false
+        refreshPermission()
+        motion.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
+        }.store(in: &subscriptions)
+        overlay.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
+        }.store(in: &subscriptions)
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.suspend() }
+            })
+        }
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.message = "Display configuration changed. Pause, reconnect, and enable again to rebuild the effect."
+                self?.motion.stop()
+                self?.installClock()
+            }
+        })
+        installClock()
+    }
+    private static func read(_ d: UserDefaults, _ key: String, _ fallback: Double, _ range: ClosedRange<Double>) -> Double {
+        guard d.object(forKey: key) != nil else { return fallback }
+        let x = d.double(forKey: key)
+        return x.isFinite ? min(range.upperBound, max(range.lowerBound, x)) : fallback
+    }
+    private func persist() {
+        guard !loading else { return }
+        let d = UserDefaults.standard
+        for (k,v) in [("onset",onset),("fullAngle",fullAngle),("blurPoints",blurPoints),("feather",feather),("response",response)] { d.set(v,forKey:k) }
+        d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque")
+    }
+    private func installClock() {
+        clock?.invalidate()
+        clock = NSScreen.main?.displayLink(target: self, selector: #selector(frame(_:)))
+        clock?.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        clock?.add(to: .main, forMode: .common)
+        lastTime = 0
+    }
+    @objc private func frame(_ link: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        let dt = lastTime == 0 ? 1.0/60 : min(0.1,max(0,now-lastTime))
+        lastTime = now
+        let yaw = enabled || !simulate ? (motion.trackingValid ? effectiveYaw : 0) : previewYaw
+        let target = VeilMath.target(yawDegrees: yaw, onset: onset, full: fullAngle)
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        strengths = VeilMath.advance(current: strengths,target: target,dt: dt,response: reduced ? 0.025 : response)
+        if enabled {
+            overlay.update(left: strengths.left,right: strengths.right,blurPoints: blurPoints,feather: feather,
+                           opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded)
+        }
+    }
+    func connectMotion() { motion.stop(); motion.start(); message = "Wear your AirPods, face the display, then choose Set center." }
+    func calibrate() {
+        motion.calibrate()
+        if motion.isCalibrated { simulate = false; message = "Center set. Turn left and right to confirm the preview follows the opposite side." }
+        else { message = motion.status }
+    }
+    func refreshPermission() { permissionGranted = CGPreflightScreenCaptureAccess() }
+    func requestScreenPermission() {
+        permissionGranted = CGRequestScreenCaptureAccess()
+        if !permissionGranted {
+            message = "Allow AirVeil in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen AirVeil if macOS requests it."
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+        }
+    }
+    func enable() {
+        guard !enabled && !starting else { return }
+        guard motion.isFresh && motion.isCalibrated else { message = "Connect AirPods and set your center before enabling the desktop effect."; return }
+        refreshPermission()
+        guard permissionGranted else { requestScreenPermission(); return }
+        starting = true; generation += 1
+        let ticket = generation
+        Task {
+            do {
+                try await overlay.start()
+                guard generation == ticket else { return }
+                starting = false; enabled = true; simulate = false
+                message = "Head tracking is active. " + pauseHint
+                stateChanged?()
+            } catch {
+                guard generation == ticket else { return }
+                starting = false; enabled = false; overlay.stop()
+                message = "Could not start desktop capture: \(error.localizedDescription)"
+                stateChanged?()
+            }
+        }
+    }
+    func pause() {
+        generation += 1; enabled = false; starting = false; overlay.stop()
+        strengths = VeilStrength(left: 0,right: 0)
+        message = "Desktop effect paused. Your screen is clear."
+        stateChanged?()
+    }
+    private func suspend() {
+        pause(); motion.stop()
+        message = "Paused for sleep or session change. Reconnect and set center to resume."
+    }
+    func shutdown() { pause(); motion.stop(); clock?.invalidate() }
+}

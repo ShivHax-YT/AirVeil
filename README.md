@@ -1,20 +1,69 @@
 # AirVeil
 
-A native macOS app that uses AirPods head motion to progressively blur the opposite side of the desktop: look left to obscure the right, and look right to obscure the left.
+AirVeil is a native macOS menu-bar app that uses AirPods head motion to progressively obscure the opposite side of your desktop. Turn left to blur the right side; turn right to blur the left. The untouched side stays fully transparent and interactive.
 
-## Development status
+## Requirements
 
-Research and platform validation are in progress before implementation. macOS is the first test platform; iPhone and iPad feasibility is evaluated separately.
+- macOS 14 or later and a Metal-capable Mac.
+- AirPods with dynamic head tracking; AirPods Pro 3 are the initial hardware test target.
+- Motion access for the sensor and Screen Recording access for the live desktop effect.
+- Xcode Command Line Tools to build. Full Xcode's offline Metal compiler is not required.
 
-## Intended behavior
+## Build and run
 
-- AirPods motion input with explicit center calibration and connection status.
-- Smooth, angle-dependent desktop blur with a feathered boundary.
-- Adjustable activation angle, strength, response speed, and direction.
-- Live desktop interaction through a click-through overlay.
-- Menu-bar controls, preview, pause, and a quick way to clear the overlay.
-- Local processing of motion and screen frames.
+```sh
+./scripts/install.sh
+```
 
-Software blur is visible to everyone looking at the display. It does not create different images for different viewing angles.
+This builds an app for the current Mac's architecture, signs it ad hoc, installs it at `/Applications/AirVeil.app`, and opens settings. An existing AirVeil install is retained in the ignored build directory. The build script prefers the installed macOS 26.5 SDK to avoid a missing SwiftUI macro plugin in this Mac's default SDK; set `AIRVEIL_SDK` to use another complete SDK.
 
-Research reports, implementation decisions, and validation evidence will be stored in this repository.
+To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVeil.app` to return to settings later.
+
+## Setup
+
+1. Connect and wear the AirPods on this Mac.
+2. Choose **Connect AirPods** and allow Motion access when requested.
+3. Face the center of the display and hold still briefly. Choose **Set center**.
+4. Confirm in the preview that a physical left turn obscures the right side. Use **Invert direction** if needed.
+5. Choose **Allow screen capture** and enable AirVeil in the macOS privacy settings. Reopen the app if macOS requests it.
+6. Choose **Enable desktop effect**.
+
+**Pause & Clear Screen** in the menu bar immediately removes all overlays. The app also registers **Control–Option–Command–P** as a global pause shortcut and reports when registration fails. Quitting removes the effect.
+
+The preview slider uses a synthetic sample desktop and requires no screen capture. Its simulation is separate from live sensor verification.
+
+## Controls and behavior
+
+- Default onset: 8 degrees; full effect: 32 degrees.
+- Adjustable blur, edge feather, and response time.
+- **Opaque cover** removes source color at full strength for stronger obscuration.
+- Calibration is deliberate; holding a turned pose never silently resets center.
+- Sensor gaps, earbud source changes, and detected reference jumps invalidate calibration.
+- Unexpected motion/capture failure while enabled shows an opaque cover. Pause remains available from the menu bar and the registered shortcut.
+- Sleep or session resignation pauses the effect and discards captured frames. Reconnect and recalibrate to resume.
+- Display reconfiguration requires rebuilding capture with a deliberate pause/re-enable.
+
+## Privacy and platform limits
+
+Motion and desktop frames are processed locally, in memory. The app captures no audio, runs no server, and includes no analytics or cloud inference. Its own windows are excluded from its capture streams to prevent repeated blur feedback. It does not save recordings.
+
+Software blur changes the same pixels for everyone looking at the display. It is not an optical privacy filter, cannot detect bystanders, and does not guarantee unreadability of all content. Transition edges are partly visible. Secure macOS surfaces and every fullscreen application are not guaranteed to be covered.
+
+iPhone and iPad support headphone motion, but a normal app cannot reproduce this arbitrary system-wide overlay across other apps. A future mobile implementation would need an explicitly limited app-owned content surface. The implemented target is macOS.
+
+## Research and validation
+
+Four research reports precede implementation:
+
+- [Sensor API](research/01-sensor-api.md)
+- [Sensor feasibility and calibration](research/02-sensor-feasibility.md)
+- [Desktop capture and overlays](research/03-desktop-overlay.md)
+- [Blur and animation](research/04-blur-animation.md)
+
+[Architecture decisions](research/DECISIONS.md) and [acceptance plan](research/VALIDATION-PLAN.md) distinguish documentation, synthetic tests, and physical evidence.
+
+Run `./scripts/test.sh` for deterministic motion math and actual Metal GPU render tests. Synthetic PNGs are written under `.build/render-artifacts/`. Passing these checks does not establish physical AirPods direction, sustained drift behavior, or privacy effectiveness. See [validation status](validation/STATUS.md) for current evidence.
+
+## Implementation
+
+Swift / SwiftUI / AppKit, Core Motion, ScreenCaptureKit, Metal, and Metal Performance Shaders. Original code informed by public Apple documentation and the visual behavior of [macTilt](https://github.com/lqSky7/iphone-duo-macos-animation); no macTilt source is copied.
