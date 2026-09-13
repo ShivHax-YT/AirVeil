@@ -178,6 +178,7 @@ final class AppModel: NSObject, ObservableObject {
         checkingAccess = true
         message = "Checking screen access with macOS…"
         Task {
+            guard ticket == accessTicket && checkingAccess else { return }
             defer { if ticket == accessTicket { checkingAccess = false } }
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -207,6 +208,7 @@ final class AppModel: NSObject, ObservableObject {
         starting = true; generation += 1
         let ticket = generation
         Task {
+            guard generation == ticket && starting else { return }
             do {
                 try await overlay.start()
                 guard generation == ticket else { return }

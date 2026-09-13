@@ -75,6 +75,29 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             window.orderFrontRegardless()
         }
     }
+    private struct DisplayIdentity: Equatable {
+        let id: UInt32
+        let frame: NSRect
+        let backingScale: CGFloat
+    }
+    private static func identities(for screens: [NSScreen]) throws -> [DisplayIdentity] {
+        try screens.map { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                throw VeilRenderError.unavailable("An active display has no capture identifier.")
+            }
+            return DisplayIdentity(id: number.uint32Value, frame: screen.frame, backingScale: screen.backingScaleFactor)
+        }.sorted { $0.id < $1.id }
+    }
+    private func validateStartup(generation run: UInt64, initialDisplays: [DisplayIdentity]) throws {
+        guard run == generation else { throw CancellationError() }
+        guard !failed else {
+            throw VeilRenderError.unavailable(failureReason ?? "Capture failed while starting. Enable again.")
+        }
+        guard try Self.identities(for: NSScreen.screens) == initialDisplays else {
+            throw VeilRenderError.unavailable("Display arrangement changed while capture was starting. Enable again to capture every current display.")
+        }
+    }
+
     private var sessions: [DisplaySession] = []
     private var generation: UInt64 = 0
     private var failed = false
@@ -97,6 +120,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         status = "Preparing display capture…"
         let screens = NSScreen.screens
         guard !screens.isEmpty else { throw VeilRenderError.unavailable("No active displays found.") }
+        let initialDisplays = try Self.identities(for: screens)
         let fresh = screens.map { DisplaySession(screen: $0) }
         sessions = fresh
         do {
@@ -104,12 +128,12 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 if let error = session.view.initializationError { throw VeilRenderError.unavailable(error) }
             }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            guard run == generation else { throw CancellationError() }
+            try validateStartup(generation: run, initialDisplays: initialDisplays)
             guard let ownApp = content.applications.first(where: { $0.processID == ProcessInfo.processInfo.processIdentifier }) else {
                 throw VeilRenderError.unavailable("AirVeil could not identify its own windows for capture exclusion. Keep Settings open and try again.")
             }
             for (screen, session) in zip(screens, fresh) {
-                guard run == generation else { throw CancellationError() }
+                try validateStartup(generation: run, initialDisplays: initialDisplays)
                 guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
                       let display = content.displays.first(where: { $0.displayID == number.uint32Value }) else {
                     throw VeilRenderError.unavailable("An active display could not be matched to screen capture.")
@@ -143,8 +167,9 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 try stream.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "app.airveil.capture.\(number.uint32Value)", qos: .userInteractive))
                 try await stream.startCapture()
                 guard run == generation else { try? await stream.stopCapture(); throw CancellationError() }
+                try validateStartup(generation: run, initialDisplays: initialDisplays)
             }
-            guard run == generation else { throw CancellationError() }
+            try validateStartup(generation: run, initialDisplays: initialDisplays)
             isRunning = true
             status = "Waiting for first desktop frames…"
             applyEffect()

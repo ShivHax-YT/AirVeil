@@ -5,7 +5,7 @@
 - Four cited research reports completed and reviewed before app implementation.
 - Native macOS app builds against macOS 26.5 SDK with deployment target 14.0.
 - App installed at `/Applications/AirVeil.app`, signature verified, and launched.
-- 2,094 deterministic synthetic motion/math assertions pass.
+- 2,094 deterministic synthetic motion/math assertions, 45 motion-delivery lifecycle assertions, and 16 real-AppModel lifecycle assertions pass. The lifecycle suites use synthetic input or stubbed device/capture APIs.
 - Actual GPU render tests pass at 1x and 2x for transparent neutral pixels, opposite-side masks, monotonic/mirrored feather, premultiplied alpha, opaque source independence, full shield, and top-left image orientation.
 - Running native settings window inspected visually; simulated left turn produces right-side blur with a clear left side.
 - Independent reviews found and fixed run-loop freshness, terminal retry, buffered-sample lag, display-change reveal, preview failure-state, and shortcut-advertising issues.
@@ -17,7 +17,7 @@ The first integrated build received AirPods Pro 3 motion at approximately 49–5
 
 The newest build adds whole-screen coverage, reset defaults, clearer calibration, and idle rendering improvements. Whole-screen preview and reset to 8° onset / 32° full angle / 32 pt blur / 12% feather / 70 ms response were verified through the running UI. Paused static app CPU was observed near 1.1% after optimization, compared with a prior snapshot near 38%; these snapshots are not a controlled energy benchmark.
 
-Synthetic native-resolution GPU benchmark at the main display's 1920×1080, 1x mode: 120 changed frames, last observed median 1.313 ms and p95 4.815 ms. This measures blit + three Gaussian passes + composition, not real display FPS or sensor latency. Eight repeated renderer release/reuse cycles pass; late frames are rejected. See Tests/PerformanceTests.swift to reproduce.
+Synthetic native-resolution GPU benchmark at the main display's 1920×1080, 1x mode: 120 changed frames, last observed median 0.773 ms and p95 2.995 ms. This measures blit + three Gaussian passes + composition, not real display FPS or sensor latency. Eight repeated renderer release/reuse cycles pass; late frames are rejected. See Tests/PerformanceTests.swift to reproduce.
 
 Persistent permission across a changed signed build, live desktop capture, and the wearer-confirmed left/right whole-screen sweep now pass. Sustained calibration, fullscreen/Spaces coverage, display reconfiguration, physical reconnect/wake behavior, and manual global-shortcut confirmation remain pending. No broader hardware-completion claim is made.
 
@@ -38,3 +38,17 @@ Whole-screen mode now uses a directional sweeping edge instead of equal blur acr
 Identity update evidence: approved build code hash `c379ab4f7bd2f8139ca5d17f875f31d4a723aea5`; updated build code hash `5c475b4edfb66470bdc717a56f234b9146b73f37`. Both use the same certificate-bound designated requirement. Private signing credentials are outside the repository and were not included in this evidence.
 
 During live testing, a transient delayed-motion event invalidated calibration and activated the documented protective cover. Fresh samples recovered automatically; a subsequent Set center restored tracking. The final inspected UI showed Following your head, Live desktop capture, and Whole-screen sweep enabled. This observation does not establish sustained calibration reliability.
+
+## Reliability update 0.2.1 (build 3)
+
+- Root cause of UI-induced delayed-motion warnings: acquisition callbacks were on the main queue and their receipt timestamps included UI scheduling delay. Collection now runs on a serial background queue. A bounded buffer delivers the newest pose while retaining intervening sensor gaps, source changes, invalid data, clock changes, and terminal errors. The watchdog consumes queued acquisition before checking freshness. Synthetic tests cover a one-second UI stall, menu-tracking coalescing, real sensor lag, gaps, source switches, reference jumps, invalid samples, terminal errors, and expired acquisition.
+- Fixed a queued-start cancellation race: immediate Pause or shutdown before the async capture/access-check task begins now prevents that task from starting. The real AppModel tests fail when either entry guard is removed.
+- Capture startup now rechecks display identity, exact frame, backing scale, generation, and failure state across each async boundary. This prevents starting a partially outdated display set or continuing after an early stream failure.
+- Additional actual-GPU tests pass for newest captured-buffer selection, unchanged idle frames, 16 alternating live source images without retained trails, clear-side transparency, and resized source allocation.
+- Build 3 installed and its actual ScreenCaptureKit access check passed without new permission. The running UI observed automatic AirPods motion at about 51 samples/s after reconnection and manual center selection.
+- Main display inventory at test time: 1920×1080 at 1× and a second display at (1920, -239), 1470×956 points at 2×. Current live two-display alignment, fullscreen coverage, physical reconnection, and manual pause-key checks are requested from the wearer.
+- Automated key injection from GitHub Desktop did not increment the app's new global-pause activation counter. This does not establish whether a physical hotkey is delivered; manual confirmation is pending. Registration itself succeeds.
+
+All current automated suites and a complete signed build pass. The latest physical checks remain separate from this result.
+
+A 90.2-second live observation of build 3 collected 178 fresh diagnostic snapshots: capture stayed ready in all 178; motion was fresh in 170 and calibrated in 148. Maximum added acquisition lag was 48.7 ms, with no delayed-motion warning in that interval. Eight snapshots were waiting for motion and 22 reported a head-reference jump; 30 snapshots used the protective cover. The wearer was carrying out requested physical checks, so this aggregate does not attribute the interruptions to a specific gesture or prove sustained calibration. Manual feedback is still pending. No head-pose history or screen image was saved in this aggregate.

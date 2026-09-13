@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotKey: EventHotKeyRef?
     private var hotHandler: EventHandlerRef?
     private var diagnosticTimer: Timer?
+    private var globalPauseActivations = 0
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = AppModel()
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
@@ -81,7 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let result = InstallEventHandler(GetApplicationEventTarget(), { _,_,context in
             guard let context else { return noErr }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
-            Task { @MainActor in delegate.model.pause() }
+            Task { @MainActor in
+                delegate.globalPauseActivations += 1
+                delegate.model.pause()
+            }
             return noErr
         },1,&type,pointer,&hotHandler)
         guard result == noErr else { model.message = "Global pause shortcut unavailable. Use the AirVeil menu to pause."; return }
@@ -98,7 +102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "motionFresh":model.motion.isFresh,"calibrated":model.motion.isCalibrated,"motionRunning":model.motion.isRunning,
             "yawDegrees":model.effectiveYaw,"addedDeliveryLag":model.motion.addedDeliveryLag,"sampleRate":model.motion.sampleRate,"source":model.motion.sourceName,
             "captureStatus":model.overlay.status,"captureRunning":model.overlay.isRunning,"enabled":model.enabled,
-            "shielded":model.shielded,"screenPermission":model.permissionGranted,"captureErrorDetails":model.captureErrorDetails,"globalPauseRegistered":hotKey != nil]
+            "shielded":model.shielded,"screenPermission":model.permissionGranted,"captureErrorDetails":model.captureErrorDetails,
+            "globalPauseRegistered":hotKey != nil,"globalPauseActivations":globalPauseActivations]
         if let data=try? JSONSerialization.data(withJSONObject:snapshot,options:[.prettyPrinted,.sortedKeys]) {
             try? data.write(to:URL(fileURLWithPath:path),options:.atomic)
         }

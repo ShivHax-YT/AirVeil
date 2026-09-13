@@ -55,3 +55,9 @@ Use a persistent self-signed certificate in a dedicated local keychain for devel
 Capture preflight is advisory, while an actual ScreenCaptureKit request determines access. Report authorization denial separately from rendering or display failures so those failures do not tell the user to grant permission again.
 
 Keep the same signed left/right transfer values in half and whole-screen modes. Half mode scales a fixed opposite-half mask. Whole-screen mode moves a feathered boundary from the opposite edge across the entire display. Independent left/right masks combine by alpha union during reversals, with exact clear and full-cover endpoints. The shader is shared by preview and desktop overlays.
+
+## Motion acquisition and startup cancellation
+
+Acquire headphone samples on a serial background operation queue. Timestamp and validate continuity there, then hand the newest pose to the main actor through a one-slot buffer. Preserve intervening source, timing, and quaternion discontinuities even when intermediate poses are coalesced. UI queue delays must not be mistaken for acquisition delays. Calibration remains an explicit user action; discarding obsolete UI deliveries must never silently establish a new head reference.
+
+Before a queued capture or access-check task begins, verify its generation still matches the user's current intent. Recheck capture generation, failure state, and the display ID/frame/backing-scale snapshot across each asynchronous startup boundary. Pause or a changing display arrangement must not let obsolete startup work publish an active effect.

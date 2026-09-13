@@ -8,6 +8,8 @@ import subprocess
 root = Path(__file__).resolve().parent.parent
 directory = Path.home() / "Library/Application Support/AirVeil/Signing"
 sdk = os.environ.get("AIRVEIL_SDK", "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk")
+if not Path(sdk).is_dir():
+    sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
 os.umask(0o077)
 (root / "build").mkdir(exist_ok=True)
 helper = root / "build/signing-keychain"

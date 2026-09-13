@@ -25,19 +25,20 @@ final class MotionService: NSObject, ObservableObject {
     private var watchdog: Timer?
     private var reference: CMAttitude?
     private var latest: CMAttitude?
-    private var previousQuaternion: VeilQuaternion?
-    private var source: CMDeviceMotion.SensorLocation?
-    private var previousTimestamp: TimeInterval?
     private var lastReceipt: TimeInterval?
     private var stableSince: TimeInterval?
-    private var stableAnchor: VeilQuaternion?
-    private var rateStart: TimeInterval?
-    private var rateSamples = 0
     private var streamRequested = false
     private var streamStartedAt: TimeInterval?
     private var nextRetryTime: TimeInterval = 0
     private var errorRetryCount = 0
-    private var sourceClock = VeilSampleClock()
+    private var mailbox: MotionDeliveryBuffer?
+    private let motionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "AirVeil.HeadphoneAcquisition"
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .userInteractive
+        return queue
+    }()
     private let staleAfter = 0.65
     private let calibrationWindow = 0.45
 
@@ -152,17 +153,30 @@ final class MotionService: NSObject, ObservableObject {
         streamGeneration &+= 1
         let run = generation, stream = streamGeneration
         status = "Waiting for AirPods motion and permission"
-        // Main operation queue keeps the small latest-pose update bounded and
-        // ordered with UI state. No image work or history processing occurs here.
-        manager.startDeviceMotionUpdates(to: .main) { [weak self] sample, error in
-            MainActor.assumeIsolated {
+        let buffer = MotionDeliveryBuffer(staleAfter: staleAfter)
+        mailbox = buffer
+        // Timestamp delivery independently of UI scheduling. This serial queue
+        // validates every sample; a one-slot mailbox forwards only the newest
+        // pose and preserves any intervening continuity failure.
+        manager.startDeviceMotionUpdates(to: motionQueue) { [weak self] sample, error in
+            let receipt = ProcessInfo.processInfo.systemUptime
+            let shouldNotify: Bool
+            if let error {
+                shouldNotify = buffer.offerError(error.localizedDescription)
+            } else if let sample {
+                let q = sample.attitude.quaternion
+                let r = sample.rotationRate
+                let reading = MotionReading(attitude: sample.attitude.copy() as? CMAttitude,
+                    timestamp: sample.timestamp, receipt: receipt,
+                    quaternion: VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w),
+                    speed: sqrt(r.x*r.x + r.y*r.y + r.z*r.z), source: sample.sensorLocation)
+                shouldNotify = buffer.offer(reading)
+            } else { return }
+            guard shouldNotify else { return }
+            DispatchQueue.main.async { [weak self, buffer] in
                 guard let self, self.isRunning, self.generation == run,
-                      self.streamGeneration == stream else { return }
-                if let error {
-                    self.handleStreamError(error)
-                    return
-                }
-                if let sample { self.receive(sample) }
+                      self.streamGeneration == stream, self.mailbox === buffer else { return }
+                self.drainMotionMailbox(fromScheduledCallback: true)
             }
         }
     }
@@ -182,72 +196,37 @@ final class MotionService: NSObject, ObservableObject {
         status = "Motion error: \(error.localizedDescription). \(recovery)"
     }
 
-    private func receive(_ sample: CMDeviceMotion) {
-        let now = ProcessInfo.processInfo.systemUptime
-        let q = Self.quaternion(sample.attitude)
-        let rotation = sample.rotationRate
-        let speed = sqrt(rotation.x*rotation.x + rotation.y*rotation.y + rotation.z*rotation.z)
-        guard sample.timestamp.isFinite, sample.timestamp >= 0, q.normalized != nil,
-              speed.isFinite, let attitude = sample.attitude.copy() as? CMAttitude else {
-            invalidateCalibration("Invalid motion sample — Set center after recovery")
+    private func drainMotionMailbox(fromScheduledCallback: Bool = false) {
+        guard let delivery = mailbox?.take(releaseNotification: fromScheduledCallback) else { return }
+        if let error = delivery.error {
+            handleStreamError(NSError(domain: "AirVeil.Motion", code: 2,
+                                      userInfo: [NSLocalizedDescriptionKey: error]))
+            return
+        }
+        if let issue = delivery.continuityIssue { invalidateCalibration(issue) }
+        addedDeliveryLag = delivery.addedLag
+        guard let reading = delivery.reading, let attitude = reading.attitude else {
             isFresh = false
             return
         }
-        if let previousTimestamp, sample.timestamp <= previousTimestamp {
-            invalidateCalibration("Motion clock changed — waiting for recovery; then Set center")
-            isFresh = false
-            // Drop this sample and reset ordering so a restarted source clock can
-            // recover, while refusing to use the out-of-order pose as direction.
-            self.previousTimestamp = nil
-            previousQuaternion = nil
-            return
-        }
-        if let lastReceipt, now - lastReceipt > staleAfter {
-            invalidateCalibration("Motion resumed after a gap — Set center")
-        }
-        if let source, source != sample.sensorLocation {
-            invalidateCalibration("Active AirPod changed — Set center")
-            previousQuaternion = nil
-            sourceClock.reset()
-        }
-        guard let lag = sourceClock.addedLag(source: sample.timestamp, receipt: now) else {
-            invalidateCalibration("Invalid motion delivery timing — waiting for recovery")
+        // Fresh acquisition can wait behind UI work. A still-old newest sample
+        // remains unsafe; never renew its receipt time at UI consumption.
+        guard VeilMath.isRecent(receipt: reading.receipt,
+                                now: ProcessInfo.processInfo.systemUptime, timeout: staleAfter) else {
+            invalidateCalibration("Motion stalled — waiting for recovery; then Set center")
             isFresh = false
             return
         }
-        addedDeliveryLag = lag
-        if lag >= staleAfter {
-            invalidateCalibration("Delayed motion samples — wait for live motion and Set center")
-            isFresh = false
-            // Keep the best offset rather than adopting this late stream as the
-            // new normal. Increasing buffered timestamps do not imply live pose.
-            previousTimestamp = sample.timestamp
-            previousQuaternion = nil
-            return
-        }
-        if let previousTimestamp, let previousQuaternion {
-            let dt = sample.timestamp - previousTimestamp
-            if dt > staleAfter {
-                invalidateCalibration("Motion sample gap — Set center")
-            } else if let distance = q.angularDistance(to: previousQuaternion),
-                      distance > max(0.35, speed * dt * 3 + 0.15) {
-                // Conservative discontinuity heuristic, not a drift guarantee.
-                invalidateCalibration("Head reference jumped — hold still and Set center")
-            }
-        }
-        previousTimestamp = sample.timestamp
-        previousQuaternion = q
-        lastReceipt = now
+        lastReceipt = reading.receipt
         latest = attitude
-        source = sample.sensorLocation
-        switch sample.sensorLocation {
+        stableSince = delivery.stableSince
+        sampleRate = delivery.sampleRate
+        switch reading.source {
         case .headphoneLeft: sourceName = "Left AirPod"
         case .headphoneRight: sourceName = "Right AirPod"
         case .default: sourceName = "Headphone motion sensor"
         @unknown default: sourceName = "Unknown headphone sensor"
         }
-        updateStability(q, speed: speed, now: now)
-        updateRate(now)
         errorRetryCount = 0
         isFresh = true
         if let reference, let relative = attitude.copy() as? CMAttitude {
@@ -263,27 +242,10 @@ final class MotionService: NSObject, ObservableObject {
         }
     }
 
-    private func updateStability(_ q: VeilQuaternion, speed: Double, now: TimeInterval) {
-        guard speed < 0.15 else { stableSince = nil; stableAnchor = nil; return }
-        if let anchor = stableAnchor, let distance = q.angularDistance(to: anchor), distance < 0.035 {
-            return
-        }
-        stableAnchor = q
-        stableSince = now
-    }
-
-    private func updateRate(_ now: TimeInterval) {
-        guard let rateStart else { self.rateStart = now; rateSamples = 0; return }
-        rateSamples += 1
-        let elapsed = now - rateStart
-        if elapsed >= 1 {
-            sampleRate = Double(rateSamples) / elapsed
-            self.rateStart = now
-            rateSamples = 0
-        }
-    }
-
     private func checkFreshness() {
+        // Consume acquisition that may already be waiting before judging the
+        // previous UI snapshot. This also operates during menu tracking.
+        drainMotionMailbox()
         if !streamRequested { beginStreamIfAvailable() }
         let now = ProcessInfo.processInfo.systemUptime
         if streamRequested, let receipt = lastReceipt ?? streamStartedAt, now - receipt > 5 {
@@ -296,7 +258,6 @@ final class MotionService: NSObject, ObservableObject {
             if isFresh { invalidateCalibration("Motion stalled — waiting for recovery; then Set center") }
             isFresh = false
             sampleRate = 0
-            rateStart = nil
         }
     }
 
@@ -305,29 +266,170 @@ final class MotionService: NSObject, ObservableObject {
         isCalibrated = false
         yawDegrees = 0
         stableSince = nil
-        stableAnchor = nil
         status = message
     }
 
     private func resetSamples() {
         invalidateCalibration("Waiting for motion")
         latest = nil
-        previousQuaternion = nil
-        previousTimestamp = nil
-        sourceClock.reset()
+        mailbox = nil
         addedDeliveryLag = 0
         lastReceipt = nil
-        source = nil
         sourceName = "No headphone sensor"
         sampleRate = 0
-        rateStart = nil
-        rateSamples = 0
         isFresh = false
     }
 
     private static func quaternion(_ attitude: CMAttitude) -> VeilQuaternion {
         let q = attitude.quaternion
         return VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w)
+    }
+}
+
+/// The copied attitude is immutable on the acquisition side and transferred
+/// through the lock; only the main actor makes a second, mutable relative copy.
+struct MotionReading: @unchecked Sendable {
+    let attitude: CMAttitude?
+    let timestamp: TimeInterval
+    let receipt: TimeInterval
+    let quaternion: VeilQuaternion
+    let speed: Double
+    let source: CMDeviceMotion.SensorLocation
+}
+
+struct MotionDelivery {
+    let reading: MotionReading?
+    let continuityIssue: String?
+    let error: String?
+    let stableSince: TimeInterval?
+    let sampleRate: Double
+    let addedLag: Double
+}
+
+/// Bounded acquisition/UI handoff. Every sensor sample is validated before
+/// replacement. Errors and lost continuity are sticky until UI consumption, so
+/// dropping obsolete visual poses cannot conceal an intervening sensor failure.
+final class MotionDeliveryBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let staleAfter: TimeInterval
+    private var notificationPending = false
+    private var updatePending = false
+    private var latest: MotionReading?
+    private var issue: String?
+    private var error: String?
+    private var previous: MotionReading?
+    private var clock = VeilSampleClock()
+    private var stableSince: TimeInterval?
+    private var stableAnchor: VeilQuaternion?
+    private var rateStart: TimeInterval?
+    private var rateSamples = 0
+    private var sampleRate = 0.0
+    private var addedLag = 0.0
+
+    init(staleAfter: TimeInterval = 0.65) { self.staleAfter = staleAfter }
+
+    /// True means schedule one main-queue drain; further samples replace the
+    /// slot without adding tasks to the UI queue.
+    @discardableResult
+    func offer(_ reading: MotionReading) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard error == nil else { return false }
+        let notify = !notificationPending
+        notificationPending = true
+        updatePending = true
+        guard reading.timestamp.isFinite, reading.timestamp >= 0,
+              reading.receipt.isFinite, reading.receipt >= 0,
+              reading.quaternion.normalized != nil, reading.speed.isFinite else {
+            fail("Invalid motion sample — Set center after recovery")
+            return notify
+        }
+        if let previous, previous.source != reading.source {
+            fail("Active AirPod changed — Set center")
+            clock.reset()
+            self.previous = nil
+        }
+        if let previous {
+            let sourceGap = reading.timestamp - previous.timestamp
+            let receiptGap = reading.receipt - previous.receipt
+            if sourceGap <= 0 || receiptGap < 0 {
+                fail("Motion clock changed — waiting for recovery; then Set center")
+                // Keep the lag baseline: out-of-order delivery must not make
+                // stale data fresh. An actual reset recovers via normal retry.
+                return notify
+            }
+            if receiptGap >= staleAfter || sourceGap >= staleAfter {
+                fail("Motion resumed after a sensor gap — Set center")
+            } else if let distance = reading.quaternion.angularDistance(to: previous.quaternion),
+                      distance > max(0.35, reading.speed * sourceGap * 3 + 0.15) {
+                fail("Head reference jumped — hold still and Set center")
+            }
+        }
+        guard let lag = clock.addedLag(source: reading.timestamp, receipt: reading.receipt) else {
+            fail("Invalid motion delivery timing — waiting for recovery")
+            return notify
+        }
+        addedLag = lag
+        previous = reading
+        guard lag < staleAfter else {
+            fail("Delayed sensor samples — wait for live motion and Set center")
+            return notify
+        }
+        if reading.speed >= 0.15 {
+            stableSince = nil
+            stableAnchor = nil
+        } else if stableAnchor == nil ||
+                    (reading.quaternion.angularDistance(to: stableAnchor!) ?? .infinity) >= 0.035 {
+            stableSince = reading.receipt
+            stableAnchor = reading.quaternion
+        }
+        if let rateStart {
+            rateSamples += 1
+            let elapsed = reading.receipt - rateStart
+            if elapsed >= 1 {
+                sampleRate = Double(rateSamples) / elapsed
+                self.rateStart = reading.receipt
+                rateSamples = 0
+            }
+        } else { rateStart = reading.receipt }
+        latest = reading
+        return notify
+    }
+
+    @discardableResult
+    func offerError(_ message: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let notify = !notificationPending
+        notificationPending = true
+        updatePending = true
+        error = message
+        latest = nil
+        return notify
+    }
+
+    func take(releaseNotification: Bool = true) -> MotionDelivery? {
+        lock.lock()
+        defer { lock.unlock() }
+        // The common-mode watchdog may consume data before the scheduled main
+        // task runs. Keep its scheduling token until that task actually drains,
+        // so menu tracking cannot accumulate a task on every watchdog tick.
+        if releaseNotification { notificationPending = false }
+        guard updatePending else { return nil }
+        let delivery = MotionDelivery(reading: latest, continuityIssue: issue,
+            error: error, stableSince: stableSince, sampleRate: sampleRate, addedLag: addedLag)
+        updatePending = false
+        issue = nil
+        latest = nil
+        // A terminal error remains latched until the owner retires this buffer.
+        return delivery
+    }
+
+    private func fail(_ message: String) {
+        issue = message
+        latest = nil
+        stableSince = nil
+        stableAnchor = nil
     }
 }
 

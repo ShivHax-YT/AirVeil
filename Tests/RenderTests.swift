@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
+import CoreVideo
 
 @main struct RenderTests {
     @MainActor static func main() throws {
@@ -113,7 +114,54 @@ import UniformTypeIdentifiers
             print("PASS \(scale)x whole-screen: directional quarter/half/three-quarter sweep, mirror, clear/full endpoints, continuous reversal")
             print("PASS \(scale)x: transparent neutral, mirrored/monotonic feather, premultiplied alpha, opaque independence, full shield, image orientation")
         }
+        // Exercise the actual capture-buffer path, not only CGImage preview upload.
+        // Queue two distinct sources before drawing: only the newest may appear.
+        let mailbox = VeilFrameMailbox()
+        view.frameMailbox = mailbox
+        view.rendersBaseImage = false
+        view.sourcePixelScale = 1
+        view.setEffect(left: 0, right: 1, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        let redFrame = try solidCaptureBuffer(width: 96, height: 64, bgra: 0xFFFF0000)
+        let blueFrame = try solidCaptureBuffer(width: 96, height: 64, bgra: 0xFF0000FF)
+        mailbox.put(redFrame)
+        mailbox.put(blueFrame)
+        let newest = bytes(try view.renderOffscreen(width: 96, height: 64))
+        precondition(pixel(newest,96,90,32) == [255,0,0,255], "Capture must display newest queued frame without channel swapping")
+        precondition(!mailbox.hasPending, "Rendering must consume the newest pending frame")
+        for _ in 0..<8 {
+            let idle = bytes(try view.renderOffscreen(width: 96, height: 64))
+            precondition(idle == newest, "Idle capture must retain exact pixels without recursive darkening")
+        }
+        for frame in 0..<16 {
+            let isRed = frame.isMultiple(of: 2)
+            mailbox.put(isRed ? redFrame : blueFrame)
+            let live = bytes(try view.renderOffscreen(width: 96, height: 64))
+            precondition(pixel(live,96,90,32) == (isRed ? [0,0,255,255] : [255,0,0,255]),
+                         "New capture pixels must fully replace previous source without trails")
+            precondition(pixel(live,96,5,32) == [0,0,0,0], "Capture updates may not copy pixels onto the clear side")
+        }
+        // Reallocation after changed source dimensions may not use old-size levels.
+        mailbox.put(try solidCaptureBuffer(width: 192, height: 128, bgra: 0xFF00FF00))
+        let resized = bytes(try view.renderOffscreen(width: 96, height: 64))
+        precondition(pixel(resized,96,90,32) == [0,255,0,255], "Resized capture must rebuild source and blur targets")
+        view.releaseCapturedResources()
+        print("PASS capture textures: newest-frame coalescing, idle retention, changing live pixels without trails, clear-side transparency, source resize")
         print("Synthetic render artifacts: \(output.path)")
+    }
+    static func solidCaptureBuffer(width: Int, height: Int, bgra: UInt32) throws -> CVPixelBuffer {
+        var image: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any], kCVPixelBufferMetalCompatibilityKey: true]
+        guard CVPixelBufferCreate(nil,width,height,kCVPixelFormatType_32BGRA,attributes as CFDictionary,&image) == kCVReturnSuccess,
+              let image else { throw VeilRenderError.unavailable("Cannot create synthetic capture buffer") }
+        CVPixelBufferLockBaseAddress(image, [])
+        defer { CVPixelBufferUnlockBaseAddress(image, []) }
+        let base = CVPixelBufferGetBaseAddress(image)!
+        let rowBytes = CVPixelBufferGetBytesPerRow(image)
+        for y in 0..<height {
+            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt32.self)
+            for x in 0..<width { row[x] = bgra }
+        }
+        return image
     }
     static func bytes(_ image: CGImage) -> [UInt8] { Array(image.dataProvider!.data! as Data) }
     static func pixel(_ bytes: [UInt8], _ width: Int, _ x: Int, _ y: Int) -> [UInt8] {
