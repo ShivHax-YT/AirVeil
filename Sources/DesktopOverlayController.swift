@@ -99,6 +99,10 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     @Published private(set) var availableDisplays: [VeilDisplayInfo] = []
     @Published private(set) var blockedPointerEventCount: UInt64 = 0
     var activeDisplayCount: Int { isRunning ? sessions.count : 0 }
+    var drawSubmissionCount: UInt64 { sessions.reduce(0) { $0 + $1.view.drawSubmissionCount } }
+    var sourceBlitCount: UInt64 { sessions.reduce(0) { $0 + $1.view.sourceBlitCount } }
+    var gaussianPassCount: UInt64 { sessions.reduce(0) { $0 + $1.view.gaussianPassCount } }
+    var redrawRequestCount: UInt64 { sessions.reduce(0) { $0 + $1.view.redrawRequestCount } }
     @MainActor private final class DisplaySession {
         let window: VeilOverlayWindow
         let view: VeilMetalView
@@ -127,12 +131,15 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         func observeBlockedPointer(_ callback: @escaping () -> Void) {
             for blocker in blockers { (blocker.contentView as? VeilPointerBlockerView)?.onBlockedPointer = callback }
         }
-        func hideBlockers() { for blocker in blockers { blocker.orderOut(nil) } }
+        func hideBlockers() { for blocker in blockers where blocker.isVisible { blocker.orderOut(nil) } }
         func setBlockers(_ intervals: [VeilInputInterval], active: Bool) {
             let frame = window.frame
             let usableHeight = max(0, frame.height - menuBand)
             for (index, blocker) in blockers.enumerated() {
-                guard active, index < intervals.count, usableHeight > 0 else { blocker.orderOut(nil); continue }
+                guard active, index < intervals.count, usableHeight > 0 else {
+                    if blocker.isVisible { blocker.orderOut(nil) }
+                    continue
+                }
                 let interval = intervals[index]
                 let rect = NSRect(x:frame.minX+frame.width*interval.lower, y:frame.minY,
                                   width:frame.width*(interval.upper-interval.lower), height:usableHeight)

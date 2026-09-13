@@ -2,9 +2,10 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 import CoreVideo
+import Metal
 
 @main struct RenderTests {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         _ = NSApplication.shared
         let view = VeilMetalView(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
         view.isPaused = true
@@ -18,7 +19,9 @@ import CoreVideo
             view.sourcePixelScale = Double(scale)
             view.rendersBaseImage = false
             view.setEffect(left: 0, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+            let blurBeforeNeutral = view.gaussianPassCount
             let neutral = try view.renderOffscreen(width: width, height: height)
+            precondition(view.gaussianPassCount == blurBeforeNeutral, "Neutral must not compute unused Gaussian levels")
             let neutralBytes = bytes(neutral)
             precondition(neutralBytes.allSatisfy { $0 == 0 }, "Neutral must be entirely transparent black")
 
@@ -52,7 +55,9 @@ import CoreVideo
                 }
             }
             view.setEffect(left: 0, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: true)
+            let blurBeforeShield = view.gaussianPassCount
             let shieldBytes = bytes(try view.renderOffscreen(width: width, height: height))
+            precondition(view.gaussianPassCount == blurBeforeShield, "Shield must not compute unused Gaussian levels")
             for i in stride(from: 3, to: shieldBytes.count, by: 4) { precondition(shieldBytes[i] == 255, "Fault shield must cover every pixel") }
 
             try view.setImage(input)
@@ -165,7 +170,128 @@ import CoreVideo
         precondition(pixel(resized,96,90,32) == [0,255,0,255], "Resized capture must rebuild source and blur targets")
         view.releaseCapturedResources()
         print("PASS capture textures: newest-frame coalescing, idle retention, changing live pixels without trails, clear-side transparency, source resize")
+        try await testDemandRendering()
         print("Synthetic render artifacts: \(output.path)")
+    }
+    @MainActor static func drainMainActor() async {
+        for _ in 0..<8 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    @MainActor static func testDemandRendering() async throws {
+        let view = VeilMetalView(frame: NSRect(x: 0, y: 0, width: 96, height: 64))
+        guard let device = view.device else { throw VeilRenderError.unavailable("No test GPU") }
+        precondition(view.isPaused && view.enableSetNeedsDisplay && view.framebufferOnly,
+                     "Live views must use demand drawing with optimized display-only drawables")
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 96, height: 64, mipmapped: false)
+        descriptor.storageMode = .shared; descriptor.usage = [.renderTarget, .shaderRead]
+        guard let target = device.makeTexture(descriptor: descriptor) else { throw VeilRenderError.unavailable("No test target") }
+        let waiting = VeilMetalView(frame: NSRect(x: 0, y: 0, width: 96, height: 64))
+        waiting.setEffect(left: 0, right: 1, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        await drainMainActor()
+        precondition(waiting.renderPendingOffscreen(to: target), "Waiting for first capture draws its placeholder once")
+        await drainMainActor()
+        let waitingRequests = waiting.redrawRequestCount
+        precondition(!waiting.renderPendingOffscreen(to: target) && waiting.gaussianPassCount == 0,
+                     "Missing first capture must not repeatedly submit a shield or unused blur")
+        await drainMainActor()
+        precondition(waiting.redrawRequestCount == waitingRequests, "No-first-frame placeholder must remain dormant")
+        waiting.releaseCapturedResources()
+        let initialRequests = view.redrawRequestCount
+        let mailbox = VeilFrameMailbox()
+        view.frameMailbox = mailbox
+        let red = try solidCaptureBuffer(width: 96, height: 64, bgra: 0xFFFF0000)
+        let blue = try solidCaptureBuffer(width: 96, height: 64, bgra: 0xFF0000FF)
+        var firstFrames = 0
+        view.onFirstFrame = { firstFrames += 1 }
+        for _ in 0..<20 { mailbox.put(red); mailbox.put(blue) }
+        await drainMainActor()
+        precondition(view.redrawRequestCount == initialRequests + 1, "Burst capture arrival must coalesce to one redraw invalidation")
+        precondition(view.renderPendingOffscreen(to: target), "A fresh neutral capture must present its first clear frame")
+        precondition(firstFrames == 0, "First-frame success must wait for GPU completion")
+        await drainMainActor()
+        precondition(firstFrames == 1, "Neutral first-frame GPU completion must still establish capture readiness")
+        precondition(view.sourceBlitCount == 0 && view.gaussianPassCount == 0,
+                     "Neutral live frames must avoid source copying and Gaussian work")
+        let requests = view.redrawRequestCount
+        for _ in 0..<40 { mailbox.put(red); mailbox.put(blue) }
+        await drainMainActor()
+        precondition(view.redrawRequestCount == requests && !view.renderPendingOffscreen(to: target),
+                     "Changing pixels under an unchanged transparent overlay must not request or submit redraws")
+        view.setEffect(left: 0, right: 1, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        await drainMainActor()
+        precondition(view.renderPendingOffscreen(to: target), "An effect change must awaken a demand-rendered view")
+        await drainMainActor()
+        precondition(view.sourceBlitCount == 1 && view.gaussianPassCount == 3,
+                     "Visible blur must process only the newest deferred source once")
+        var rendered = [UInt8](repeating: 0, count: 96*64*4)
+        target.getBytes(&rendered, bytesPerRow: 96*4, from: MTLRegionMake2D(0,0,96,64), mipmapLevel: 0)
+        precondition(pixel(rendered,96,90,32) == [255,0,0,255], "Resuming from neutral must display latest source, not old pixels")
+        precondition(firstFrames == 1 && !view.renderPendingOffscreen(to: target), "Idle output must stay dormant after one readiness signal")
+        view.setEffect(left: 0, right: 0.5, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        precondition(view.renderPendingOffscreen(to: target), "Head motion changes must redraw cached blur")
+        await drainMainActor()
+        precondition(view.gaussianPassCount == 3 && view.sourceBlitCount == 1, "Head-only updates must reuse source and cached blur")
+
+        view.renderingEnabled = false
+        mailbox.put(red)
+        view.setEffect(left: 1, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        await drainMainActor()
+        let hiddenRequests = view.redrawRequestCount
+        precondition(!view.renderPendingOffscreen(to: target), "Hidden preview work must not submit")
+        mailbox.put(blue)
+        await drainMainActor()
+        precondition(view.redrawRequestCount == hiddenRequests, "Hidden view must not invalidate display on incoming frames")
+        view.renderingEnabled = true
+        await drainMainActor()
+        precondition(view.renderPendingOffscreen(to: target), "Revealing the view must redraw latest pending state")
+        await drainMainActor()
+
+        // Hold two real commands behind an event; the third update cannot
+        // submit yet. Releasing the event must request that update again.
+        guard let event = device.makeSharedEvent() else { throw VeilRenderError.unavailable("No test GPU event") }
+        defer { event.signaledValue = 1 }
+        view.setEffect(left: 0.7, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        precondition(view.renderPendingOffscreen(to: target, waitingFor: event), "First blocked GPU submission")
+        view.setEffect(left: 0.6, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        precondition(view.renderPendingOffscreen(to: target, waitingFor: event), "Second blocked GPU submission")
+        view.setEffect(left: 0.5, right: 0, blurPoints: 32, feather: 0.12, opaque: false, shield: false)
+        precondition(!view.renderPendingOffscreen(to: target), "Two in-flight commands must bound GPU queue work")
+        await drainMainActor()
+        precondition(!view.renderPendingOffscreen(to: target), "A scheduled redraw while GPU is busy must preserve dirty state")
+        let blockedRequests = view.redrawRequestCount
+        event.signaledValue = 1
+        for _ in 0..<25 {
+            await drainMainActor()
+            if view.redrawRequestCount > blockedRequests { break }
+        }
+        precondition(view.redrawRequestCount > blockedRequests, "Completion must request the update deferred by GPU backpressure")
+        precondition(view.renderPendingOffscreen(to: target), "Newest deferred effect must submit after a slot becomes free")
+        await drainMainActor()
+
+        for opaque in [false, true] {
+            view.setEffect(left: 0, right: 1, blurPoints: 32, feather: 0.12, opaque: opaque, shield: !opaque, wholeScreen: true)
+            mailbox.put(red)
+            let blits = view.sourceBlitCount, passes = view.gaussianPassCount
+            precondition(view.renderPendingOffscreen(to: target), "Solid output must redraw on transition")
+            await drainMainActor()
+            precondition(view.sourceBlitCount == blits && view.gaussianPassCount == passes,
+                         "Full shield and full opaque sweep must skip unused source and blur work")
+        }
+        // Late notifications and first-frame completions from a released
+        // generation must not revive it or claim readiness for its successor.
+        let late = VeilFrameMailbox()
+        view.frameMailbox = late
+        late.put(red)
+        precondition(view.renderPendingOffscreen(to: target), "Queue first frame immediately before release")
+        view.releaseCapturedResources()
+        let releasedRequests = view.redrawRequestCount
+        late.put(blue)
+        await drainMainActor()
+        precondition(firstFrames == 1 && view.redrawRequestCount == releasedRequests && !view.renderPendingOffscreen(to: target),
+                     "Release must reject queued notifications, GPU readiness callbacks, and pending draws")
+        precondition(!late.hasPending && view.frameMailbox == nil, "Release must discard retained deferred source")
+        print("PASS demand renderer: coalesced frames, neutral/solid bypass, first-frame completion, latest-source reveal, hidden suspension, cached blur, bounded GPU retry, stale-generation release")
     }
     static func solidCaptureBuffer(width: Int, height: Int, bgra: UInt32) throws -> CVPixelBuffer {
         var image: CVPixelBuffer?

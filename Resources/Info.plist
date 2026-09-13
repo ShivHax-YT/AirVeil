@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.6.0</string>
+	<string>0.7.0</string>
 	<key>CFBundleVersion</key>
-	<string>7</string>
+	<string>8</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -28,5 +28,7 @@
 	<string>AirVeil uses AirPods head motion to blur the opposite side of your screen when you turn your head. Motion is processed locally.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>AirVeil processes your desktop locally to display a live directional blur. Screen frames are never recorded or uploaded.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Optional brief camera checks help AirVeil remember your screen direction after AirPods are reinserted. Images are processed only on this Mac and discarded, never recorded or uploaded.</string>
 </dict>
 </plist>

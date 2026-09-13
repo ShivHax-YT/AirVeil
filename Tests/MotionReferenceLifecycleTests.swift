@@ -70,11 +70,18 @@ private final class SyntheticAttitude: MotionAttitude {
         check(service.referenceState == .established && service.referenceUsable && service.centerRevision == 1,
               "Explicit Set center establishes the original copied reference")
 
+        let originalEpoch = service.fusionEpoch
+        check(abs((service.fusionSample?.yawRadians ?? .infinity)-17 * .pi/180) < 1e-8,
+              "Fusion receives raw17-degree sensor yaw independent of manualzero")
+        transport.connection?(true)
+        check(service.fusionEpoch == originalEpoch, "Duplicate startup connect does not create a fusion epoch")
         transport.connection?(false)
+        check(service.fusionEpoch > originalEpoch && service.fusionSample == nil,
+              "Removal advances fusion epoch and clears the old raw sample")
         check(service.connectionState == .disconnected && service.disconnectEventCount == 1,
               "Actual disconnect emits the existing removal event")
-        check(service.hasSavedCenter && service.isCalibrated && service.referenceState == .awaitingReturn && !service.trackingValid,
-              "Absence retains zero while disabling live tracking")
+        check(service.hasSavedCenter && !service.isCalibrated && service.referenceState == .invalid && !service.trackingValid,
+              "Absence retains diagnostic zero but invalidates unverified reference")
         emit(80)
         check(service.connectionState == .disconnected && !service.isFresh,
               "Queued or in-flight poses cannot fabricate a reconnect")
@@ -86,8 +93,10 @@ private final class SyntheticAttitude: MotionAttitude {
         emit(62)
         check(abs(service.yawDegrees-45) < 1e-8 && service.centerRevision == 1,
               "Rewear while looking away uses original17-degree reference, not new62-degree zero")
-        check(service.trackingValid && service.referenceState == .retainedAfterGap,
-              "Same-source retained frame resumes with explicit continuity-assumption state")
+        check(!service.trackingValid && service.referenceState == .invalid,
+              "Same-source rewear cannot restore physically disproven reference confidence")
+        check(abs((service.fusionSample?.yawRadians ?? .infinity)-62 * .pi/180) < 1e-8,
+              "Uncalibrated returned sensor still supplies rawyaw for camera alignment")
         for degrees in stride(from: 57.0, through: 17, by: -5) { emit(degrees) }
         check(abs(service.yawDegrees) < 1e-8 && service.centerRevision == 1,
               "Return to original screen-facing pose remains zero without pressing a button")
@@ -96,13 +105,13 @@ private final class SyntheticAttitude: MotionAttitude {
 
         clock.time += 10
         service.checkFreshness()
-        check(!service.trackingValid && service.referenceUsable && service.centerRevision == 1,
-              "Timing stall affects freshness, not the stored reference")
+        check(!service.trackingValid && !service.referenceUsable && service.centerRevision == 1,
+              "Unobserved timing stall preserves diagnostic copy but invalidates usability")
         check(transport.streamStarts == 1 && transport.streamStops == 0,
               "Calibrated silence does not force the destructive5-second retry")
         emit(42)
-        check(abs(service.yawDegrees-25) < 1e-8 && service.trackingValid,
-              "Return after a timing gap still uses original center")
+        check(abs(service.yawDegrees-25) < 1e-8 && !service.trackingValid,
+              "Return after a timing gap never enables unverified legacy heading")
 
         emit(42, source: .headphoneRight)
         check(service.referenceState == .invalid && service.hasSavedCenter && !service.referenceUsable && !service.isCalibrated,

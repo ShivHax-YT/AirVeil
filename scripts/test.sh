@@ -7,15 +7,29 @@ mkdir -p "$TASK_ROOT/build/tests"
 swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Tests/MotionMathTests.swift" -o "$TASK_ROOT/build/tests/motion-math"
 "$TASK_ROOT/build/tests/motion-math"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/MotionService.swift" \
+  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/MotionService.swift" \
   "$TASK_ROOT/Tests/MotionDeliveryTests.swift" -o "$TASK_ROOT/build/tests/motion-delivery"
 "$TASK_ROOT/build/tests/motion-delivery"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/MotionService.swift" \
+  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/MotionService.swift" \
   "$TASK_ROOT/Tests/MotionReferenceLifecycleTests.swift" -o "$TASK_ROOT/build/tests/motion-reference"
 "$TASK_ROOT/build/tests/motion-reference"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Tests/HeadingFusionTests.swift" \
+  -o "$TASK_ROOT/build/tests/heading-fusion"
+"$TASK_ROOT/build/tests/heading-fusion"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Tests/CameraAnchorServiceTests.swift" \
+  -o "$TASK_ROOT/build/tests/camera-service"
+"$TASK_ROOT/build/tests/camera-service"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" \
+  "$TASK_ROOT/Sources/CameraHeadingCoordinator.swift" "$TASK_ROOT/Tests/CameraHeadingCoordinatorTests.swift" \
+  -o "$TASK_ROOT/build/tests/camera-coordinator"
+"$TASK_ROOT/build/tests/camera-coordinator"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
-  "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
+  "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/TrackingPresentation.swift" \
+  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
   "$TASK_ROOT/Tests/AppModelLifecycleTests.swift" -o "$TASK_ROOT/build/tests/appmodel-lifecycle"
 "$TASK_ROOT/build/tests/appmodel-lifecycle"
 swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \

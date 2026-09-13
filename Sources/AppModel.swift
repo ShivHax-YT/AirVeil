@@ -7,9 +7,15 @@ import ScreenCaptureKit
 @MainActor
 final class AppModel: NSObject, ObservableObject {
     let motion = MotionService()
+    lazy var cameraHeading = CameraHeadingCoordinator(motion: motion)
+    let presentation = TrackingPresentation()
+    var previewFrame: ((VeilStrength) -> Void)?
+    var previewVisibility: ((Bool) -> Void)?
+    private var previewVisible = true
+    private var forceFrame = false
     let overlay = DesktopOverlayController()
     let displaySleep = DisplaySleepService()
-    @Published private(set) var referenceRecoveryStatus = "Face the display and use Set center once. That zero stays fixed across removal."
+    @Published private(set) var referenceRecoveryStatus = "Face the display and use Set center. Camera assistance can restore screen direction after removal."
     private var systemAwake = true
     private var screensAwake = true
     private var sessionActive = true
@@ -38,9 +44,9 @@ final class AppModel: NSObject, ObservableObject {
     @Published var blockInput = true { didSet { persist() } }
     @Published var blocksEntireDisplay = false { didSet { persist() } }
     @Published var message = "AirPods are detected automatically. Face the display and use Set center once."
-    @Published var previewYaw = 0.0
-    @Published var simulate = true
-    @Published var strengths = VeilStrength(left: 0, right: 0)
+    @Published var previewYaw = 0.0 { didSet { wakeAnimation(force: true) } }
+    @Published var simulate = true { didSet { wakeAnimation(force: true) } }
+    private(set) var strengths = VeilStrength(left: 0, right: 0)
     @Published var onset = 8.0 { didSet { persist() } }
     @Published var fullAngle = 32.0 { didSet { persist() } }
     @Published var blurPoints = 32.0 { didSet { persist() } }
@@ -78,8 +84,20 @@ final class AppModel: NSObject, ObservableObject {
         message = "Display selection updated. Enable the effect when ready."
     }
     var pauseHint: String { pauseShortcutAvailable ? "Pause anytime  ⌃⌥⌘P" : "Pause from the AirVeil menu" }
-    var effectiveYaw: Double { (inverted ? -1 : 1) * motion.yawDegrees }
-    var shielded: Bool { enabled && (!motion.trackingValid || !overlay.isRunning || overlay.failureReason != nil) }
+    var trackingValid: Bool { cameraHeading.isEnabled ? cameraHeading.trackingValid : motion.trackingValid }
+    var effectiveYaw: Double { (inverted ? -1 : 1) * (cameraHeading.isEnabled ? cameraHeading.yawDegrees : motion.yawDegrees) }
+    var headTrackingStatus: String { cameraHeading.isEnabled ? cameraHeading.status : motion.status }
+    var hasSavedCenter: Bool { cameraHeading.isEnabled ? cameraHeading.hasCenter : motion.hasSavedCenter }
+    var centerBusy: Bool { calibrating || cameraHeading.isBusy }
+    private var cameraLayoutKey: String {
+        overlay.availableDisplays.sorted { $0.stableID < $1.stableID }.map {
+            "\($0.stableID):\($0.frame.origin.x),\($0.frame.origin.y),\($0.frame.width),\($0.frame.height):\($0.backingScale)"
+        }.joined(separator: "|")
+    }
+    func enableCameraAssistance() { pause(); cameraHeading.requestEnable() }
+    func disableCameraAssistance() { pause(); cameraHeading.disable() }
+    func refreshCameraDirection() { cameraHeading.refreshDirection() }
+    var shielded: Bool { enabled && (!trackingValid || !overlay.isRunning || overlay.failureReason != nil) }
     var headline: String {
         if starting { return "Starting desktop effect…" }
         if shielded { return "Tracking changed — clearing effect" }
@@ -112,7 +130,11 @@ final class AppModel: NSObject, ObservableObject {
         selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
         loading = false
         refreshPermission()
-        motion.objectWillChange.throttle(for: .milliseconds(100), scheduler: RunLoop.main, latest: true).sink { [weak self] _ in
+        motion.$fusionSample.receive(on: DispatchQueue.main).sink { [weak self] _ in
+            self?.checkTrackingSafety()
+            self?.wakeAnimation()
+        }.store(in: &subscriptions)
+        cameraHeading.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
         }.store(in: &subscriptions)
         overlay.objectWillChange.sink { [weak self] _ in
@@ -146,6 +168,7 @@ final class AppModel: NSObject, ObservableObject {
             MainActor.assumeIsolated {
                 self?.checkReferenceRecovery()
                 self?.checkAirPodsRemoval()
+                self?.refreshPresentation()
             }
         }
         removalTimer = timer
@@ -165,34 +188,70 @@ final class AppModel: NSObject, ObservableObject {
         if let selectedDisplayKeys { d.set(Array(selectedDisplayKeys).sorted(),forKey:"selectedDisplays") }
         else { d.removeObject(forKey:"selectedDisplays") }
         d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque"); d.set(wholeScreen,forKey:"wholeScreen")
+        wakeAnimation(force: true)
     }
     private func installClock() {
         clock?.invalidate()
         clock = NSScreen.main?.displayLink(target: self, selector: #selector(frame(_:)))
         clock?.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         clock?.add(to: .main, forMode: .common)
+        clock?.isPaused = true
         lastTime = 0
+        wakeAnimation(force: true)
+    }
+    func setPreviewVisible(_ visible: Bool) {
+        previewVisible = visible
+        previewVisibility?(visible)
+        if visible && isMacSessionActive { refreshPresentation(); wakeAnimation(force: true) }
+        else if !enabled { clock?.isPaused = true; lastTime = 0 }
+    }
+    private func refreshPresentation() {
+        guard previewVisible, isMacSessionActive else { return }
+        let yaw = simulate && !enabled ? previewYaw : effectiveYaw
+        presentation.update(TrackingSnapshot(headline: headline, direction: direction,
+            angle: Int((yaw.isFinite ? yaw : 0).rounded()), status: headTrackingStatus,
+            source: motion.isFresh ? motion.sourceName : "",
+            sampleRate: motion.isFresh ? Int((motion.sampleRate / 5).rounded()) * 5 : 0,
+            canSetCenter: motion.isFresh && !centerBusy, trackingValid: trackingValid, hasSavedCenter: hasSavedCenter,
+            centerBusy: centerBusy))
+    }
+    private func animationTarget() -> VeilStrength {
+        let yaw = enabled || !simulate ? (trackingValid ? effectiveYaw : 0) : previewYaw
+        return VeilMath.target(yawDegrees: yaw, onset: onset, full: fullAngle, wholeScreen: wholeScreen)
+    }
+    private func wakeAnimation(force: Bool = false) {
+        guard !loading, !isShuttingDown, isMacSessionActive, enabled || previewVisible else { return }
+        let target = animationTarget()
+        if force || abs(target.left-strengths.left) > 0.0001 || abs(target.right-strengths.right) > 0.0001 {
+            forceFrame = forceFrame || force
+            clock?.isPaused = false
+        }
     }
     @objc private func frame(_ link: CADisplayLink) {
         checkTrackingSafety()
+        guard isMacSessionActive, enabled || previewVisible else { clock?.isPaused = true; lastTime = 0; return }
         let now = CACurrentMediaTime()
         let dt = lastTime == 0 ? 1.0/60 : min(0.1,max(0,now-lastTime))
         lastTime = now
-        let yaw = enabled || !simulate ? (motion.trackingValid ? effectiveYaw : 0) : previewYaw
-        let target = VeilMath.target(yawDegrees: yaw, onset: onset, full: fullAngle, wholeScreen: wholeScreen)
+        let target = animationTarget()
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let next = VeilMath.advance(current: strengths,target: target,dt: dt,response: reduced ? 0.025 : response)
-        if abs(next.left-strengths.left) > 0.00001 || abs(next.right-strengths.right) > 0.00001 { strengths = next }
-        if enabled {
+        let settled = abs(next.left-target.left) < 0.0001 && abs(next.right-target.right) < 0.0001
+        let changed = abs(next.left-strengths.left) > 0.00001 || abs(next.right-strengths.right) > 0.00001
+        if changed || settled { strengths = settled ? target : next }
+        if previewVisible && (changed || settled || forceFrame) { previewFrame?(strengths) }
+        if enabled && (changed || settled || forceFrame) {
             overlay.update(left: strengths.left,right: strengths.right,blurPoints: blurPoints,feather: feather,
                            opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded,wholeScreen: wholeScreen,blockInput: blockInput,blocksEntireDisplay: blocksEntireDisplay)
         }
+        forceFrame = false
+        if settled { clock?.isPaused = true; lastTime = 0 }
     }
     // Signal loss must not leave an unusable black screen or input blockers.
     // Retained reference recovery may resume capture; no path silently sets a new zero.
     func checkTrackingSafety() {
         guard enabled || starting else { return }
-        if !motion.trackingValid {
+        if !trackingValid {
             pause(cancelRemoval: false)
             resumeWhenReferenceReturns = true
             message = "Tracking changed, so the screen was cleared. Follow the head-tracking guidance to resume."
@@ -278,13 +337,22 @@ final class AppModel: NSObject, ObservableObject {
         message = "AirPods are detected automatically. Face the display and use Set center once."
     }
 
-    /// Reuse the established sensor reference after a gap. A newly still pose is
-    /// never evidence of the original screen-facing zero, and never recalibrates.
+    /// Camera recovery measures against the saved screen anchor. Manual mode
+    /// requires explicit calibration after a gap; stillness never establishes zero.
     func checkReferenceRecovery() {
         guard !isShuttingDown else { return }
+        cameraHeading.update(layoutKey: cameraLayoutKey)
         checkTrackingSafety()
+        if cameraHeading.isEnabled {
+            setReferenceRecoveryStatus(cameraHeading.status)
+            if isMacSessionActive, trackingValid, resumeWhenReferenceReturns,
+               !removalActionPending, !enabled, !starting, !centerBusy {
+                resumeWhenReferenceReturns = false; enable()
+            }
+            return
+        }
         guard isMacSessionActive else {
-            setReferenceRecoveryStatus("The original center is retained while the Mac is asleep or inactive.")
+            setReferenceRecoveryStatus("Tracking is paused while the Mac is asleep or inactive.")
             return
         }
         guard motion.hasSavedCenter else {
@@ -295,11 +363,11 @@ final class AppModel: NSObject, ObservableObject {
             setReferenceRecoveryStatus("The sensor reference changed. Face the display and use Set center explicitly.")
             return
         }
-        guard motion.trackingValid else {
-            setReferenceRecoveryStatus("Waiting for fresh AirPods motion. Your original center stays saved.")
+        guard trackingValid else {
+            setReferenceRecoveryStatus("Waiting for fresh AirPods motion. Camera assistance can restore direction after removal.")
             return
         }
-        setReferenceRecoveryStatus("Using your original center. Looking away when you put AirPods back on does not reset zero.")
+        setReferenceRecoveryStatus("Using your chosen center for this uninterrupted session. Enable camera assistance to restore direction after removal.")
         guard resumeWhenReferenceReturns, !removalActionPending, !enabled, !starting, !calibrating else { return }
         resumeWhenReferenceReturns = false
         enable()
@@ -321,11 +389,18 @@ final class AppModel: NSObject, ObservableObject {
         case NSWorkspace.sessionDidBecomeActiveNotification: sessionActive = true
         default: return
         }
-        if isMacSessionActive { startMotionAutomatically() }
+        cameraHeading.setSessionActive(isMacSessionActive)
+        if isMacSessionActive { startMotionAutomatically(); refreshPresentation(); wakeAnimation(force: true) }
         else { suspend() }
     }
     func calibrate() {
         guard !isShuttingDown, isMacSessionActive, motion.isFresh else { message = "Wait for an active Mac session and fresh AirPods motion before setting center."; return }
+        if cameraHeading.isEnabled {
+            cameraHeading.setCenter(layoutKey: cameraLayoutKey)
+            simulate = false
+            message = "The camera measures the screen direction once; a short head turn finishes first-time setup."
+            return
+        }
         calibrationTicket += 1
         let ticket = calibrationTicket
         calibrating = true
@@ -353,6 +428,7 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     func resetDefaults() {
+        cameraHeading.disable()
         onset = 8; fullAngle = 32; blurPoints = 32; feather = 0.12; response = 0.07
         inverted = false; opaque = false; wholeScreen = false
         blockInput = true; blocksEntireDisplay = false
@@ -398,14 +474,14 @@ final class AppModel: NSObject, ObservableObject {
     func enable() {
         guard !isShuttingDown, isMacSessionActive, !enabled && !starting else { return }
         guard selectedDisplayCount > 0 else { message = "Select at least one display to blur."; return }
-        guard motion.trackingValid else { message = "Wear your AirPods and set a valid center before enabling the desktop effect."; return }
+        guard trackingValid else { message = "Wear your AirPods and set a valid center before enabling the desktop effect."; return }
         refreshPermission()
         accessTicket += 1; checkingAccess = false
         starting = true; generation += 1
         let ticket = generation
         Task {
             guard generation == ticket && starting && isMacSessionActive else { return }
-            guard motion.trackingValid else {
+            guard trackingValid else {
                 pause(cancelRemoval:false)
                 resumeWhenReferenceReturns = true
                 message = "Waiting for fresh motion with your saved center before capture can resume."
@@ -414,7 +490,7 @@ final class AppModel: NSObject, ObservableObject {
             do {
                 try await overlay.start(selectedDisplayIDs: selectedDisplayIDs)
                 guard generation == ticket else { return }
-                guard isMacSessionActive && motion.trackingValid else {
+                guard isMacSessionActive && trackingValid else {
                     pause(cancelRemoval: false)
                     resumeWhenReferenceReturns = true
                     message = "Tracking changed while starting. Follow the head-tracking guidance to resume."
@@ -423,6 +499,7 @@ final class AppModel: NSObject, ObservableObject {
                 starting = false; enabled = true; simulate = false
                 verifiedScreenAccess = true; permissionGranted = true; captureErrorDetails = ""
                 message = "Head tracking is active. " + pauseHint
+                wakeAnimation(force: true)
                 stateChanged?()
             } catch {
                 guard generation == ticket else { return }
@@ -438,20 +515,24 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     func pause(cancelRemoval: Bool = true) {
-        if cancelRemoval { cancelRemovalAction() }
+        if cancelRemoval { cancelRemovalAction(); cameraHeading.cancelPendingRecovery() }
         resumeWhenReferenceReturns = false
         accessTicket += 1; checkingAccess = false
         calibrationTicket += 1; calibrating = false
         generation += 1; enabled = false; starting = false; overlay.stop()
         strengths = VeilStrength(left: 0,right: 0)
+        if previewVisible { previewFrame?(strengths) }
+        wakeAnimation(force: true)
         message = "Desktop effect paused. Your screen is clear."
         stateChanged?()
     }
     private func suspend() {
         let restoreEffect = enabled || starting || resumeWhenReferenceReturns
-        pause()
+        pause(cancelRemoval: false)
+        cancelRemovalAction()
+        clock?.isPaused = true; lastTime = 0
         resumeWhenReferenceReturns = restoreEffect
-        message = "Capture paused for sleep or session change. Your original center stays saved for return."
+        message = "Capture paused for sleep or session change. Your saved screen direction will be checked on return."
     }
-    func shutdown() { isShuttingDown = true; pause(); motion.stop(); clock?.invalidate(); removalTimer?.invalidate() }
+    func shutdown() { isShuttingDown = true; pause(); cameraHeading.shutdown(); motion.stop(); clock?.invalidate(); removalTimer?.invalidate() }
 }

@@ -13,10 +13,28 @@ final class VeilFrameMailbox: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: CVPixelBuffer?
     private var accepting = true
-    func put(_ buffer: CVPixelBuffer) { lock.lock(); defer { lock.unlock() }; if accepting { pending = buffer } }
+    private var onFrame: (@Sendable () -> Void)?
+    func put(_ buffer: CVPixelBuffer) {
+        lock.lock()
+        guard accepting else { lock.unlock(); return }
+        let notify = pending == nil ? onFrame : nil
+        pending = buffer
+        lock.unlock()
+        // Never enter the main actor while holding the producer lock. A pending
+        // frame coalesces later arrivals until the renderer consumes it.
+        notify?()
+    }
+    func setFrameNotification(_ callback: (@Sendable () -> Void)?) {
+        lock.lock()
+        onFrame = accepting ? callback : nil
+        let notify = pending != nil ? onFrame : nil
+        lock.unlock()
+        notify?()
+    }
     var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return pending != nil }
+    func peek() -> CVPixelBuffer? { lock.lock(); defer { lock.unlock() }; return pending }
     func take() -> CVPixelBuffer? { lock.lock(); defer { lock.unlock() }; let result = pending; pending = nil; return result }
-    func invalidate() { lock.lock(); defer { lock.unlock() }; accepting = false; pending = nil }
+    func invalidate() { lock.lock(); defer { lock.unlock() }; accepting = false; pending = nil; onFrame = nil }
 }
 
 private final class CaptureTextureKeeper: @unchecked Sendable {
@@ -29,10 +47,44 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
     private(set) var initializationError: String?
     private(set) var lastGPUTimeMS: Double = 0
     private(set) var drawSubmissionCount: UInt64 = 0
+    private(set) var sourceBlitCount: UInt64 = 0
+    private(set) var gaussianPassCount: UInt64 = 0
+    private(set) var redrawRequestCount: UInt64 = 0
     private var needsRender = true
-    var rendersBaseImage = false { didSet { if oldValue != rendersBaseImage { needsRender = true } } }
-    var sourcePixelScale: Double = 1 { didSet { if oldValue != sourcePixelScale { blurDirty = true } } }
-    var frameMailbox: VeilFrameMailbox? { didSet { needsRender = true } }
+    private var redrawScheduled = false
+    private var displayInvalidated = false
+    private var resourceGeneration: UInt64 = 0
+    private var resourcesReleased = false
+    /// Controls visual work only. The headphone stream belongs to AppModel.
+    var renderingEnabled = true {
+        didSet {
+            if oldValue != renderingEnabled {
+                displayInvalidated = false
+                if renderingEnabled { requestRender() }
+            }
+        }
+    }
+    var rendersBaseImage = false { didSet { if oldValue != rendersBaseImage { requestRender() } } }
+    var sourcePixelScale: Double = 1 { didSet { if oldValue != sourcePixelScale { blurDirty = true; requestRender() } } }
+    var frameMailbox: VeilFrameMailbox? {
+        didSet {
+            oldValue?.setFrameNotification(nil)
+            resourceGeneration &+= 1
+            redrawScheduled = false
+            displayInvalidated = false
+            guard let frameMailbox else { return }
+            resourcesReleased = false
+            hasFrame = false
+            let run = resourceGeneration
+            frameMailbox.setFrameNotification { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.resourceGeneration == run, !self.resourcesReleased else { return }
+                    if !self.hasFrame || self.requiresSourceForOutput { self.requestRender() }
+                }
+            }
+            requestRender()
+        }
+    }
     var onRenderFailure: ((String) -> Void)?
     var onFirstFrame: (() -> Void)?
     private var hasFrame = false
@@ -58,11 +110,11 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
     override init(frame frameRect: NSRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)
         colorPixelFormat = .bgra8Unorm
-        framebufferOnly = false
+        framebufferOnly = true
         clearColor = MTLClearColorMake(0, 0, 0, 0)
         preferredFramesPerSecond = 60
-        enableSetNeedsDisplay = false
-        isPaused = false
+        enableSetNeedsDisplay = true
+        isPaused = true
         wantsLayer = true
         layer?.isOpaque = false
         (layer as? CAMetalLayer)?.isOpaque = false
@@ -117,7 +169,8 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         try allocate(width: texture.width, height: texture.height)
         source = texture
         sourcePixelScale = Double(image.width) / max(1, Double(bounds.width))
-        blurDirty = true; hasFrame = true; needsRender = true
+        resourcesReleased = false
+        blurDirty = true; hasFrame = true; requestRender()
     }
 
     func setEffect(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool = false) {
@@ -126,52 +179,118 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         let nextRight = min(1, max(0, finite(right, 0)))
         let sigma = min(80, max(1, finite(blurPoints, 32)))
         let nextFeather = min(0.5, max(0.001, finite(feather, 0.12)))
-        if self.left != nextLeft || self.right != nextRight || self.blurPoints != sigma ||
-            self.feather != nextFeather || concealOpaque != opaque || self.shield != shield || self.wholeScreen != wholeScreen {
-            needsRender = true
-        }
+        let changed = self.left != nextLeft || self.right != nextRight || self.blurPoints != sigma ||
+            self.feather != nextFeather || concealOpaque != opaque || self.shield != shield || self.wholeScreen != wholeScreen
         self.left = nextLeft; self.right = nextRight
         if self.blurPoints != sigma { self.blurPoints = sigma; blurDirty = true }
         self.feather = nextFeather
         self.concealOpaque = opaque; self.shield = shield; self.wholeScreen = wholeScreen
+        if changed { requestRender() }
+    }
+
+    private var fullOpaque: Bool {
+        concealOpaque && ((left == 1 && right == 1) || (wholeScreen && (left == 1 || right == 1)))
+    }
+    private var requiresSourceForOutput: Bool {
+        !shield && !fullOpaque && (rendersBaseImage || left > 0 || right > 0)
+    }
+    private var requiresBlur: Bool { requiresSourceForOutput && (left > 0 || right > 0) }
+    private var hasWork: Bool {
+        needsRender || (!hasFrame && frameMailbox?.hasPending == true) ||
+            (requiresSourceForOutput && frameMailbox?.hasPending == true) || (hasFrame && requiresBlur && blurDirty)
+    }
+
+    /// Coalesces producer, effect, resize, and completion notifications into a
+    /// single AppKit invalidation. The MTKView periodic loop remains paused.
+    func requestRender() {
+        needsRender = true
+        scheduleDisplayIfNeeded()
+    }
+    private func scheduleDisplayIfNeeded() {
+        guard renderingEnabled, !resourcesReleased, !redrawScheduled, !displayInvalidated, hasWork else { return }
+        redrawScheduled = true
+        let run = resourceGeneration
+        Task { @MainActor [weak self] in
+            guard let self, self.resourceGeneration == run else { return }
+            self.redrawScheduled = false
+            guard self.renderingEnabled, !self.resourcesReleased, self.hasWork else { return }
+            self.displayInvalidated = true
+            self.redrawRequestCount &+= 1
+            self.needsDisplay = true
+        }
+    }
+
+    private func mapCapture(_ buffer: CVPixelBuffer) throws -> (MTLTexture, CaptureTextureKeeper) {
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        var wrapper: CVMetalTexture?
+        guard let cache, CVMetalTextureCacheCreateTextureFromImage(nil, cache, buffer, nil, .bgra8Unorm, width, height, 0, &wrapper) == kCVReturnSuccess,
+              let wrapper, let incoming = CVMetalTextureGetTexture(wrapper) else {
+            throw VeilRenderError.unavailable("Could not map the captured desktop frame.")
+        }
+        return (incoming, CaptureTextureKeeper(texture: wrapper, buffer: buffer))
     }
 
     private func encode(to target: MTLTexture, command: MTLCommandBuffer) throws {
-        guard let device, let pipeline else { throw VeilRenderError.unavailable(initializationError ?? "Renderer unavailable.") }
-        if let buffer = frameMailbox?.take() {
-            let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
-            if source?.width != width || source?.height != height { try allocate(width: width, height: height) }
-            var wrapper: CVMetalTexture?
-            guard let cache, CVMetalTextureCacheCreateTextureFromImage(nil, cache, buffer, nil, .bgra8Unorm, width, height, 0, &wrapper) == kCVReturnSuccess,
-                  let wrapper, let incoming = CVMetalTextureGetTexture(wrapper), let source,
-                  let blit = command.makeBlitCommandEncoder() else { throw VeilRenderError.unavailable("Could not map the captured desktop frame.") }
-            blit.copy(from: incoming, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0), sourceSize: .init(width: width, height: height, depth: 1), to: source, destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
-            blit.endEncoding()
-            // Core Video owns the IOSurface lifetime, not merely MTLTexture.
-            let keeper = CaptureTextureKeeper(texture: wrapper, buffer: buffer)
+        guard !resourcesReleased, let device, let pipeline else { throw VeilRenderError.unavailable(initializationError ?? "Renderer unavailable.") }
+        // A neutral/solid surface retains only the newest pending CV buffer.
+        // Validate its first frame without copying or blurring invisible pixels.
+        let incomingBuffer = requiresSourceForOutput ? frameMailbox?.take() : (!hasFrame ? frameMailbox?.peek() : nil)
+        if let buffer = incomingBuffer {
+            let (incoming, keeper) = try mapCapture(buffer)
             command.addCompletedHandler { _ in withExtendedLifetime(keeper) {} }
-            blurDirty = true
+            if requiresSourceForOutput {
+                if source?.width != incoming.width || source?.height != incoming.height {
+                    try allocate(width: incoming.width, height: incoming.height)
+                }
+                guard let source, let blit = command.makeBlitCommandEncoder() else {
+                    throw VeilRenderError.unavailable("Could not copy the captured desktop frame.")
+                }
+                blit.copy(from: incoming, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0), sourceSize: .init(width: incoming.width, height: incoming.height, depth: 1), to: source, destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
+                blit.endEncoding()
+                sourceBlitCount &+= 1
+                blurDirty = true
+            }
             if !hasFrame {
                 hasFrame = true
+                let run = resourceGeneration
                 command.addCompletedHandler { [weak self] buffer in
                     guard buffer.status == .completed else { return }
-                    Task { @MainActor [weak self] in self?.onFirstFrame?() }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.resourceGeneration == run, !self.resourcesReleased else { return }
+                        self.onFirstFrame?()
+                    }
                 }
             }
         }
-        guard let source, levels.count == 3 else { throw VeilRenderError.unavailable("No render textures.") }
-        let sigma = blurPoints * min(4, max(0.25, sourcePixelScale.isFinite ? sourcePixelScale : 1))
-        if kernelSigma != sigma {
-            kernels = [6.0/32, 0.5, 1].map { fraction in
-                let kernel = MPSImageGaussianBlur(device: device, sigma: Float(sigma * fraction))
-                kernel.edgeMode = .clamp
-                return kernel
+        if !hasFrame || !requiresSourceForOutput {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = target
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = (shield || !hasFrame || fullOpaque)
+                ? MTLClearColorMake(0.075, 0.085, 0.105, 1) : MTLClearColorMake(0, 0, 0, 0)
+            guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+                throw VeilRenderError.unavailable("Could not clear the overlay.")
             }
-            kernelSigma = sigma; blurDirty = true
+            encoder.endEncoding()
+            return
         }
-        if blurDirty {
-            for i in 0..<3 { kernels[i].encode(commandBuffer: command, sourceTexture: source, destinationTexture: levels[i]) }
-            blurDirty = false
+        guard let source, levels.count == 3 else { throw VeilRenderError.unavailable("No render textures.") }
+        if requiresBlur {
+            let sigma = blurPoints * min(4, max(0.25, sourcePixelScale.isFinite ? sourcePixelScale : 1))
+            if kernelSigma != sigma {
+                kernels = [6.0/32, 0.5, 1].map { fraction in
+                    let kernel = MPSImageGaussianBlur(device: device, sigma: Float(sigma * fraction))
+                    kernel.edgeMode = .clamp
+                    return kernel
+                }
+                kernelSigma = sigma; blurDirty = true
+            }
+            if blurDirty {
+                for i in 0..<3 { kernels[i].encode(commandBuffer: command, sourceTexture: source, destinationTexture: levels[i]) }
+                gaussianPassCount &+= 3
+                blurDirty = false
+            }
         }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
@@ -189,32 +308,62 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
     }
 
     func draw(in view: MTKView) {
-        // Keep MTKView's update source alive for incoming captures and motion,
-        // but do not acquire a drawable or submit unchanged pixels every tick.
-        guard needsRender || blurDirty || frameMailbox?.hasPending == true else { return }
-        guard initializationError == nil, inFlight.wait(timeout: .now()) == .success else { return }
-        guard let drawable = currentDrawable, let command = commandQueue?.makeCommandBuffer() else { inFlight.signal(); return }
-        do { try encode(to: drawable.texture, command: command) }
-        catch { inFlight.signal(); reportFailure(error.localizedDescription); return }
+        _ = submitRender { command in
+            guard let drawable = currentDrawable else { return nil }
+            command.present(drawable)
+            return drawable.texture
+        }
+    }
+
+    @discardableResult
+    private func submitRender(target: (MTLCommandBuffer) -> MTLTexture?) -> Bool {
+        displayInvalidated = false
+        guard renderingEnabled, !resourcesReleased, hasWork else { return false }
+        guard initializationError == nil, inFlight.wait(timeout: .now()) == .success else { return false }
+        // Busy slots leave work dirty. A completion requests a later draw,
+        // without polling the GPU or blocking the main actor.
+        guard let command = commandQueue?.makeCommandBuffer(), let texture = target(command) else {
+            inFlight.signal(); return false
+        }
+        do { try encode(to: texture, command: command) }
+        catch { inFlight.signal(); reportFailure(error.localizedDescription); return false }
         let gate = inFlight
+        let run = resourceGeneration
         command.addCompletedHandler { [weak self] buffer in
             gate.signal()
             let failure = buffer.error?.localizedDescription
             let duration = max(0, buffer.gpuEndTime - buffer.gpuStartTime) * 1000
             Task { @MainActor [weak self] in
-                self?.lastGPUTimeMS = duration
-                if let failure { self?.reportFailure(failure) }
+                guard let self, self.resourceGeneration == run, !self.resourcesReleased else { return }
+                self.lastGPUTimeMS = duration
+                if let failure { self.reportFailure(failure) }
+                else { self.scheduleDisplayIfNeeded() }
             }
         }
-        command.present(drawable)
         command.commit()
         needsRender = false
         drawSubmissionCount &+= 1
+        return true
+    }
+
+    /// Synthetic demand/lifecycle validation without an on-screen window. The
+    /// optional GPU event lets a bounded test exercise real in-flight pressure.
+    @discardableResult
+    func renderPendingOffscreen(to target: MTLTexture, waitingFor event: MTLSharedEvent? = nil) -> Bool {
+        submitRender { command in
+            if let event { command.encodeWaitForEvent(event, value: 1) }
+            return target
+        }
     }
 
     /// Discard sensitive source pixels immediately on explicit pause/session loss.
     /// Already committed commands retain their own resource references until completion.
     func releaseCapturedResources() {
+        renderingEnabled = false
+        resourcesReleased = true
+        resourceGeneration &+= 1
+        redrawScheduled = false
+        displayInvalidated = false
         isPaused = true
         frameMailbox?.invalidate()
         frameMailbox = nil
@@ -234,8 +383,8 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         didReportFailure = true
         onRenderFailure?(text)
     }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRender = true }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); needsRender = true }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { requestRender() }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); requestRender() }
 
     /// Synthetic artifact validation only; never called by the live rendering loop.
     func renderOffscreen(width: Int, height: Int) throws -> CGImage {

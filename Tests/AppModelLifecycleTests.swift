@@ -23,6 +23,44 @@ final class UserDefaults {
 struct VeilDisplayInfo {
     let id: UInt32
     let stableID: String
+    var frame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    var backingScale = 2.0
+}
+
+/// Device/persistence boundary only. The real AppModel remains responsible for
+/// selecting headings, scheduling capture, recovery intent, and session gates.
+@MainActor final class CameraHeadingCoordinator: ObservableObject {
+    @Published var isEnabled = false
+    @Published var status = "Test camera assistance off"
+    @Published var isBusy = false
+    @Published var hasCenter = false
+    @Published var yawDegrees = 0.0
+    private var alignmentValid = false
+    private(set) var sessionActive = true
+    var trackingValid: Bool {
+        get { isEnabled && sessionActive && alignmentValid && motion.isRunning && motion.isFresh }
+        set { alignmentValid = newValue && sessionActive }
+    }
+    private let motion: MotionService
+    private(set) var enableCalls = 0
+    private(set) var disableCalls = 0
+    private(set) var cancelCalls = 0
+    private(set) var refreshCalls = 0
+    private(set) var centerCalls = 0
+    private(set) var shutdownCalls = 0
+    private(set) var lastLayoutKey = ""
+    init(motion: MotionService) { self.motion = motion }
+    func requestEnable() { enableCalls += 1; isEnabled = true }
+    func disable() { disableCalls += 1; isEnabled = false; alignmentValid = false; isBusy = false }
+    func refreshDirection() { refreshCalls += 1; if sessionActive && isEnabled { isBusy = true } }
+    func cancelPendingRecovery() { cancelCalls += 1; isBusy = false }
+    func update(layoutKey: String) { lastLayoutKey = layoutKey }
+    func setSessionActive(_ active: Bool) {
+        sessionActive = active
+        if !active { alignmentValid = false; isBusy = false }
+    }
+    func setCenter(layoutKey: String) { centerCalls += 1; lastLayoutKey = layoutKey; isBusy = true }
+    func shutdown() { shutdownCalls += 1; disable() }
 }
 
 enum MotionConnectionState { case unknown, connected, disconnected }
@@ -40,6 +78,11 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
 }
 
 @MainActor final class MotionService: ObservableObject {
+    // The real AppModel consumes only the publisher notification, not its
+    // payload. No Core Motion or fusion-engine dependency is needed here.
+    @Published var fusionSample: Int?
+    @Published var sourceName = "Test AirPod"
+    @Published var sampleRate = 50.0
     @Published var isFresh = true
     @Published var isCalibrated = true
     @Published var isRunning = true
@@ -80,6 +123,7 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
     private(set) var startCalls = 0
     private(set) var stopCalls = 0
     private(set) var lastSelectedIDs: Set<UInt32>?
+    private(set) var updateCalls = 0
     var suspendNextStart = false
     private var startupContinuation: CheckedContinuation<Void, Never>?
     func start(selectedDisplayIDs: Set<UInt32>?) async throws {
@@ -94,7 +138,7 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
     func stop() { stopCalls += 1; isRunning = false; isReady = false; failureReason = nil }
     func update(left: Double, right: Double, blurPoints: Double, feather: Double,
                 opaque: Bool, shield: Bool, wholeScreen: Bool,
-                blockInput: Bool, blocksEntireDisplay: Bool) {}
+                blockInput: Bool, blocksEntireDisplay: Bool) { updateCalls += 1 }
 }
 
 enum VeilRenderError: Error { case unavailable(String) }
@@ -123,6 +167,12 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         try? await Task.sleep(nanoseconds: 20_000_000)
     }
 
+    private static func renderFrame(_ model: AppModel) {
+        // Invoke the actual @objc display-link entry point deterministically.
+        // Its link argument is unused; no screen display link needs scheduling.
+        _ = model.perform(NSSelectorFromString("frame:"), with: nil)
+    }
+
     private static func makeModel() -> AppModel {
         UserDefaults.standard.clear()
         return AppModel()
@@ -141,7 +191,9 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
 
     private static func removeAirPods(_ model: AppModel) {
         model.motion.isFresh = false
-        model.motion.referenceState = .awaitingReturn
+        model.motion.referenceState = .invalid
+        model.motion.isCalibrated = false
+        model.cameraHeading.trackingValid = false
         model.motion.connectionState = .disconnected
         model.motion.disconnectEventCount += 1
         model.checkTrackingSafety()
@@ -149,8 +201,20 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
 
     private static func returnLookingAway(_ model: AppModel) {
         freshWear(model)
-        model.motion.referenceState = .retainedAfterGap
+        model.motion.referenceState = .invalid
+        model.motion.isCalibrated = false
         model.motion.yawDegrees = 45
+        if model.cameraHeading.isEnabled {
+            model.cameraHeading.yawDegrees = 45
+            model.cameraHeading.trackingValid = true
+        }
+    }
+
+    private static func useCamera(_ model: AppModel, yaw: Double = 0) {
+        model.cameraHeading.isEnabled = true
+        model.cameraHeading.hasCenter = true
+        model.cameraHeading.yawDegrees = yaw
+        model.cameraHeading.trackingValid = true
     }
 
     static func main() async {
@@ -241,7 +305,8 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             let model = makeModel()
             model.enable()
             await drainTasks()
-            model.strengths = .full
+            model.motion.yawDegrees = 45
+            renderFrame(model)
             model.motion.isFresh = false
             model.motion.isCalibrated = false
             let stops = model.overlay.stopCalls
@@ -486,8 +551,8 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.enable()
             await drainTasks()
             removeAirPods(model)
-            check(!model.enabled && !model.overlay.isRunning && model.motion.isCalibrated,
-                  "\(cancellation): removal clears capture while retaining calibration")
+            check(!model.enabled && !model.overlay.isRunning && !model.motion.isCalibrated,
+                  "\(cancellation): removal clears capture and invalidates unverified legacy calibration")
             switch cancellation {
             case "pause": model.pause()
             case "selection": model.selectDisplay(model.overlay.availableDisplays[1], selected: false)
@@ -498,10 +563,14 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             recoveryTicks(model, count: 100)
             await drainTasks()
             let resumes = cancellation == "none"
-            check(model.enabled == resumes && model.overlay.startCalls == (resumes ? 2 : 1),
-                  "\(cancellation): retained-reference resume respects explicit cancellation")
+            check(!model.enabled && model.overlay.startCalls == 1,
+                  "\(cancellation): fresh legacy return cannot reuse disproven sensor reference")
             check(model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
                   "\(cancellation): returning or holding a 45-degree turn never changes original zero")
+            model.calibrate()
+            await drainTasks()
+            check(model.enabled == resumes && model.overlay.startCalls == (resumes ? 2 : 1),
+                  "\(cancellation): explicit legacy Set center recovery respects cancellation")
             if resumes {
                 check(model.onset == 12 && model.fullAngle == 44 && model.inverted && model.wholeScreen && model.blurPoints == 48,
                       "Retained-reference resume preserves blur configuration")
@@ -557,8 +626,12 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
             recoveryTicks(model)
             await drainTasks()
-            check(model.enabled && model.overlay.startCalls == 2 && model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
-                  "Fully active return resumes once with the original zero even when looking away")
+            check(!model.enabled && model.overlay.startCalls == 1 && model.motion.calibrateCalls == 0,
+                  "Legacy wake waits for explicit center after unobserved sensor gap")
+            model.calibrate()
+            await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 2 && model.motion.calibrateCalls == 1,
+                  "Explicit center after fully active wake resumes prior legacy effect")
             check(model.motion.startCalls == 0 && model.motion.stopCalls == 0, "Wake never restarts an already running reference stream")
             model.shutdown()
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
@@ -568,6 +641,7 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         }
         for phase in ["before-task", "during-capture-await"] {
             let model = makeModel()
+            useCamera(model)
             model.enable()
             await drainTasks()
             removeAirPods(model)
@@ -586,9 +660,10 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.overlay.startCalls == (phase == "before-task" ? 1 : 2),
                   "\(phase): superseded capture cannot restart after cancellation")
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            returnLookingAway(model)
             recoveryTicks(model)
             await drainTasks()
-            check(model.enabled && model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
+            check(model.enabled && model.motion.calibrateCalls == 0 && model.effectiveYaw == 45,
                   "\(phase): later active session resumes with unchanged reference")
             model.shutdown()
         }
@@ -596,6 +671,7 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             let model = makeModel()
             let now = ProcessInfo.processInfo.systemUptime
             model.sleepDisplaysOnRemoval = true
+            useCamera(model)
             model.enable()
             await drainTasks()
             model.checkAirPodsRemoval(now: now)
@@ -621,6 +697,7 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             await drainTasks()
             check(!model.enabled, "Screen wake cannot resume effect while login session is inactive")
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            returnLookingAway(model)
             recoveryTicks(model)
             model.checkAirPodsRemoval(now: now + 10)
             await drainTasks()
@@ -653,6 +730,274 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                   "Display topology change cancels prior capture intent without changing zero")
             model.shutdown()
         }
-        print("PASS: \(checks) real AppModel lifecycle assertions; motion, capture, display sleep, permissions, and preferences stubbed")
+        do {
+            let model = makeModel()
+            model.motion.referenceState = .invalid
+            model.motion.isCalibrated = false
+            model.motion.yawDegrees = -70
+            useCamera(model, yaw: 28)
+            model.cameraHeading.status = "Camera measured returning direction"
+            check(model.trackingValid && model.effectiveYaw == 28,
+                  "Camera mode selects fused heading without legacy manual calibration")
+            check(model.hasSavedCenter && model.headTrackingStatus == model.cameraHeading.status,
+                  "Camera center and status replace legacy diagnostics in the product state")
+            model.inverted = true
+            check(model.effectiveYaw == -28, "User inversion applies exactly once to fused heading")
+            model.inverted = false
+            model.enable()
+            await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 1 && model.motion.calibrateCalls == 0,
+                  "Valid fusion enables capture without overwriting the AirPods manual center")
+            model.cameraHeading.trackingValid = false
+            model.motion.referenceState = .established
+            model.motion.isCalibrated = true
+            model.checkTrackingSafety()
+            check(!model.enabled && !model.overlay.isRunning,
+                  "Invalid camera fusion cannot fall back silently to valid legacy yaw")
+            model.motion.referenceState = .invalid
+            model.motion.isCalibrated = false
+            model.cameraHeading.yawDegrees = 35
+            model.cameraHeading.trackingValid = true
+            recoveryTicks(model)
+            await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 2 && model.effectiveYaw == 35,
+                  "New camera alignment resumes interrupted capture at actual off-axis angle")
+            check(model.motion.calibrateCalls == 0, "Camera recovery never invokes manual zero calibration")
+            model.shutdown()
+            check(model.cameraHeading.shutdownCalls == 1, "Shutdown reaches the camera boundary")
+        }
+        do {
+            let model = makeModel()
+            useCamera(model)
+            model.enable()
+            await drainTasks()
+            removeAirPods(model)
+            model.refreshCameraDirection()
+            check(model.cameraHeading.isBusy, "Camera recovery attempt is pending at its boundary")
+            let cancellations = model.cameraHeading.cancelCalls
+            model.pause()
+            check(!model.cameraHeading.isBusy && model.cameraHeading.cancelCalls == cancellations+1,
+                  "Manual Pause cancels pending camera recovery synchronously")
+            returnLookingAway(model)
+            recoveryTicks(model)
+            await drainTasks()
+            check(!model.enabled && model.overlay.startCalls == 1,
+                  "Late camera alignment cannot restore capture after manual Pause")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.enableCameraAssistance()
+            check(model.cameraHeading.enableCalls == 1 && model.cameraHeading.isEnabled && !model.enabled,
+                  "Explicit camera enable pauses effect and delegates opt-in once")
+            model.motion.referenceState = .invalid
+            model.motion.isCalibrated = false
+            model.calibrate()
+            await drainTasks()
+            check(model.cameraHeading.centerCalls == 1 && model.motion.calibrateCalls == 0,
+                  "Set center in camera mode routes geometric setup without manual motion calibration")
+            check(model.centerBusy && !model.simulate && !model.calibrating,
+                  "Camera setup busy state reaches UI without starting legacy calibration loop")
+            let layout = model.cameraHeading.lastLayoutKey
+            check(layout.contains("display-a") && layout.contains("display-b"),
+                  "Camera setup receives stable display geometry signature")
+            var displays = model.overlay.availableDisplays
+            displays[0].frame.origin.x = 100
+            displays[0].backingScale = 1
+            model.overlay.availableDisplays = displays
+            recoveryTicks(model)
+            check(model.cameraHeading.lastLayoutKey != layout,
+                  "Display position or backing scale changes reach camera geometry validation")
+            model.disableCameraAssistance()
+            check(!model.cameraHeading.isEnabled && model.cameraHeading.disableCalls == 1 && !model.enabled,
+                  "Explicit camera disable cancels capture and disables its boundary")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            useCamera(model, yaw: 30)
+            model.enable()
+            await drainTasks()
+            model.refreshCameraDirection()
+            model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification)
+            check(!model.cameraHeading.sessionActive && !model.cameraHeading.isBusy && !model.enabled,
+                  "Display sleep suspends camera work and clears the active effect")
+            let centers = model.cameraHeading.centerCalls
+            model.calibrate()
+            model.refreshCameraDirection()
+            recoveryTicks(model)
+            await drainTasks()
+            check(model.cameraHeading.centerCalls == centers && !model.cameraHeading.isBusy,
+                  "Inactive session blocks camera setup and camera work at the boundary")
+            check(model.overlay.startCalls == 1, "Inactive session cannot restart capture")
+            model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification)
+            recoveryTicks(model)
+            await drainTasks()
+            check(model.cameraHeading.sessionActive && !model.enabled,
+                  "Wake alone cannot reuse a canceled camera alignment")
+            returnLookingAway(model)
+            recoveryTicks(model)
+            await drainTasks()
+            check(model.enabled && model.effectiveYaw == 45 && model.motion.calibrateCalls == 0,
+                  "Fresh camera alignment after wake resumes original intent without choosing zero")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.simulate = false
+            model.motion.yawDegrees = 21.01
+            model.motion.sampleRate = 50.0
+            model.checkReferenceRecovery()
+            model.checkAirPodsRemoval()
+            model.setPreviewVisible(true)
+            await drainTasks()
+            var fullModelChanges = 0
+            var presentationChanges = 0
+            let fullSubscription = model.objectWillChange.sink { fullModelChanges += 1 }
+            let smallSubscription = model.presentation.objectWillChange.sink { presentationChanges += 1 }
+            for i in 0..<100 {
+                model.motion.yawDegrees = 21.01+Double(i)*0.001
+                model.motion.sampleRate = 50.0+Double(i)*0.001
+                model.motion.fusionSample = i
+                model.setPreviewVisible(true)
+            }
+            await drainTasks()
+            check(fullModelChanges == 0,
+                  "Constant rounded high-frequency motion telemetry never invalidates full AppModel")
+            check(presentationChanges == 0 && model.presentation.snapshot.angle == 21 && model.presentation.snapshot.sampleRate == 50,
+                  "Small presentation ignores yaw and sample-rate changes inside displayed rounding buckets")
+            model.motion.yawDegrees = 21.7
+            model.setPreviewVisible(true)
+            check(presentationChanges == 1 && model.presentation.snapshot.angle == 22,
+                  "Crossing displayed angle rounding boundary publishes exactly one small snapshot")
+            model.motion.sampleRate = 52.6
+            model.setPreviewVisible(true)
+            check(presentationChanges == 2 && model.presentation.snapshot.sampleRate == 55,
+                  "Crossing displayed rate bucket publishes exactly one small snapshot")
+            model.motion.status = "New test tracking state"
+            model.setPreviewVisible(true)
+            check(presentationChanges == 3 && model.presentation.snapshot.status == "New test tracking state",
+                  "Meaningful tracking status change still reaches presentation")
+            check(fullModelChanges == 0, "Visible telemetry changes remain isolated from full settings publication")
+            fullSubscription.cancel(); smallSubscription.cancel()
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.checkReferenceRecovery()
+            model.checkAirPodsRemoval()
+            model.previewYaw = 30
+            model.setPreviewVisible(true)
+            await drainTasks()
+            var fullModelChanges = 0
+            var previewDraws = 0
+            var visibilityEvents: [Bool] = []
+            model.previewFrame = { _ in previewDraws += 1 }
+            model.previewVisibility = { visibilityEvents.append($0) }
+            let subscription = model.objectWillChange.sink { fullModelChanges += 1 }
+            for _ in 0..<100 { renderFrame(model) }
+            check(model.strengths.right > 0 && previewDraws > 0,
+                  "Actual animation entry point updates strengths and visible preview")
+            check(fullModelChanges == 0, "High-frequency strength animation does not publish full AppModel changes")
+            model.setPreviewVisible(false)
+            let previousSnapshot = model.presentation.snapshot
+            previewDraws = 0
+            for i in 0..<100 {
+                model.motion.yawDegrees = Double(i)
+                model.motion.fusionSample = i
+                renderFrame(model)
+            }
+            await drainTasks()
+            check(previewDraws == 0, "Invisible paused preview receives no animation or telemetry draw callbacks")
+            check(model.presentation.snapshot == previousSnapshot,
+                  "Invisible preview does not refresh its presentation snapshot")
+            model.pause()
+            check(previewDraws == 0, "Pause does not render a hidden preview")
+            model.setPreviewVisible(true)
+            renderFrame(model)
+            check(previewDraws > 0 && visibilityEvents == [false, true],
+                  "Showing preview explicitly resumes rendering and visibility callbacks")
+            subscription.cancel()
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            var previewDraws = 0
+            model.previewFrame = { _ in previewDraws += 1 }
+            model.setPreviewVisible(false)
+            model.enable()
+            await drainTasks()
+            model.motion.yawDegrees = 30
+            for _ in 0..<20 { renderFrame(model) }
+            check(model.enabled && model.overlay.updateCalls > 0 && model.strengths.right > 0,
+                  "Hiding settings preserves active desktop effect animation")
+            check(previewDraws == 0, "Active desktop animation never draws the invisible settings preview")
+            model.shutdown()
+        }
+        for (inactive, active) in [
+            (NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification),
+            (NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification),
+            (NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.sessionDidBecomeActiveNotification)
+        ] {
+            let model = makeModel()
+            model.simulate = false
+            model.motion.yawDegrees = 21
+            model.setPreviewVisible(true)
+            model.handleWorkspaceEvent(inactive)
+            // The one clear callback during suspension is intentional. No
+            // subsequent motion/frame/presentation work may redraw the preview.
+            let snapshot = model.presentation.snapshot
+            var previewDraws = 0
+            model.previewFrame = { _ in previewDraws += 1 }
+            var snapshotChanges = 0
+            let token = model.presentation.objectWillChange.sink { snapshotChanges += 1 }
+            for i in 0..<20 {
+                model.motion.yawDegrees = 37
+                model.motion.fusionSample = i
+                model.setPreviewVisible(true)
+                renderFrame(model)
+            }
+            await drainTasks()
+            check(previewDraws == 0 && model.strengths.left == 0 && model.strengths.right == 0,
+                  "\(inactive.rawValue): inactive session rejects preview animation even when window remains marked visible")
+            check(snapshotChanges == 0 && model.presentation.snapshot == snapshot,
+                  "\(inactive.rawValue): inactive session does not publish telemetry presentation")
+            check(model.overlay.updateCalls == 0 && !model.enabled,
+                  "\(inactive.rawValue): keepalive motion cannot render desktop capture")
+            model.handleWorkspaceEvent(active)
+            renderFrame(model)
+            check(model.presentation.snapshot.angle == 37 && previewDraws > 0,
+                  "\(active.rawValue): returning session explicitly refreshes latest telemetry and preview")
+            token.cancel(); model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.simulate = false
+            model.motion.isCalibrated = false
+            model.motion.referenceState = .invalid
+            model.cameraHeading.isEnabled = true
+            model.cameraHeading.hasCenter = true
+            model.cameraHeading.trackingValid = true
+            model.cameraHeading.yawDegrees = 25
+            model.setPreviewVisible(true)
+            check(!model.motion.trackingValid && model.presentation.snapshot.trackingValid,
+                  "Small enable-button snapshot exposes valid camera fusion despite invalid legacy calibration")
+            check(model.presentation.snapshot.angle == 25 && model.presentation.snapshot.hasSavedCenter,
+                  "Fused snapshot uses restored camera direction and saved center")
+            model.enable(); await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 1,
+                  "Valid fused snapshot and actual Enable action agree when legacy center is invalid")
+            model.pause()
+            model.cameraHeading.trackingValid = false
+            model.setPreviewVisible(true)
+            check(!model.presentation.snapshot.trackingValid,
+                  "Losing camera alignment disables the observed snapshot without requiring legacy motion publication")
+            model.cameraHeading.isBusy = true
+            model.setPreviewVisible(true)
+            check(!model.presentation.snapshot.canSetCenter && model.presentation.snapshot.centerBusy,
+                  "Observed tracking controls reflect busy camera recovery")
+            model.shutdown()
+        }
+        print("PASS: \(checks) real AppModel lifecycle assertions; camera, motion, capture, display sleep, permissions, and preferences stubbed")
     }
 }

@@ -3,7 +3,7 @@ import SwiftUI
 import Carbon
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var model: AppModel!
     private var window: NSWindow!
     private var item: NSStatusItem!
@@ -11,12 +11,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotHandler: EventHandlerRef?
     private var diagnosticTimer: Timer?
     private var globalPauseActivations = 0
+    private var lastIconName: String?
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = AppModel()
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
         window = NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)),
                           styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
         window.title = "AirVeil"
+        window.delegate = self
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width:740,height:660)
         window.level = .normal
@@ -47,25 +49,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
         let status = NSMenuItem(title:model.headline,action:nil,keyEquivalent:""); status.isEnabled = false; menu.addItem(status)
-        menu.addItem(withTitle:model.motion.status,action:nil,keyEquivalent:"").isEnabled = false
+        menu.addItem(withTitle:model.headTrackingStatus,action:nil,keyEquivalent:"").isEnabled = false
         menu.addItem(.separator())
         menu.addItem(withTitle:model.pauseShortcutAvailable ? "Pause & Clear Screen  ⌃⌥⌘P" : "Pause & Clear Screen",action:#selector(pause),keyEquivalent:"").target = self
-        let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.calibrating
+        let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.centerBusy
         if !model.enabled {
             let enable = menu.addItem(withTitle:"Enable Desktop Effect",action:#selector(enable),keyEquivalent:"")
-            enable.target=self; enable.isEnabled=model.motion.isCalibrated && model.motion.isFresh && model.selectedDisplayCount > 0
+            enable.target=self; enable.isEnabled=model.trackingValid && model.selectedDisplayCount > 0
         }
         menu.addItem(withTitle:"Settings…",action:#selector(showSettings),keyEquivalent:",").target=self
         menu.addItem(.separator())
         menu.addItem(withTitle:"Quit AirVeil",action:#selector(quit),keyEquivalent:"q").target=self
     }
     private func refreshStatus() {
-        window?.level = model.enabled || model.starting ? NSWindow.Level(rawValue:NSWindow.Level.statusBar.rawValue+1) : .normal
-        item?.button?.image=NSImage(systemSymbolName:model.shielded ? "exclamationmark.shield.fill" : "circle.lefthalf.filled",accessibilityDescription:"AirVeil")
-        item?.button?.title = model.enabled ? " On" : ""
-        item?.button?.toolTip = model.headline + " · " + model.pauseHint
+        let level: NSWindow.Level = model.enabled || model.starting ? NSWindow.Level(rawValue:NSWindow.Level.statusBar.rawValue+1) : .normal
+        if window?.level != level { window?.level = level }
+        let icon = model.shielded ? "exclamationmark.shield.fill" : "circle.lefthalf.filled"
+        if lastIconName != icon {
+            item?.button?.image = NSImage(systemSymbolName:icon,accessibilityDescription:"AirVeil")
+            lastIconName = icon
+        }
+        let title = model.enabled ? " On" : ""
+        if item?.button?.title != title { item?.button?.title = title }
+        let tip = model.headline + " · " + model.pauseHint
+        if item?.button?.toolTip != tip { item?.button?.toolTip = tip }
     }
-    @objc func showSettings() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true); model.refreshPermission() }
+    @objc func showSettings() {
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
+        model.setPreviewVisible(true); model.refreshPermission()
+    }
+    func windowWillClose(_ notification: Notification) { model.setPreviewVisible(false) }
+    func windowDidMiniaturize(_ notification: Notification) { model.setPreviewVisible(false) }
+    func windowDidDeminiaturize(_ notification: Notification) { updatePreviewVisibility() }
+    func windowDidChangeOcclusionState(_ notification: Notification) { updatePreviewVisibility() }
+    private func updatePreviewVisibility() {
+        model.setPreviewVisible(window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible))
+    }
     @objc private func pause() { model.pause() }
     @objc private func calibrate() { model.calibrate() }
     @objc private func enable() { model.enable() }
@@ -108,6 +127,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "referenceState":model.motion.referenceState.rawValue,"hasSavedCenter":model.motion.hasSavedCenter,
             "referenceUsable":model.motion.referenceUsable,
             "centerRevision":model.motion.centerRevision,
+            "cameraAssistance":model.cameraHeading.isEnabled,
+            "cameraRunning":model.cameraHeading.camera.isRunning,
+            "cameraCenterRevision":model.cameraHeading.centerRevision,
+            "cameraAlignmentRevision":model.cameraHeading.alignmentRevision,
+            "cameraStatus":model.cameraHeading.status,
+            "trackingValid":model.trackingValid,
+            "drawSubmissionCount":model.overlay.drawSubmissionCount,
+            "sourceBlitCount":model.overlay.sourceBlitCount,
+            "gaussianPassCount":model.overlay.gaussianPassCount,
+            "redrawRequestCount":model.overlay.redrawRequestCount,
             "reportedHeadingDegrees":model.motion.reportedHeadingDegrees,
             "reportedMagneticAccuracy":model.motion.reportedMagneticAccuracy,
             "wholeScreen":model.wholeScreen,"leftStrength":model.strengths.left,"rightStrength":model.strengths.right,

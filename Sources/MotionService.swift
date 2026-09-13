@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CoreMotion
+import CoreMedia
 
 enum MotionReferenceState: String {
     case unset, established, awaitingReturn, retainedAfterGap, invalid
@@ -23,6 +24,10 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var isCalibrated = false
     @Published private(set) var referenceState = MotionReferenceState.unset
     @Published private(set) var centerRevision = 0
+    /// Raw local sensor coordinates for optional camera fusion. Availability
+    /// does not imply the legacy manual center survived a removal/reset.
+    @Published private(set) var fusionSample: HeadingMotionSample?
+    @Published private(set) var fusionEpoch: UInt64 = 0
     /// Last public Core Motion diagnostics only. A reported heading is not
     /// assumed to be absolute or display-relative for headphone motion.
     @Published private(set) var reportedHeadingDegrees = -1.0
@@ -173,10 +178,10 @@ final class MotionService: NSObject, ObservableObject {
             nextRetryTime = 0
             beginStreamIfAvailable()
         } else {
-            // Keep the same manager, stream, and original reference alive. Do
-            // not accept queued pre-removal poses as proof of a reconnection.
+            // Keep the stream for transport recovery, but the wearer test
+            // disproved trusting its original zero through a removal.
             mailbox?.setConnected(false)
-            markFreshnessLost("AirPods disconnected — original center retained", awaitingReturn: true)
+            markFreshnessLost("AirPods disconnected — check your center after reconnecting", awaitingReturn: true)
             connectionState = .disconnected
             // Publish the event after the disconnected state and stream cleanup
             // so a debounced coordinator observes a consistent service state.
@@ -267,6 +272,14 @@ final class MotionService: NSObject, ObservableObject {
             return
         }
         lastReceipt = reading.receipt
+        if let rawYaw = VeilMath.yawRadians(reading.quaternion) {
+            let hostReceipt = reading.hostReceipt ?? reading.receipt
+            if hostReceipt.isFinite, hostReceipt >= 0 {
+                fusionSample = HeadingMotionSample(epoch: fusionEpoch,
+                    sourceTimestamp: reading.timestamp, receiptHostTime: hostReceipt,
+                    yawRadians: rawYaw, angularSpeed: reading.speed)
+            }
+        }
         reportedHeadingDegrees = reading.headingDegrees.isFinite ? reading.headingDegrees : -1
         reportedMagneticAccuracy = reading.magneticAccuracy
         latest = attitude
@@ -328,6 +341,7 @@ final class MotionService: NSObject, ObservableObject {
     }
 
     private func invalidateCalibration(_ message: String) {
+        advanceFusionEpoch()
         referenceState = hasSavedCenter ? .invalid : .unset
         isCalibrated = false
         stableSince = nil
@@ -335,13 +349,23 @@ final class MotionService: NSObject, ObservableObject {
     }
 
     private func markFreshnessLost(_ message: String, awaitingReturn: Bool = false) {
+        if isFresh || fusionSample != nil { advanceFusionEpoch() }
         isFresh = false
         stableSince = nil
-        if referenceUsable { referenceState = awaitingReturn ? .awaitingReturn : .retainedAfterGap }
-        status = message
+        // An unobserved gap can hide an origin reset. Keep the copied object
+        // for diagnostics, never drive legacy blur from its unverified zero.
+        if hasSavedCenter { referenceState = .invalid }
+        isCalibrated = false
+        status = hasSavedCenter ? message + ". Use Set center or camera assistance." : message
+    }
+
+    private func advanceFusionEpoch() {
+        fusionEpoch &+= 1
+        fusionSample = nil
     }
 
     private func resetDelivery() {
+        advanceFusionEpoch()
         latest = nil
         mailbox = nil
         addedDeliveryLag = 0
@@ -368,6 +392,9 @@ struct MotionReading: @unchecked Sendable {
     let source: CMDeviceMotion.SensorLocation
     var headingDegrees: Double = -1
     var magneticAccuracy: Int = -1
+    /// Core Media host clock sampled at acquisition, before any main-queue wait.
+    /// Synthetic boundaries may omit it and use their injected receipt clock.
+    var hostReceipt: TimeInterval? = nil
 }
 
 struct MotionDelivery {
@@ -694,6 +721,7 @@ private final class CoreMotionAttitude: MotionAttitude, @unchecked Sendable {
         handler: @escaping @Sendable (MotionReading?, String?) -> Void) {
         manager.startDeviceMotionUpdates(to: queue) { sample, error in
             let receipt = ProcessInfo.processInfo.systemUptime
+            let hostReceipt = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
             if let error { handler(nil, error.localizedDescription); return }
             guard let sample else { return }
             let q = sample.attitude.quaternion, r = sample.rotationRate
@@ -701,7 +729,8 @@ private final class CoreMotionAttitude: MotionAttitude, @unchecked Sendable {
                 timestamp: sample.timestamp, receipt: receipt,
                 quaternion: VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w),
                 speed: sqrt(r.x*r.x + r.y*r.y + r.z*r.z), source: sample.sensorLocation,
-                headingDegrees: sample.heading, magneticAccuracy: Int(sample.magneticField.accuracy.rawValue)), nil)
+                headingDegrees: sample.heading, magneticAccuracy: Int(sample.magneticField.accuracy.rawValue),
+                hostReceipt: hostReceipt), nil)
         }
     }
     func stopMotionUpdates() { manager.stopDeviceMotionUpdates() }

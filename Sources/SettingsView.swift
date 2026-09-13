@@ -2,21 +2,82 @@ import SwiftUI
 import AppKit
 
 struct VeilPreview: NSViewRepresentable {
-    var left: Double
-    var right: Double
-    var blur: Double
-    var feather: Double
-    var opaque: Bool
-    var wholeScreen: Bool
-    var shield: Bool
+    let model: AppModel
     func makeNSView(context: Context) -> VeilMetalView {
         let view = VeilMetalView(frame: NSRect(x:0,y:0,width:660,height:280))
         view.rendersBaseImage = true
         try? view.setImage(PreviewArt.image)
+        model.previewFrame = { [weak view, weak model] strengths in
+            guard let view, let model else { return }
+            Self.update(view, model: model, strengths: strengths)
+        }
+        model.previewVisibility = { [weak view] visible in view?.renderingEnabled = visible }
+        Self.update(view, model: model, strengths: model.strengths)
         return view
     }
     func updateNSView(_ view: VeilMetalView, context: Context) {
-        view.setEffect(left:left,right:right,blurPoints:blur,feather:feather,opaque:opaque,shield:shield,wholeScreen:wholeScreen)
+        Self.update(view, model: model, strengths: model.strengths)
+    }
+    static func dismantleNSView(_ view: VeilMetalView, coordinator: ()) { view.renderingEnabled = false }
+    private static func update(_ view: VeilMetalView, model: AppModel, strengths: VeilStrength) {
+        view.setEffect(left: strengths.left, right: strengths.right, blurPoints: model.blurPoints,
+            feather: model.feather, opaque: model.opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+            shield: model.shielded || (model.enabled && !model.overlay.isReady), wholeScreen: model.wholeScreen)
+    }
+}
+
+private struct TrackingHeader: View {
+    @ObservedObject var presentation: TrackingPresentation
+    var body: some View {
+        HStack {
+            Label(presentation.snapshot.headline,systemImage:"airpodspro").font(.headline)
+            Spacer()
+            Text(String(format:"%+d°",presentation.snapshot.angle))
+                .font(.system(.title3,design:.rounded).monospacedDigit().weight(.semibold))
+        }
+    }
+}
+private struct TrackingDirection: View {
+    @ObservedObject var presentation: TrackingPresentation
+    var body: some View { Text(presentation.snapshot.direction).font(.subheadline.weight(.medium)) }
+}
+private struct EnableEffectButton: View {
+    @ObservedObject var presentation: TrackingPresentation
+    let model: AppModel
+    var body: some View {
+        Button("Enable desktop effect") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
+            .disabled(!presentation.snapshot.trackingValid || model.selectedDisplayCount == 0)
+    }
+}
+private struct RefreshDirectionButton: View {
+    @ObservedObject var presentation: TrackingPresentation
+    let model: AppModel
+    var body: some View {
+        Button("Refresh direction") { model.refreshCameraDirection() }
+            .disabled(!presentation.snapshot.hasSavedCenter || !presentation.snapshot.canSetCenter)
+    }
+}
+private struct HeadTrackingControls: View {
+    @ObservedObject var presentation: TrackingPresentation
+    let model: AppModel
+    var body: some View {
+        VStack(alignment:.leading,spacing:10) {
+            Label("Head tracking",systemImage:"airpodspro").font(.headline)
+            Text(presentation.snapshot.status).font(.caption).foregroundStyle(.secondary)
+                .frame(minHeight:34,alignment:.topLeading)
+            Text("Detected automatically when worn").font(.caption2).foregroundStyle(.secondary)
+            Label(presentation.snapshot.hasSavedCenter ? "Screen direction saved" : "Set your screen direction",
+                  systemImage:presentation.snapshot.hasSavedCenter ? "scope" : "viewfinder")
+                .font(.caption.weight(.medium))
+            Text(model.cameraHeading.isEnabled ? "Set center records the screen direction. Camera checks can restore that direction after reinsertion." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Button(presentation.snapshot.centerBusy ? "Checking direction…" : "Set center") { model.calibrate() }
+                .disabled(!presentation.snapshot.canSetCenter).controlSize(.large)
+            if !presentation.snapshot.source.isEmpty {
+                Text("≈\(presentation.snapshot.sampleRate) samples/s · \(presentation.snapshot.source)")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }.frame(maxWidth:.infinity,alignment:.leading)
     }
 }
 
@@ -42,21 +103,13 @@ struct SettingsView: View {
                         .background(.quaternary,in:Capsule())
                 }
                 VStack(alignment:.leading,spacing:12) {
-                    HStack {
-                        Label(model.headline,systemImage:model.shielded ? "exclamationmark.shield" : "airpodspro")
-                            .font(.headline)
-                        Spacer()
-                        Text(String(format:"%+.0f°",model.simulate && !model.enabled ? model.previewYaw : model.effectiveYaw))
-                            .font(.system(.title3,design:.rounded).monospacedDigit().weight(.semibold))
-                    }
-                    VeilPreview(left:model.strengths.left,right:model.strengths.right,blur:model.blurPoints,
-                                feather:model.feather,opaque:model.opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
-                                wholeScreen:model.wholeScreen,shield:model.shielded || (model.enabled && !model.overlay.isReady))
+                    TrackingHeader(presentation:model.presentation)
+                    VeilPreview(model:model)
                         .frame(height:280).clipShape(RoundedRectangle(cornerRadius:14))
                         .overlay(RoundedRectangle(cornerRadius:14).stroke(.primary.opacity(0.08)))
-                        .accessibilityLabel("Directional blur preview. " + model.direction)
+                        .accessibilityLabel("Directional blur preview")
                     HStack {
-                        Text(model.direction).font(.subheadline.weight(.medium))
+                        TrackingDirection(presentation:model.presentation)
                         Spacer()
                         Text(model.simulate && !model.enabled ? "SIMULATED PREVIEW" : "AIRPODS PREVIEW")
                             .font(.system(size:10,weight:.semibold)).foregroundStyle(.secondary)
@@ -75,24 +128,7 @@ struct SettingsView: View {
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 HStack(alignment:.top,spacing:16) {
-                    VStack(alignment:.leading,spacing:10) {
-                        Label("Head tracking",systemImage:"airpodspro").font(.headline)
-                        Text(model.motion.status)
-                            .font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
-                        Text("Detected automatically when worn").font(.caption2).foregroundStyle(.secondary)
-                        Label(model.motion.hasSavedCenter ? "Original center saved" : "Set your screen direction once",
-                              systemImage:model.motion.hasSavedCenter ? "scope" : "viewfinder")
-                            .font(.caption.weight(.medium))
-                        Text(model.motion.hasSavedCenter ? "Your chosen zero is kept. Set center changes it; holding still does not." : "Face the screen and Set center once. AirVeil keeps that zero through removal and reinsertion.")
-                            .font(.caption2).foregroundStyle(.secondary)
-                        HStack {
-                            Button(model.calibrating ? "Hold still…" : "Set center") { model.calibrate() }.disabled(!model.motion.isFresh || model.calibrating)
-                        }.controlSize(.large)
-                        if model.motion.isFresh {
-                            Text(String(format:"%.0f samples/s · %@",model.motion.sampleRate,model.motion.sourceName))
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }.frame(maxWidth:.infinity,alignment:.leading)
+                    HeadTrackingControls(presentation:model.presentation,model:model)
                     Divider()
                     VStack(alignment:.leading,spacing:10) {
                         Label("Desktop access",systemImage:"display").font(.headline)
@@ -105,6 +141,30 @@ struct SettingsView: View {
                         }
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                     }.frame(maxWidth:.infinity,alignment:.leading)
+                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+
+                VStack(alignment:.leading,spacing:12) {
+                    Label("Remember screen direction with the camera",systemImage:"camera")
+                        .font(.headline)
+                    Text("Optional, brief checks use your Mac’s built-in camera to match returning AirPods to the screen. Images stay on this Mac and are discarded; nothing is recorded.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if model.cameraHeading.isEnabled {
+                        Text(model.cameraHeading.status).font(.caption)
+                        HStack {
+                            RefreshDirectionButton(presentation:model.presentation,model:model)
+                            if model.cameraHeading.isBusy {
+                                Button("Stop check") { model.cameraHeading.cancelPendingRecovery() }
+                            }
+                            Spacer()
+                            Button("Turn camera assistance off") { model.disableCameraAssistance() }
+                        }
+                        Text("First setup: face the display and Set center, then make a short left or right turn and hold briefly. Later checks measure your current angle; they do not make it the new center. Keep the camera and display in the same position.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    } else {
+                        Button(model.cameraHeading.isBusy ? "Waiting for camera permission…" : "Enable camera assistance") { model.enableCameraAssistance() }
+                            .disabled(model.cameraHeading.isBusy)
+                        Text(model.cameraHeading.status).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 VStack(alignment:.leading,spacing:12) {
@@ -178,12 +238,11 @@ struct SettingsView: View {
                     if model.enabled || model.starting {
                         Button("Pause & clear screen") { model.pause() }.buttonStyle(.borderedProminent).controlSize(.large)
                     } else {
-                        Button("Enable desktop effect") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(!model.motion.isFresh || !model.motion.isCalibrated || model.selectedDisplayCount == 0)
+                        EnableEffectButton(presentation:model.presentation,model:model)
                     }
                 }
                 HStack(alignment:.top) {
-                    Text("Blur affects everyone viewing a selected display. Missing motion pauses the blur without choosing a new zero. A detected sensor-reference change may require Set center again.")
+                    Text("Blur affects everyone viewing a selected display. Tracking loss pauses the blur. Camera assistance needs a clear view of your face; manual mode needs Set center after an interrupted reference.")
                     Spacer()
                     Text(model.pauseHint).fixedSize()
                 }.font(.caption2).foregroundStyle(.secondary)
