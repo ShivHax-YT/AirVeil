@@ -58,11 +58,12 @@ enum VeilMath {
 
     /// Invalid inputs cannot constitute evidence of privacy: caller must use its
     /// explicit tracking-loss state. This pure mapping always returns finite data.
-    static func target(yawDegrees: Double, onset: Double = 8, full: Double = 32) -> VeilStrength {
+    static func target(yawDegrees: Double, onset: Double = 8, full: Double = 32, wholeScreen: Bool = false) -> VeilStrength {
         guard yawDegrees.isFinite, onset.isFinite, full.isFinite,
               onset >= 0, full > onset else { return .zero }
         let t = min(1, max(0, (abs(yawDegrees) - onset) / (full - onset)))
         let strength = t * t * (3 - 2*t)
+        if wholeScreen { return VeilStrength(left: strength, right: strength) }
         return yawDegrees > 0 ? VeilStrength(left: 0, right: strength)
                               : VeilStrength(left: strength, right: 0)
     }

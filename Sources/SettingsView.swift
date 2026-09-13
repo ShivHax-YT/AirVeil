@@ -79,7 +79,7 @@ struct SettingsView: View {
                         Text(model.motion.status).font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
                         HStack {
                             Button(model.motion.isRunning ? "Reconnect" : "Connect AirPods") { model.connectMotion() }
-                            Button("Set center") { model.calibrate() }.disabled(!model.motion.canCalibrate)
+                            Button(model.calibrating ? "Hold still…" : "Set center") { model.calibrate() }.disabled(!model.motion.isFresh || model.calibrating)
                         }.controlSize(.large)
                         if model.motion.isFresh {
                             Text(String(format:"%.0f samples/s · %@",model.motion.sampleRate,model.motion.sourceName))
@@ -101,7 +101,15 @@ struct SettingsView: View {
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 VStack(alignment:.leading,spacing:16) {
-                    Text("Make it feel right").font(.headline)
+                    HStack {
+                        Text("Make it feel right").font(.headline)
+                        Spacer()
+                        Button("Reset defaults",systemImage:"arrow.counterclockwise") { model.resetDefaults() }.controlSize(.small)
+                    }
+                    Picker("Screen coverage",selection:$model.wholeScreen) {
+                        Text("Directional half").tag(false)
+                        Text("Whole screen").tag(true)
+                    }.pickerStyle(.segmented).accessibilityLabel("Screen coverage")
                     setting("Starts blurring",value:$model.onset,range:0...25,unit:"°")
                     setting("Fully obscured",value:$model.fullAngle,range:26...70,unit:"°")
                     HStack {
@@ -112,7 +120,7 @@ struct SettingsView: View {
                     DisclosureGroup("Fine-tune the animation",isExpanded:$advanced) {
                         VStack(spacing:14) {
                             setting("Blur strength",value:$model.blurPoints,range:8...64,unit:" pt")
-                            setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%")
+                            setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%").disabled(model.wholeScreen)
                             setting("Response",value:Binding(get:{model.response*1000},set:{model.response=$0/1000}),range:25...200,unit:" ms")
                         }.padding(.top,14)
                     }.font(.subheadline)

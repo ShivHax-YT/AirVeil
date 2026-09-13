@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle:model.motion.status,action:nil,keyEquivalent:"").isEnabled = false
         menu.addItem(.separator())
         menu.addItem(withTitle:model.pauseShortcutAvailable ? "Pause & Clear Screen  ⌃⌥⌘P" : "Pause & Clear Screen",action:#selector(pause),keyEquivalent:"").target = self
-        let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.canCalibrate
+        let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.calibrating
         if !model.enabled {
             let enable = menu.addItem(withTitle:"Enable Desktop Effect",action:#selector(enable),keyEquivalent:"")
             enable.target=self; enable.isEnabled=model.motion.isCalibrated && model.motion.isFresh

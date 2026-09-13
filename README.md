@@ -25,7 +25,7 @@ To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVe
 2. Choose **Connect AirPods** and allow Motion access when requested.
 3. Face the center of the display and hold still briefly. Choose **Set center**.
 4. Confirm in the preview that a physical left turn obscures the right side. Use **Invert direction** if needed.
-5. Choose **Allow screen capture** and enable AirVeil in the macOS privacy settings. Reopen the app if macOS requests it.
+5. Choose **Allow screen capture** and enable AirVeil in the macOS privacy settings. Reopen the app if macOS requests it. Ad hoc development rebuilds can require renewed permission approval.
 6. Choose **Enable desktop effect**.
 
 **Pause & Clear Screen** in the menu bar immediately removes all overlays. The app also registers **Control–Option–Command–P** as a global pause shortcut and reports when registration fails. Quitting removes the effect.
@@ -34,6 +34,8 @@ The preview slider uses a synthetic sample desktop and requires no screen captur
 
 ## Controls and behavior
 
+- **Directional half / Whole screen** selects opposite-side blur or blur across the entire display.
+- **Reset defaults** restores all effect settings without changing permissions or calibration.
 - Default onset: 8 degrees; full effect: 32 degrees.
 - Adjustable blur, edge feather, and response time.
 - **Opaque cover** removes source color at full strength for stronger obscuration.
@@ -62,7 +64,7 @@ Four research reports precede implementation:
 
 [Architecture decisions](research/DECISIONS.md) and [acceptance plan](research/VALIDATION-PLAN.md) distinguish documentation, synthetic tests, and physical evidence.
 
-Run `./scripts/test.sh` for deterministic motion math and actual Metal GPU render tests. Synthetic PNGs are written under `.build/render-artifacts/`. Passing these checks does not establish physical AirPods direction, sustained drift behavior, or privacy effectiveness. See [validation status](validation/STATUS.md) for current evidence.
+Run `./scripts/test.sh --performance` to include the synthetic native-resolution GPU benchmark. Run `./scripts/test.sh` for deterministic motion math and actual Metal GPU render tests. Synthetic PNGs are written under `.build/render-artifacts/`. Passing these checks does not establish physical AirPods direction, sustained drift behavior, or privacy effectiveness. See [validation status](validation/STATUS.md) for current evidence.
 
 ## Implementation
 

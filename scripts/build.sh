@@ -13,6 +13,15 @@ swiftc -sdk "$TASK_SDK" -target "$TASK_ARCH-apple-macos14.0" -swift-version 5 -O
   -framework MetalPerformanceShaders -framework CoreVideo -framework QuartzCore -framework Carbon
 cp "$TASK_ROOT/Resources/Info.plist" "$TASK_APP/Contents/Info.plist"
 cp "$TASK_ROOT/Resources/Veil.metal" "$TASK_APP/Contents/Resources/Veil.metal"
+TASK_ICONSET="$TASK_ROOT/build/AirVeil.iconset"
+mkdir -p "$TASK_ICONSET"
+xcrun swift -sdk "$TASK_SDK" "$TASK_ROOT/scripts/make-icon.swift" "$TASK_ROOT/build/AppIcon.png"
+for TASK_SIZE in 16 32 128 256 512; do
+  sips -z "$TASK_SIZE" "$TASK_SIZE" "$TASK_ROOT/build/AppIcon.png" --out "$TASK_ICONSET/icon_${TASK_SIZE}x${TASK_SIZE}.png" >/dev/null
+  TASK_DOUBLE=$((TASK_SIZE * 2))
+  sips -z "$TASK_DOUBLE" "$TASK_DOUBLE" "$TASK_ROOT/build/AppIcon.png" --out "$TASK_ICONSET/icon_${TASK_SIZE}x${TASK_SIZE}@2x.png" >/dev/null
+done
+iconutil -c icns "$TASK_ICONSET" -o "$TASK_APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$TASK_APP"
 codesign --verify --strict "$TASK_APP"
 echo "Built $TASK_APP"

@@ -14,6 +14,7 @@ final class VeilFrameMailbox: @unchecked Sendable {
     private var pending: CVPixelBuffer?
     private var accepting = true
     func put(_ buffer: CVPixelBuffer) { lock.lock(); defer { lock.unlock() }; if accepting { pending = buffer } }
+    var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return pending != nil }
     func take() -> CVPixelBuffer? { lock.lock(); defer { lock.unlock() }; let result = pending; pending = nil; return result }
     func invalidate() { lock.lock(); defer { lock.unlock() }; accepting = false; pending = nil }
 }
@@ -27,9 +28,11 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
 @MainActor final class VeilMetalView: MTKView, MTKViewDelegate {
     private(set) var initializationError: String?
     private(set) var lastGPUTimeMS: Double = 0
-    var rendersBaseImage = false
+    private(set) var drawSubmissionCount: UInt64 = 0
+    private var needsRender = true
+    var rendersBaseImage = false { didSet { if oldValue != rendersBaseImage { needsRender = true } } }
     var sourcePixelScale: Double = 1 { didSet { if oldValue != sourcePixelScale { blurDirty = true } } }
-    var frameMailbox: VeilFrameMailbox?
+    var frameMailbox: VeilFrameMailbox? { didSet { needsRender = true } }
     var onRenderFailure: ((String) -> Void)?
     var onFirstFrame: (() -> Void)?
     private var hasFrame = false
@@ -113,16 +116,22 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         try allocate(width: texture.width, height: texture.height)
         source = texture
         sourcePixelScale = Double(image.width) / max(1, Double(bounds.width))
-        blurDirty = true; hasFrame = true
+        blurDirty = true; hasFrame = true; needsRender = true
     }
 
     func setEffect(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool) {
         func finite(_ value: Double, _ fallback: Double) -> Double { value.isFinite ? value : fallback }
-        self.left = min(1, max(0, finite(left, 0)))
-        self.right = min(1, max(0, finite(right, 0)))
+        let nextLeft = min(1, max(0, finite(left, 0)))
+        let nextRight = min(1, max(0, finite(right, 0)))
         let sigma = min(80, max(1, finite(blurPoints, 32)))
+        let nextFeather = min(0.5, max(0.001, finite(feather, 0.12)))
+        if self.left != nextLeft || self.right != nextRight || self.blurPoints != sigma ||
+            self.feather != nextFeather || concealOpaque != opaque || self.shield != shield {
+            needsRender = true
+        }
+        self.left = nextLeft; self.right = nextRight
         if self.blurPoints != sigma { self.blurPoints = sigma; blurDirty = true }
-        self.feather = min(0.5, max(0.001, finite(feather, 0.12)))
+        self.feather = nextFeather
         self.concealOpaque = opaque; self.shield = shield
     }
 
@@ -179,6 +188,9 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
     }
 
     func draw(in view: MTKView) {
+        // Keep MTKView's update source alive for incoming captures and motion,
+        // but do not acquire a drawable or submit unchanged pixels every tick.
+        guard needsRender || blurDirty || frameMailbox?.hasPending == true else { return }
         guard initializationError == nil, inFlight.wait(timeout: .now()) == .success else { return }
         guard let drawable = currentDrawable, let command = commandQueue?.makeCommandBuffer() else { inFlight.signal(); return }
         do { try encode(to: drawable.texture, command: command) }
@@ -195,6 +207,8 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         }
         command.present(drawable)
         command.commit()
+        needsRender = false
+        drawSubmissionCount &+= 1
     }
 
     /// Discard sensitive source pixels immediately on explicit pause/session loss.
@@ -206,9 +220,12 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         source = nil
         levels.removeAll()
         kernels.removeAll()
+        kernelSigma = -1
         if let cache { CVMetalTextureCacheFlush(cache, 0) }
         hasFrame = false
         blurDirty = false
+        needsRender = false
+        didReportFailure = false
     }
 
     private func reportFailure(_ text: String) {
@@ -216,7 +233,8 @@ private final class CaptureTextureKeeper: @unchecked Sendable {
         didReportFailure = true
         onRenderFailure?(text)
     }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRender = true }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); needsRender = true }
 
     /// Synthetic artifact validation only; never called by the live rendering loop.
     func renderOffscreen(width: Int, height: Int) throws -> CGImage {

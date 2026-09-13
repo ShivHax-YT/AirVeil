@@ -10,3 +10,9 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/VeilMetalView.swift" "$TASK_ROOT/Tests/RenderTests.swift" \
   -o "$TASK_ROOT/build/tests/render-tests"
 "$TASK_ROOT/build/tests/render-tests" "$TASK_ROOT"
+if [ "${1:-}" = '--performance' ]; then
+  swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 -O \
+    "$TASK_ROOT/Sources/VeilMetalView.swift" "$TASK_ROOT/Tests/PerformanceTests.swift" \
+    -o "$TASK_ROOT/build/tests/performance-tests"
+  (cd "$TASK_ROOT" && "$TASK_ROOT/build/tests/performance-tests")
+fi

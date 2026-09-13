@@ -10,6 +10,8 @@ final class AppModel: NSObject, ObservableObject {
     @Published var pauseShortcutAvailable = false
     @Published var enabled = false
     @Published var starting = false
+    @Published var calibrating = false
+    private var calibrationTicket = 0
     @Published var message = "Connect your AirPods to get started."
     @Published var previewYaw = 0.0
     @Published var simulate = true
@@ -20,6 +22,7 @@ final class AppModel: NSObject, ObservableObject {
     @Published var feather = 0.12 { didSet { persist() } }
     @Published var response = 0.07 { didSet { persist() } }
     @Published var inverted = false { didSet { persist() } }
+    @Published var wholeScreen = false { didSet { persist() } }
     @Published var opaque = false { didSet { persist() } }
     @Published var permissionGranted = false
     private var clock: CADisplayLink?
@@ -46,6 +49,7 @@ final class AppModel: NSObject, ObservableObject {
         if enabled && !overlay.isReady { return "Waiting for live desktop frames" }
         let yaw = simulate && !enabled ? previewYaw : effectiveYaw
         if abs(yaw) <= onset { return "Centered · screen clear" }
+        if wholeScreen { return "Head turned · whole screen obscured" }
         return yaw > 0 ? "Looking left · right side obscured" : "Looking right · left side obscured"
     }
     override init() {
@@ -58,9 +62,10 @@ final class AppModel: NSObject, ObservableObject {
         response = Self.read(d, "response", 0.07, 0.025...0.20)
         inverted = d.bool(forKey: "inverted")
         opaque = d.bool(forKey: "opaque")
+        wholeScreen = d.bool(forKey: "wholeScreen")
         loading = false
         refreshPermission()
-        motion.objectWillChange.sink { [weak self] _ in
+        motion.objectWillChange.throttle(for: .milliseconds(100), scheduler: RunLoop.main, latest: true).sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
         }.store(in: &subscriptions)
         overlay.objectWillChange.sink { [weak self] _ in
@@ -90,7 +95,7 @@ final class AppModel: NSObject, ObservableObject {
         guard !loading else { return }
         let d = UserDefaults.standard
         for (k,v) in [("onset",onset),("fullAngle",fullAngle),("blurPoints",blurPoints),("feather",feather),("response",response)] { d.set(v,forKey:k) }
-        d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque")
+        d.set(inverted,forKey:"inverted"); d.set(opaque,forKey:"opaque"); d.set(wholeScreen,forKey:"wholeScreen")
     }
     private func installClock() {
         clock?.invalidate()
@@ -104,19 +109,44 @@ final class AppModel: NSObject, ObservableObject {
         let dt = lastTime == 0 ? 1.0/60 : min(0.1,max(0,now-lastTime))
         lastTime = now
         let yaw = enabled || !simulate ? (motion.trackingValid ? effectiveYaw : 0) : previewYaw
-        let target = VeilMath.target(yawDegrees: yaw, onset: onset, full: fullAngle)
+        let target = VeilMath.target(yawDegrees: yaw, onset: onset, full: fullAngle, wholeScreen: wholeScreen)
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        strengths = VeilMath.advance(current: strengths,target: target,dt: dt,response: reduced ? 0.025 : response)
+        let next = VeilMath.advance(current: strengths,target: target,dt: dt,response: reduced ? 0.025 : response)
+        if abs(next.left-strengths.left) > 0.00001 || abs(next.right-strengths.right) > 0.00001 { strengths = next }
         if enabled {
             overlay.update(left: strengths.left,right: strengths.right,blurPoints: blurPoints,feather: feather,
                            opaque: opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,shield: shielded)
         }
     }
-    func connectMotion() { motion.stop(); motion.start(); message = "Wear your AirPods, face the display, then choose Set center." }
+    func connectMotion() { calibrationTicket += 1; calibrating = false; motion.stop(); motion.start(); message = "Wear your AirPods, face the display, then choose Set center." }
     func calibrate() {
-        motion.calibrate()
-        if motion.isCalibrated { simulate = false; message = "Center set. Turn left and right to confirm the preview follows the opposite side." }
-        else { message = motion.status }
+        guard motion.isFresh else { message = "Wait for fresh AirPods motion before setting center."; return }
+        calibrationTicket += 1
+        let ticket = calibrationTicket
+        calibrating = true
+        message = "Face the display and hold still for a moment…"
+        Task {
+            for _ in 0..<50 {
+                guard ticket == calibrationTicket else { return }
+                guard motion.isFresh else { calibrating = false; message = "Motion stopped. Reconnect and try Set center again."; return }
+                if motion.canCalibrate {
+                    motion.calibrate()
+                    calibrating = false
+                    if motion.isCalibrated { simulate = false; message = "Center set. Turn left and right to confirm the preview follows the opposite side." }
+                    else { message = motion.status }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard ticket == calibrationTicket else { return }
+            calibrating = false
+            message = "Could not find a steady pose. Face the display, hold still, and try Set center again."
+        }
+    }
+    func resetDefaults() {
+        onset = 8; fullAngle = 32; blurPoints = 32; feather = 0.12; response = 0.07
+        inverted = false; opaque = false; wholeScreen = false
+        message = "Default settings restored."
     }
     func refreshPermission() { permissionGranted = CGPreflightScreenCaptureAccess() }
     func requestScreenPermission() {
@@ -149,6 +179,7 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     func pause() {
+        calibrationTicket += 1; calibrating = false
         generation += 1; enabled = false; starting = false; overlay.stop()
         strengths = VeilStrength(left: 0,right: 0)
         message = "Desktop effect paused. Your screen is clear."
