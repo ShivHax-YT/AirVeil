@@ -29,3 +29,21 @@ Review macTilt as a visual and architectural reference. Write original applicati
 - `SettingsView`: native SwiftUI controls, live orientation display, clearly labeled simulated preview that does not claim sensor availability, actual error text, and calibration guidance. Preview visuals use synthetic content and require no screen permission.
 
 Animation constants remain provisional until the fourth research report arrives. All desktop frames stay memory-only; diagnostic artifacts use synthetic content.
+
+## Review of the first three reports
+
+Apple's [WWDC23 Core Motion session](https://developer.apple.com/videos/play/wwdc2023/10179/) and installed macOS 26.5 headers establish native macOS 14 headphone motion. Implement explicit reference-attitude calibration; preserve the baseline while the head remains turned. Connection, source-bud changes, stale callbacks, and audio-induced discontinuities must invalidate confident tracking rather than silently recenter. Actual AirPods cadence and direction remain physical test requirements.
+
+Apple's [ScreenCaptureKit sample](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos) establishes a live application-excluding display stream. Retain the newest valid image across idle callbacks; do not mistake a static desktop for lost capture. The renderer must return zero alpha outside coverage. Opaque blurred pixels prevent the sharp desktop underneath from leaking through; the feather is intentionally a transition zone.
+
+The two research reports use different proposed yaw sign conventions. Resolve that here: **AirVeil uses positive yaw for a physical LEFT turn, negative for RIGHT.** Hardware verification must establish the sensor adapter's sign, while the renderer accepts independent nonnegative left and right strengths. A user-visible invert setting provides correction without changing the internal convention.
+
+Use an original MPS Gaussian blur pipeline instead of copying macTilt's shader. Keep live desktop pixels flat and aligned. Only the obscuring amount and edge animate; the desktop does not need to fold or distort to achieve the requested behavior. A dark opaque cover remains available as a stronger obscuration style.
+
+Unexpected loss of calibrated motion while an enabled effect is active will show a full opaque fallback and an explicit tracking-loss status. Pause removes it immediately. Place overlays below status-menu controls and keep the settings window above them. Register a global pause shortcut through the public Carbon hotkey API, without an Accessibility permission dependency. On sleep/session resignation, hide overlays and discard captured frames; waking requires deliberate restart/recalibration.
+
+## Research gate completed
+
+All four research assignments were reviewed before application implementation began. The animation report selects independent left/right exponential responses and a cached MPS Gaussian level bank with variance interpolation. This produces continuous variable softness without temporal accumulation. Provisional defaults are onset 8 degrees, full effect 32 degrees, attack 70 ms, release 140 ms, feather 12% of display width. The positive-left convention above is authoritative.
+
+Render the synthetic preview through the same Metal compositor as the live desktop. Expose a clearly labeled simulation slider; synthetic preview is not sensor verification. Add opaque concealment and reduced-transparency support. Test alpha-zero neutral, alpha-one covered edges, source independence in opaque mode, mirrored masks, and finite/timing behavior before live acceptance.
