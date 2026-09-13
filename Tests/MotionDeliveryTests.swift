@@ -56,6 +56,7 @@ struct MotionDeliveryTests {
         let recovered = outage.take()!
         check(recovered.reading?.timestamp == 2.01, "Newest post-gap sample retained")
         check(recovered.continuityIssue?.contains("sensor gap") == true, "Real acquisition gap remains sticky after recovery")
+        check(recovered.continuityImpact == .gap, "Timing gap does not declare the original reference invalid")
         check(recovered.stableSince == 11, "Real gap resets stability; it does not create a new reference pose")
 
         let lagged = MotionDeliveryBuffer()
@@ -68,7 +69,7 @@ struct MotionDeliveryTests {
         lagged.offer(reading(2.02, 11.02))
         let caughtUp = lagged.take()!
         check(caughtUp.reading?.timestamp == 2.02, "Genuinely caught-up source accepted")
-        check(caughtUp.continuityIssue != nil, "Catch-up source discontinuity requires explicit calibration")
+        check(caughtUp.continuityImpact == .gap, "Catch-up timing gap retains original center")
 
         let jumping = MotionDeliveryBuffer()
         jumping.offer(reading(1, 10))
@@ -79,6 +80,7 @@ struct MotionDeliveryTests {
         check(jumps.continuityIssue?.contains("jumped") == true,
               "Reference jump cannot disappear when an intermediate pose is dropped")
         check(jumps.referenceJumpCount == 2, "Two actual quaternion discontinuities counted once each")
+        check(jumps.continuityImpact == .invalid, "Actual quaternion discontinuity invalidates reference confidence")
         check(jumps.lastReferenceJump != nil && jumps.lastReferenceJump!.stepRadians > 0.9,
               "Last jump reports measured step rather than only a latched status")
         jumping.offer(reading(1.03, 10.03))
@@ -111,6 +113,26 @@ struct MotionDeliveryTests {
         check(resetLike.lastReferenceJump?.previousSpeed == 0 && resetLike.lastReferenceJump?.currentSpeed == 0,
               "Reset-like event records both low speeds without claiming a vendor cause")
 
+        let priority = MotionDeliveryBuffer()
+        priority.offer(reading(1, 10))
+        _ = priority.take()
+        priority.offer(reading(1.01, 10.01, yaw: 1))
+        priority.offer(reading(2.01, 11.01, yaw: 1))
+        check(priority.take()?.continuityImpact == .invalid,
+              "A later timing gap cannot hide a real reference jump in the same UI batch")
+
+        let retainedStream = MotionDeliveryBuffer()
+        retainedStream.offer(reading(1, 10))
+        _ = retainedStream.take()
+        retainedStream.setConnected(false)
+        check(!retainedStream.offer(reading(1.1, 10.1)), "Disconnected stream ignores queued sensor poses")
+        check(retainedStream.take() == nil, "No old frame remains after removal")
+        retainedStream.setConnected(true)
+        retainedStream.offer(reading(1.2, 10.2, yaw: 0.8))
+        let rewear = retainedStream.take()!
+        check(rewear.continuityImpact == .gap && rewear.reading?.timestamp == 1.2,
+              "Rapid same-source rewear preserves candidate origin despite a legitimate unseen head turn")
+
         let switching = MotionDeliveryBuffer()
         switching.offer(reading(1, 10))
         _ = switching.take()
@@ -140,6 +162,32 @@ struct MotionDeliveryTests {
         let old = idle.take()!
         check(!VeilMath.isRecent(receipt: old.reading?.receipt, now: 11, timeout: 0.65),
               "Consumption checks acquisition age; reading the mailbox does not renew freshness")
+
+        let isolatedOldPacket = MotionDeliveryBuffer()
+        isolatedOldPacket.offer(reading(100, 1000))
+        _ = isolatedOldPacket.take()
+        isolatedOldPacket.offer(reading(1, 1000.1))
+        check(isolatedOldPacket.take()?.reading == nil, "One out-of-order packet cannot establish a new epoch")
+        isolatedOldPacket.offer(reading(100.2, 1000.2))
+        check(isolatedOldPacket.take()?.reading?.timestamp == 100.2,
+              "Original timeline recovers after an isolated packet without rebasing")
+
+        let burstEpoch = MotionDeliveryBuffer()
+        burstEpoch.offer(reading(100, 1000))
+        _ = burstEpoch.take()
+        for i in 0..<50 {
+            burstEpoch.offer(reading(1 + Double(i)*0.1, 1000.1 + Double(i)*0.001))
+        }
+        check(burstEpoch.take()?.reading == nil, "Buffered timestamp burst cannot masquerade as paced live epoch")
+
+        let ordinaryDelay = MotionDeliveryBuffer()
+        ordinaryDelay.offer(reading(100, 1000))
+        _ = ordinaryDelay.take()
+        for i in 0..<10 {
+            ordinaryDelay.offer(reading(100.1 + Double(i)*0.1, 1002 + Double(i)*0.1))
+        }
+        check(ordinaryDelay.take()?.reading == nil,
+              "Paced ordinary delivery lag cannot rebase without an explicit absence or epoch reversal")
         print("PASS: \(checks) motion-delivery lifecycle assertions (synthetic; no hardware claims)")
     }
 }

@@ -26,6 +26,7 @@ struct VeilDisplayInfo {
 }
 
 enum MotionConnectionState { case unknown, connected, disconnected }
+enum MotionReferenceState { case unset, established, awaitingReturn, retainedAfterGap, invalid }
 
 @MainActor final class DisplaySleepService {
     private(set) var requests = 0
@@ -47,11 +48,27 @@ enum MotionConnectionState { case unknown, connected, disconnected }
     var connectionState = MotionConnectionState.connected
     var disconnectEventCount: UInt64 = 0
     var canCalibrate = true
-    var trackingValid: Bool { isRunning && isFresh && isCalibrated }
+    var referenceState = MotionReferenceState.established
+    var hasSavedCenter: Bool { referenceState != .unset }
+    var referenceUsable: Bool {
+        isCalibrated && referenceState != .unset && referenceState != .invalid
+    }
+    var trackingValid: Bool { isRunning && isFresh && referenceUsable }
     private(set) var calibrateCalls = 0
-    func start() { isRunning = true; connectionState = .unknown }
-    func stop() { isRunning = false; isFresh = false; isCalibrated = false; connectionState = .unknown }
-    func calibrate() { calibrateCalls += 1; isCalibrated = true }
+    private(set) var startCalls = 0
+    private(set) var stopCalls = 0
+    func start() {
+        guard !isRunning else { return }
+        startCalls += 1; isRunning = true; connectionState = .unknown
+    }
+    func stop() {
+        stopCalls += 1; isRunning = false; isFresh = false; isCalibrated = false
+        if hasSavedCenter { referenceState = .invalid }
+        connectionState = .unknown
+    }
+    func calibrate() {
+        calibrateCalls += 1; isCalibrated = true; referenceState = .established; yawDegrees = 0
+    }
 }
 
 @MainActor final class DesktopOverlayController: ObservableObject {
@@ -118,16 +135,22 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         model.motion.canCalibrate = true
     }
 
-    private static func automaticTicks(_ model: AppModel, from now: TimeInterval, count: Int = 11) {
-        for i in 0..<count { model.checkAutomaticCenter(now: now + Double(i) * 0.1) }
+    private static func recoveryTicks(_ model: AppModel, count: Int = 20) {
+        for _ in 0..<count { model.checkReferenceRecovery() }
     }
 
-    private static func newUncenteredSession() -> AppModel {
-        let model = makeModel()
-        model.motion.stop()
-        model.startMotionAutomatically()
+    private static func removeAirPods(_ model: AppModel) {
+        model.motion.isFresh = false
+        model.motion.referenceState = .awaitingReturn
+        model.motion.connectionState = .disconnected
+        model.motion.disconnectEventCount += 1
+        model.checkTrackingSafety()
+    }
+
+    private static func returnLookingAway(_ model: AppModel) {
         freshWear(model)
-        return model
+        model.motion.referenceState = .retainedAfterGap
+        model.motion.yawDegrees = 45
     }
 
     static func main() async {
@@ -438,93 +461,135 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.shutdown()
         }
         do {
-            let model = newUncenteredSession()
-            let now = ProcessInfo.processInfo.systemUptime
-            check(model.autoCenter, "Automatic center defaults on")
-            automaticTicks(model, from: now, count: 8)
-            check(model.motion.calibrateCalls == 0, "Automatic center waits beyond existing sensor stability window")
-            automaticTicks(model, from: now + 0.8, count: 3)
-            check(model.motion.calibrateCalls == 1 && model.motion.isCalibrated, "Fresh stable startup centers once")
-            check(model.automaticCenterCount == 1, "Successful automatic center increments its diagnostic event count")
-            await drainTasks()
-            check(!model.enabled && model.overlay.startCalls == 0, "Cold startup does not start desktop capture")
-            model.motion.yawDegrees = 35
-            automaticTicks(model, from: now + 1.1, count: 100)
-            check(model.motion.calibrateCalls == 1 && model.motion.yawDegrees == 35, "Held turn and repeated connected state never recenter")
+            let model = makeModel()
+            model.motion.referenceState = .unset
             model.motion.isCalibrated = false
-            automaticTicks(model, from: now + 12, count: 20)
-            check(model.motion.calibrateCalls == 1 && !model.motion.isCalibrated,
-                  "Same-connection reference jump needs explicit center even after stable samples")
+            recoveryTicks(model, count: 100)
+            model.enable()
+            await drainTasks()
+            check(model.motion.calibrateCalls == 0 && !model.motion.hasSavedCenter,
+                  "Initial fresh still pose never silently establishes zero")
+            check(!model.enabled && model.overlay.startCalls == 0, "Initial launch waits for explicit Set center")
             model.calibrate()
             await drainTasks()
-            check(model.motion.calibrateCalls == 2, "Manual Set center remains available after a reference jump")
-            check(model.automaticCenterCount == 1, "Manual Set center does not count as automatic calibration")
+            check(model.motion.calibrateCalls == 1 && model.motion.referenceUsable, "Explicit Set center establishes the initial reference")
+            check(!model.enabled, "Initial Set center alone keeps cold capture paused")
+            model.enable()
+            await drainTasks()
+            check(model.enabled, "Initial reference permits the user's explicit Enable")
             model.shutdown()
         }
-        do {
-            let model = newUncenteredSession()
-            let now = ProcessInfo.processInfo.systemUptime
-            automaticTicks(model, from: now, count: 6)
-            model.motion.canCalibrate = false
-            model.checkAutomaticCenter(now: now + 0.6)
-            model.motion.canCalibrate = true
-            automaticTicks(model, from: now + 0.7, count: 7)
-            check(model.motion.calibrateCalls == 0, "Movement restarts the continuous stability window")
-            model.motion.isFresh = false
-            model.checkAutomaticCenter(now: now + 1.4)
-            model.motion.isFresh = true
-            automaticTicks(model, from: now + 1.5)
-            check(model.motion.calibrateCalls == 1, "Fresh stable measurements after movement can center")
-            model.shutdown()
-        }
-        do {
-            let model = newUncenteredSession()
-            let now = ProcessInfo.processInfo.systemUptime
-            model.checkAutomaticCenter(now: now)
-            model.checkAutomaticCenter(now: now + 10)
-            check(model.motion.calibrateCalls == 0, "A blocked UI cannot substitute for continuous observed stability")
-            automaticTicks(model, from: now + 10.1)
-            check(model.motion.calibrateCalls == 1, "Stable checks after a UI gap complete normally")
-            model.autoCenter = false
-            model.shutdown()
-            let restored = AppModel()
-            check(!restored.autoCenter, "Automatic center preference persists")
-            restored.resetDefaults()
-            check(restored.autoCenter, "Reset restores automatic center default")
-            restored.shutdown()
-        }
-        for manualCancellation in ["none", "pause", "selection", "reset", "off-before-task", "off-before-center"] {
+        for cancellation in ["none", "pause", "selection", "reset"] {
             let model = makeModel()
-            let now = ProcessInfo.processInfo.systemUptime
             model.onset = 12; model.fullAngle = 44; model.inverted = true
             model.wholeScreen = true; model.blurPoints = 48
             model.enable()
             await drainTasks()
-            model.motion.isFresh = false
-            model.motion.isCalibrated = false
-            model.motion.connectionState = .disconnected
-            model.motion.disconnectEventCount += 1
-            model.checkTrackingSafety()
-            model.checkAutomaticCenter(now: now)
-            switch manualCancellation {
+            removeAirPods(model)
+            check(!model.enabled && !model.overlay.isRunning && model.motion.isCalibrated,
+                  "\(cancellation): removal clears capture while retaining calibration")
+            switch cancellation {
             case "pause": model.pause()
             case "selection": model.selectDisplay(model.overlay.availableDisplays[1], selected: false)
             case "reset": model.resetDefaults()
-            case "off-before-center": model.autoCenter = false; model.autoCenter = true
             default: break
             }
-            freshWear(model)
-            automaticTicks(model, from: now + 0.1)
-            if manualCancellation == "off-before-task" { model.autoCenter = false }
+            returnLookingAway(model)
+            recoveryTicks(model, count: 100)
             await drainTasks()
-            let shouldResume = manualCancellation == "none"
-            check(model.motion.calibrateCalls == 1, "\(manualCancellation): removal/reinsertion centers automatically")
-            check(model.enabled == shouldResume && model.overlay.startCalls == (shouldResume ? 2 : 1),
-                  "\(manualCancellation): prior enable intent respects explicit cancellation")
-            if shouldResume {
+            let resumes = cancellation == "none"
+            check(model.enabled == resumes && model.overlay.startCalls == (resumes ? 2 : 1),
+                  "\(cancellation): retained-reference resume respects explicit cancellation")
+            check(model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
+                  "\(cancellation): returning or holding a 45-degree turn never changes original zero")
+            if resumes {
                 check(model.onset == 12 && model.fullAngle == 44 && model.inverted && model.wholeScreen && model.blurPoints == 48,
-                      "Automatic resume preserves the existing blur configuration")
+                      "Retained-reference resume preserves blur configuration")
             }
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            removeAirPods(model)
+            returnLookingAway(model)
+            recoveryTicks(model)
+            await drainTasks()
+            check(!model.enabled && model.overlay.startCalls == 0 && model.motion.calibrateCalls == 0,
+                  "Fresh saved-reference return does not enable previously paused capture")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.enable()
+            await drainTasks()
+            model.motion.referenceState = .invalid
+            model.motion.isCalibrated = false
+            recoveryTicks(model, count: 100)
+            await drainTasks()
+            check(!model.enabled && model.motion.hasSavedCenter && model.motion.calibrateCalls == 0,
+                  "Fresh but invalid sensor reference stays paused without overwriting saved zero")
+            check(model.overlay.startCalls == 1, "Invalid reference cannot automatically restart capture")
+            model.calibrate()
+            await drainTasks()
+            check(model.motion.calibrateCalls == 1 && model.enabled && model.overlay.startCalls == 2,
+                  "Explicit Set center can replace an invalid reference and restore prior capture intent")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.enable()
+            await drainTasks()
+            model.handleWorkspaceEvent(NSWorkspace.willSleepNotification)
+            model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification)
+            model.handleWorkspaceEvent(NSWorkspace.sessionDidResignActiveNotification)
+            check(model.motion.isRunning && model.motion.stopCalls == 0 && model.motion.hasSavedCenter,
+                  "System, display, and session suspension preserve the running sensor and original center")
+            model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification)
+            returnLookingAway(model)
+            recoveryTicks(model)
+            model.enable()
+            await drainTasks()
+            check(!model.enabled && model.overlay.startCalls == 1, "Display wake alone cannot resume capture in inactive system/session")
+            model.handleWorkspaceEvent(NSWorkspace.didWakeNotification)
+            recoveryTicks(model)
+            await drainTasks()
+            check(!model.enabled && model.overlay.startCalls == 1, "System wake still waits for active login session")
+            model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            recoveryTicks(model)
+            await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 2 && model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
+                  "Fully active return resumes once with the original zero even when looking away")
+            check(model.motion.startCalls == 0 && model.motion.stopCalls == 0, "Wake never restarts an already running reference stream")
+            model.shutdown()
+            model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            model.startMotionAutomatically()
+            check(!model.motion.isRunning && model.motion.stopCalls == 1 && model.motion.startCalls == 0,
+                  "Quit stops the sensor and later workspace events cannot restart it")
+        }
+        for phase in ["before-task", "during-capture-await"] {
+            let model = makeModel()
+            model.enable()
+            await drainTasks()
+            removeAirPods(model)
+            returnLookingAway(model)
+            if phase == "during-capture-await" { model.overlay.suspendNextStart = true }
+            recoveryTicks(model)
+            if phase == "during-capture-await" {
+                await drainTasks()
+                check(model.starting && model.overlay.startCalls == 2, "Recovery capture is held inside its asynchronous startup")
+            }
+            model.handleWorkspaceEvent(NSWorkspace.sessionDidResignActiveNotification)
+            if phase == "during-capture-await" { model.overlay.releaseStartup() }
+            await drainTasks()
+            check(!model.enabled && !model.starting && !model.overlay.isRunning,
+                  "\(phase): inactive session cancels pending recovery activation")
+            check(model.overlay.startCalls == (phase == "before-task" ? 1 : 2),
+                  "\(phase): superseded capture cannot restart after cancellation")
+            model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            recoveryTicks(model)
+            await drainTasks()
+            check(model.enabled && model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
+                  "\(phase): later active session resumes with unchanged reference")
             model.shutdown()
         }
         do {
@@ -534,62 +599,58 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.enable()
             await drainTasks()
             model.checkAirPodsRemoval(now: now)
-            model.motion.isFresh = false; model.motion.isCalibrated = false
-            model.motion.connectionState = .disconnected; model.motion.disconnectEventCount += 1
-            model.checkTrackingSafety()
-            model.checkAutomaticCenter(now: now + 0.1)
-            model.checkAirPodsRemoval(now: now + 0.1)
-            model.checkAirPodsRemoval(now: now + 2)
+            removeAirPods(model)
+            model.checkAirPodsRemoval(now: now + 1)
+            model.checkAirPodsRemoval(now: now + 3)
             await drainTasks()
-            check(model.displaySleep.requests == 1, "Removal sleep remains enabled alongside automatic center")
+            check(model.displaySleep.requests == 1, "Removal sleep remains a one-shot action with retained center")
             model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification)
             model.handleWorkspaceEvent(NSWorkspace.sessionDidResignActiveNotification)
-            model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification)
-            check(!model.motion.isRunning, "Display wake cannot restart motion while user session is inactive")
-            automaticTicks(model, from: now + 3)
-            check(model.motion.calibrateCalls == 0 && model.overlay.startCalls == 1,
-                  "Inactive Mac session prevents automatic center and capture")
-            model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
-            freshWear(model)
-            automaticTicks(model, from: now + 5)
+            returnLookingAway(model)
+            model.checkAirPodsRemoval(now: now + 4)
+            model.motion.connectionState = .disconnected
+            model.motion.disconnectEventCount += 1
+            model.motion.isFresh = false
+            model.checkAirPodsRemoval(now: now + 5)
+            model.checkAirPodsRemoval(now: now + 8)
             await drainTasks()
-            check(model.enabled && model.overlay.startCalls == 2 && model.motion.calibrateCalls == 1,
-                  "Removal display sleep and active-session return preserve prior enable intent")
-            check(model.displaySleep.requests == 1, "Wake does not replay the old removal action")
-            model.shutdown()
+            check(model.displaySleep.requests == 1, "Keepalive motion cannot arm or repeat display sleep while Mac is inactive")
+            model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification)
+            returnLookingAway(model)
+            recoveryTicks(model)
+            await drainTasks()
+            check(!model.enabled, "Screen wake cannot resume effect while login session is inactive")
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
-            check(!model.motion.isRunning, "Workspace events after shutdown cannot restart motion")
+            recoveryTicks(model)
+            model.checkAirPodsRemoval(now: now + 10)
+            await drainTasks()
+            check(model.enabled && model.motion.calibrateCalls == 0 && model.motion.yawDegrees == 45,
+                  "Return after removal sleep resumes original reference without recalibration")
+            check(model.displaySleep.requests == 1, "Return does not replay the earlier disconnect action")
+            model.shutdown()
         }
-        for phase in ["before-task", "during-capture-await"] {
+        do {
             let model = makeModel()
-            let now = ProcessInfo.processInfo.systemUptime
+            model.calibrate()
+            model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification)
+            await drainTasks()
+            check(model.motion.calibrateCalls == 0, "Sleep cancels queued explicit calibration before it changes center")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
             model.enable()
             await drainTasks()
-            model.motion.isFresh = false; model.motion.isCalibrated = false
-            model.motion.connectionState = .disconnected; model.motion.disconnectEventCount += 1
-            model.checkTrackingSafety()
-            model.checkAutomaticCenter(now: now)
-            freshWear(model)
-            if phase == "during-capture-await" { model.overlay.suspendNextStart = true }
-            automaticTicks(model, from: now + 0.1)
-            if phase == "during-capture-await" {
-                await drainTasks()
-                check(model.starting && model.overlay.startCalls == 2,
-                      "Automatic capture can be held inside its asynchronous startup")
-            }
-            model.handleWorkspaceEvent(NSWorkspace.sessionDidResignActiveNotification)
-            if phase == "during-capture-await" { model.overlay.releaseStartup() }
+            removeAirPods(model)
+            NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
             await drainTasks()
-            check(!model.enabled && !model.starting && !model.overlay.isRunning,
-                  "\(phase): inactive-session event cancels automatic activation")
-            check(model.overlay.startCalls == (phase == "before-task" ? 1 : 2),
-                  "\(phase): queued or superseded automatic capture cannot restart after cancellation")
-            model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
-            freshWear(model)
-            automaticTicks(model, from: now + 3)
+            returnLookingAway(model)
+            recoveryTicks(model)
             await drainTasks()
-            check(model.enabled && model.motion.calibrateCalls == 2,
-                  "\(phase): return to active session obtains a new center and resumes once")
+            check(model.motion.isRunning && model.motion.stopCalls == 0 && model.motion.calibrateCalls == 0,
+                  "Display topology notification preserves sensor stream and original reference")
+            check(!model.enabled && model.overlay.startCalls == 1 && model.motion.yawDegrees == 45,
+                  "Display topology change cancels prior capture intent without changing zero")
             model.shutdown()
         }
         print("PASS: \(checks) real AppModel lifecycle assertions; motion, capture, display sleep, permissions, and preferences stubbed")

@@ -10,6 +10,10 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/MotionService.swift" \
   "$TASK_ROOT/Tests/MotionDeliveryTests.swift" -o "$TASK_ROOT/build/tests/motion-delivery"
 "$TASK_ROOT/build/tests/motion-delivery"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/MotionService.swift" \
+  "$TASK_ROOT/Tests/MotionReferenceLifecycleTests.swift" -o "$TASK_ROOT/build/tests/motion-reference"
+"$TASK_ROOT/build/tests/motion-reference"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
   "$TASK_ROOT/Tests/AppModelLifecycleTests.swift" -o "$TASK_ROOT/build/tests/appmodel-lifecycle"

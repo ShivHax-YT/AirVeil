@@ -77,11 +77,13 @@ struct SettingsView: View {
                 HStack(alignment:.top,spacing:16) {
                     VStack(alignment:.leading,spacing:10) {
                         Label("Head tracking",systemImage:"airpodspro").font(.headline)
-                        Text(model.autoCenter && model.motion.isFresh ? model.autoCenterStatus : model.motion.status)
+                        Text(model.motion.status)
                             .font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
                         Text("Detected automatically when worn").font(.caption2).foregroundStyle(.secondary)
-                        Toggle("Automatic center",isOn:$model.autoCenter).toggleStyle(.switch).controlSize(.small)
-                        Text(model.autoCenter ? "After putting them on, face the screen and hold still briefly. Set center is available for corrections." : "Face the screen and choose Set center before enabling blur.")
+                        Label(model.motion.hasSavedCenter ? "Original center saved" : "Set your screen direction once",
+                              systemImage:model.motion.hasSavedCenter ? "scope" : "viewfinder")
+                            .font(.caption.weight(.medium))
+                        Text(model.motion.hasSavedCenter ? "Your chosen zero is kept. Set center changes it; holding still does not." : "Face the screen and Set center once. AirVeil keeps that zero through removal and reinsertion.")
                             .font(.caption2).foregroundStyle(.secondary)
                         HStack {
                             Button(model.calibrating ? "Hold still…" : "Set center") { model.calibrate() }.disabled(!model.motion.isFresh || model.calibrating)
@@ -181,7 +183,7 @@ struct SettingsView: View {
                     }
                 }
                 HStack(alignment:.top) {
-                    Text("Blur affects everyone viewing a selected display. Tracking loss clears the blur. With Automatic center on, wearing AirPods again centers once while you hold still facing the screen.")
+                    Text("Blur affects everyone viewing a selected display. Missing motion pauses the blur without choosing a new zero. A detected sensor-reference change may require Set center again.")
                     Spacer()
                     Text(model.pauseHint).fixedSize()
                 }.font(.caption2).foregroundStyle(.secondary)

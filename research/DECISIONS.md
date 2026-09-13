@@ -10,7 +10,7 @@ App implementation starts after the four sensor and animation research reports h
 
 ## Product interaction
 
-Working title: AirVeil. A menu-bar utility with a native settings window. Motion connects automatically at launch and after wake. First-run actions are calibrate while facing the screen, authorize screen capture, then enable the desktop effect. A clearly labeled local preview must work before screen recording is authorized. Settings include activation angle, full effect angle, blur strength, feather width, responsiveness, and invert direction. Pause and Quit remain accessible from the menu bar.
+Working title: AirVeil. A menu-bar utility with a native settings window. Motion connects automatically at launch. Set the original screen-facing zero once, authorize screen capture, then enable the desktop effect. Preserve that zero through normal removal and reinsertion; do not automatically redefine it from a still pose on return. A clearly labeled local preview must work before screen recording is authorized. Settings include activation angle, full effect angle, blur strength, feather width, responsiveness, and invert direction. Pause and Quit remain accessible from the menu bar.
 
 ## Privacy model
 
@@ -22,10 +22,10 @@ Review macTilt as a visual and architectural reference. Write original applicati
 
 ## Component contract for implementation
 
-- `MotionService`: observable status, calibrated signed yaw in degrees (positive = physical left, verified or invertible), sample cadence/freshness, availability, authorization, source bud, explicit `start`, `stop`, and `calibrate`. Only fresh valid calibrated samples may drive tracking. Drop callbacks from previous runs. Clear calibration after discontinuity or reconnect.
+- `MotionService`: observable status, calibrated signed yaw in degrees (positive = physical left, verified or invertible), sample cadence/freshness, availability, authorization, source bud, explicit `start`, `stop`, and `calibrate`. Only fresh input with a usable saved reference may drive tracking. Drop callbacks from previous runs. Reconnection clears freshness, not the saved zero; detected reference discontinuity makes the saved reference unusable.
 - `VeilMath`: pure transfer and timing functions for bounded opposite-side coverage, threshold ordering, finite-input handling, and frame-independent response. Define rendering values as independent `left` and `right` strengths in 0...1. A positive calibrated left turn drives `right`.
 - `DesktopOverlayController`: owns per-display capture sessions, windows, and renderers. Exposes async start, immediate stop/hide, status, and update with left/right strengths and visual settings. Own application excluded from captures; no audio/cursor capture. Strong failure state must never continue reporting normal tracking.
-- `AppModel`: main-actor coordinator for mode (paused, preview, tracking), persisted settings, calibration workflow, capture consent, session events, menu state, and emergency pause. Stale tracking clears the effect; the separately chosen removal action can turn displays off. Automatic centering and resume follow the bounded policy below.
+- `AppModel`: main-actor coordinator for mode (paused, preview, tracking), persisted settings, calibration workflow, capture consent, session events, menu state, and emergency pause. Stale tracking clears the effect; the separately chosen removal action can turn displays off. Reconnection resumes from the retained original reference rather than calibrating a new zero.
 - `SettingsView`: native SwiftUI controls, live orientation display, clearly labeled simulated preview that does not claim sensor availability, actual error text, and calibration guidance. Preview visuals use synthetic content and require no screen permission.
 
 Animation constants remain provisional until the fourth research report arrives. All desktop frames stay memory-only; diagnostic artifacts use synthetic content.
@@ -76,10 +76,24 @@ Arm only after live motion in the current monitoring session. Debounce an explic
 
 Run the documented local `pmset displaysleepnow` command through Foundation Process with fixed arguments and bounded execution. This turns off all displays; it does not establish that the session locked. Password protection follows the user's current [Lock Screen setting](https://support.apple.com/guide/mac-help/mchlp2270/mac). Do not alter those preferences, synthesize a lock shortcut, use private lock APIs, or automatically unlock on reconnect. Command acceptance and actual physical display/wake behavior are separate evidence.
 
-## Automatic center after wearing AirPods again
+## Superseded automatic-center experiment
 
 The wearer requested removal of repeated Set center clicks. Default Automatic center on, with a manual correction button and persisted opt-out. Headphone attitude is relative to a service reference; public APIs expose no absolute screen-facing direction or guaranteed transformation across reconnects. Apple demonstrates caching a starting pose and [comparing relative attitude](https://developer.apple.com/documentation/coremotion/cmattitude/multiply(byinverseof:)). Reusing an old reference across an unverified new source frame cannot establish the screen center.
 
 Use an explicit assumption shown in the UI: face the display and hold still briefly after putting the AirPods on. Allow one automatic calibration after startup, a new disconnect/reconnect episode, or an intentional sensor restart after wake. Require fresh stable motion continuously for about 1.25 seconds. Do not grant another automatic calibration for a same-session source/reference discontinuity or an ordinary held turn. Keep manual Set center as correction.
 
 Preserve whether the effect was active before removal or sleep, and resume only after a new center and active Mac session. Explicit Pause, selection change, reset, or shutdown cancels pending resume. New app startup may center automatically but does not start desktop capture without Enable. No persistent quaternion history, screen-location model, or automatic unlock is introduced.
+
+The wearer confirmed that this automatic centering ran, but rejected its behavior: rewear while looking elsewhere made that direction the new zero. That is not the requested original screen-facing center. The following retained-reference policy replaces this experiment.
+
+## Retain the original screen-facing zero
+
+The application itself was discarding its copied reference, stopping motion updates on every disconnect, restarting after five seconds without samples, and discarding the manager during display sleep. Those resets prevent evaluating whether the headphones can preserve their frame. Public Apple stop/start documentation does not establish that removing AirPods necessarily rebases the underlying attitude. The WWDC23 sample stores a starting pose; it does not instruct apps to discard it on every out-of-ear event.
+
+Separate freshness from reference validity. Preserve the original copied reference, same manager, and outstanding stream request through normal out-of-ear intervals and display/session suspension. Clear queued pre-removal samples; wait for reconnect before accepting returning poses. Missing motion pauses capture and input blockers but does not choose a new zero. A saved-center stream is not restarted for silence alone; prolonged connected silence gives reconnect/restart guidance, while initial startup and terminal errors retain bounded retries. Only the user's Set center replaces the original reference.
+
+Detected source/clock/reference changes or actual stream restarts invalidate use of the saved reference; do not silently compensate or substitute a newly observed pose. A same-source return with monotonic timestamps remains a continuity assumption because public APIs expose no frame-identity marker. Permit that retained reference in the controlled hardware test, and distinguish its mathematical preservation from physical frame continuity.
+
+A source-clock reversal, or changed timing offset after explicit removal, must not trap the service in stale state indefinitely. Recover the timing baseline only after multiple advancing samples show matching source/receipt progress for at least 0.2 seconds. This restores fresh motion and the ability to Set center; it does not restore confidence in the old orientation reference. A lone old packet or ordinary delivery lag cannot reset the timing baseline.
+
+Acceptance: establish screen-facing zero once, remove both AirPods, rewear while looking distinctly left or right, and confirm that direction remains a turn. Return to the original screen-facing posture and confirm near-zero/clear output. Repeat with display-only sleep and both source-earbud orders. If the hardware rebases across a gap, do not claim a retained value has solved absolute orientation; an additional known-direction anchor would be needed.

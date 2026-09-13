@@ -2,6 +2,10 @@ import Foundation
 import Combine
 import CoreMotion
 
+enum MotionReferenceState: String {
+    case unset, established, awaitingReturn, retainedAfterGap, invalid
+}
+
 enum MotionConnectionState: String {
     case unknown
     case connected
@@ -17,6 +21,14 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var yawDegrees = 0.0
     @Published private(set) var sampleRate = 0.0
     @Published private(set) var isCalibrated = false
+    @Published private(set) var referenceState = MotionReferenceState.unset
+    @Published private(set) var centerRevision = 0
+    /// Last public Core Motion diagnostics only. A reported heading is not
+    /// assumed to be absolute or display-relative for headphone motion.
+    @Published private(set) var reportedHeadingDegrees = -1.0
+    @Published private(set) var reportedMagneticAccuracy = -1
+    var hasSavedCenter: Bool { reference != nil }
+    var referenceUsable: Bool { hasSavedCenter && referenceState != .invalid && referenceState != .unset }
     @Published private(set) var isFresh = false
     @Published private(set) var isRunning = false
     @Published private(set) var connectionState: MotionConnectionState = .unknown
@@ -33,13 +45,15 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var referenceJumpCount = 0
     @Published private(set) var lastReferenceJump = "No reference jump observed"
 
-    private var manager: CMHeadphoneMotionManager?
-    private var connectionDelegate: MotionConnectionDelegate?
+    private var manager: (any HeadphoneMotionTransport)?
+    private let transportFactory: () -> any HeadphoneMotionTransport
+    private let now: () -> TimeInterval
+    private let usesAutomaticWatchdog: Bool
     private var generation: UInt64 = 0
     private var streamGeneration: UInt64 = 0
     private var watchdog: Timer?
-    private var reference: CMAttitude?
-    private var latest: CMAttitude?
+    private var reference: (any MotionAttitude)?
+    private var latest: (any MotionAttitude)?
     private var lastReceipt: TimeInterval?
     private var stableSince: TimeInterval?
     private var streamRequested = false
@@ -57,17 +71,32 @@ final class MotionService: NSObject, ObservableObject {
     private let staleAfter = 0.65
     private let calibrationWindow = 0.45
 
+    override convenience init() {
+        self.init(transportFactory: { CoreMotionTransport() },
+                  now: { ProcessInfo.processInfo.systemUptime })
+    }
+
+    /// Injectable acquisition/clock boundary tests the real coordinator without
+    /// constructing Core Motion managers or requesting device permissions.
+    init(transportFactory: @escaping () -> any HeadphoneMotionTransport,
+         now: @escaping () -> TimeInterval, usesAutomaticWatchdog: Bool = true) {
+        self.transportFactory = transportFactory
+        self.now = now
+        self.usesAutomaticWatchdog = usesAutomaticWatchdog
+        super.init()
+    }
+
     /// Read at render consumption, so a delayed watchdog cannot make an old
     /// pose appear valid during menu tracking or main-thread scheduling delays.
     var trackingValid: Bool {
-        isRunning && isFresh && isCalibrated && yawDegrees.isFinite &&
-            VeilMath.isRecent(receipt: lastReceipt, now: ProcessInfo.processInfo.systemUptime,
+        isRunning && isFresh && referenceUsable && yawDegrees.isFinite &&
+            VeilMath.isRecent(receipt: lastReceipt, now: now(),
                               timeout: staleAfter)
     }
 
     var canCalibrate: Bool {
         guard isRunning, isFresh, latest != nil, let stableSince, let lastReceipt else { return false }
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = now()
         return VeilMath.isRecent(receipt: lastReceipt, now: now, timeout: staleAfter) &&
             lastReceipt - stableSince >= calibrationWindow
     }
@@ -77,18 +106,19 @@ final class MotionService: NSObject, ObservableObject {
         connectionState = .unknown
         generation &+= 1
         let run = generation
-        resetSamples()
+        resetDelivery()
+        if hasSavedCenter { invalidateCalibration("Motion manager restarted — original center retained but unverified; use Set center") }
         errorRetryCount = 0
         nextRetryTime = 0
-        let motion = CMHeadphoneMotionManager()
+        let motion = transportFactory()
         manager = motion
-        let delegate = MotionConnectionDelegate(owner: self, generation: run)
-        connectionDelegate = delegate
-        motion.delegate = delegate
         isRunning = true
         status = "Waiting for connected, worn AirPods"
-        motion.startConnectionStatusUpdates()
+        motion.startConnectionUpdates { [weak self] connected in
+            self?.connectionChanged(connected: connected, generation: run)
+        }
         beginStreamIfAvailable()
+        guard usesAutomaticWatchdog else { return }
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.generation == run, self.isRunning else { return }
@@ -106,35 +136,36 @@ final class MotionService: NSObject, ObservableObject {
         streamGeneration &+= 1
         watchdog?.invalidate()
         watchdog = nil
-        manager?.stopDeviceMotionUpdates()
-        manager?.stopConnectionStatusUpdates()
-        manager?.delegate = nil
+        manager?.stopMotionUpdates()
+        manager?.stopConnectionUpdates()
         manager = nil
-        connectionDelegate = nil
         streamRequested = false
         errorRetryCount = 0
         nextRetryTime = 0
         isRunning = false
         connectionState = .unknown
-        resetSamples()
-        status = "Motion paused"
+        resetDelivery()
+        invalidateCalibration("Motion stopped — original center must be checked before reuse")
+        if !hasSavedCenter { status = "Motion paused" }
     }
 
     func calibrate() {
-        guard canCalibrate, let latest,
-              let copied = latest.copy() as? CMAttitude else {
+        guard canCalibrate, let latest else {
             status = isFresh ? "Hold your head still facing the screen, then Set center" : "Wait for fresh AirPods motion before setting center"
             return
         }
-        reference = copied
+        reference = latest.copyForReference()
+        centerRevision += 1
         yawDegrees = 0
         isCalibrated = true
+        referenceState = .established
         status = "Tracking head motion"
     }
 
     fileprivate func connectionChanged(connected: Bool, generation run: UInt64) {
         guard isRunning, generation == run else { return }
         if connected {
+            mailbox?.setConnected(true)
             connectionState = .connected
             // A connect callback may follow the first valid sample at startup.
             // Only restart when no stream is already requested.
@@ -142,11 +173,10 @@ final class MotionService: NSObject, ObservableObject {
             nextRetryTime = 0
             beginStreamIfAvailable()
         } else {
-            streamGeneration &+= 1
-            manager?.stopDeviceMotionUpdates()
-            streamRequested = false
-            resetSamples()
-            status = "AirPods disconnected — waiting to reconnect automatically"
+            // Keep the same manager, stream, and original reference alive. Do
+            // not accept queued pre-removal poses as proof of a reconnection.
+            mailbox?.setConnected(false)
+            markFreshnessLost("AirPods disconnected — original center retained", awaitingReturn: true)
             connectionState = .disconnected
             // Publish the event after the disconnected state and stream cleanup
             // so a debounced coordinator observes a consistent service state.
@@ -155,9 +185,9 @@ final class MotionService: NSObject, ObservableObject {
     }
 
     private func beginStreamIfAvailable() {
-        guard isRunning, let manager, !streamRequested,
-              ProcessInfo.processInfo.systemUptime >= nextRetryTime else { return }
-        switch CMHeadphoneMotionManager.authorizationStatus() {
+        guard isRunning, let manager, !streamRequested, connectionState != .disconnected,
+              now() >= nextRetryTime else { return }
+        switch manager.authorizationStatus {
         case .denied:
             status = "Motion access denied — allow AirVeil in System Settings"
             return
@@ -169,9 +199,9 @@ final class MotionService: NSObject, ObservableObject {
             status = "Unknown motion authorization state"
             return
         }
-        guard manager.isDeviceMotionAvailable else { return }
+        guard manager.isMotionAvailable else { return }
         streamRequested = true
-        streamStartedAt = ProcessInfo.processInfo.systemUptime
+        streamStartedAt = now()
         streamGeneration &+= 1
         let run = generation, stream = streamGeneration
         status = "Waiting for AirPods motion and permission"
@@ -180,20 +210,11 @@ final class MotionService: NSObject, ObservableObject {
         // Timestamp delivery independently of UI scheduling. This serial queue
         // validates every sample; a one-slot mailbox forwards only the newest
         // pose and preserves any intervening continuity failure.
-        manager.startDeviceMotionUpdates(to: motionQueue) { [weak self] sample, error in
-            let receipt = ProcessInfo.processInfo.systemUptime
+        manager.startMotionUpdates(on: motionQueue) { [weak self] sample, error in
             let shouldNotify: Bool
-            if let error {
-                shouldNotify = buffer.offerError(error.localizedDescription)
-            } else if let sample {
-                let q = sample.attitude.quaternion
-                let r = sample.rotationRate
-                let reading = MotionReading(attitude: sample.attitude.copy() as? CMAttitude,
-                    timestamp: sample.timestamp, receipt: receipt,
-                    quaternion: VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w),
-                    speed: sqrt(r.x*r.x + r.y*r.y + r.z*r.z), source: sample.sensorLocation)
-                shouldNotify = buffer.offer(reading)
-            } else { return }
+            if let error { shouldNotify = buffer.offerError(error) }
+            else if let sample { shouldNotify = buffer.offer(sample) }
+            else { return }
             guard shouldNotify else { return }
             DispatchQueue.main.async { [weak self, buffer] in
                 guard let self, self.isRunning, self.generation == run,
@@ -208,14 +229,15 @@ final class MotionService: NSObject, ObservableObject {
         // Retire this callback generation before stopping, then retry with a
         // bounded delay. Denied/restricted access is checked before each start.
         streamGeneration &+= 1
-        manager?.stopDeviceMotionUpdates()
+        manager?.stopMotionUpdates()
         streamRequested = false
         errorRetryCount = min(errorRetryCount + 1, 5)
         let retryDelay = min(30.0, pow(2.0, Double(errorRetryCount)))
-        nextRetryTime = ProcessInfo.processInfo.systemUptime + retryDelay
-        resetSamples()
+        nextRetryTime = now() + retryDelay
+        resetDelivery()
+        invalidateCalibration("Motion stream restarted — original center retained but unusable until Set center")
         let recovery = "Retrying automatically in \(Int(retryDelay)) seconds"
-        status = "Motion error: \(error.localizedDescription). \(recovery)"
+        status = "Motion error: \(error.localizedDescription). \(recovery). Set center after recovery."
     }
 
     private func drainMotionMailbox(fromScheduledCallback: Bool = false) {
@@ -227,7 +249,10 @@ final class MotionService: NSObject, ObservableObject {
                                       userInfo: [NSLocalizedDescriptionKey: error]))
             return
         }
-        if let issue = delivery.continuityIssue { invalidateCalibration(issue) }
+        if let issue = delivery.continuityIssue {
+            if delivery.continuityImpact == .invalid { invalidateCalibration(issue) }
+            else if delivery.continuityImpact == .gap { markFreshnessLost(issue) }
+        }
         addedDeliveryLag = delivery.addedLag
         guard let reading = delivery.reading, let attitude = reading.attitude else {
             isFresh = false
@@ -236,12 +261,14 @@ final class MotionService: NSObject, ObservableObject {
         // Fresh acquisition can wait behind UI work. A still-old newest sample
         // remains unsafe; never renew its receipt time at UI consumption.
         guard VeilMath.isRecent(receipt: reading.receipt,
-                                now: ProcessInfo.processInfo.systemUptime, timeout: staleAfter) else {
-            invalidateCalibration("Motion stalled — waiting for recovery; then Set center")
+                                now: now(), timeout: staleAfter) else {
+            markFreshnessLost("Motion stalled — original center retained while waiting for samples")
             isFresh = false
             return
         }
         lastReceipt = reading.receipt
+        reportedHeadingDegrees = reading.headingDegrees.isFinite ? reading.headingDegrees : -1
+        reportedMagneticAccuracy = reading.magneticAccuracy
         latest = attitude
         stableSince = delivery.stableSince
         sampleRate = delivery.sampleRate
@@ -255,85 +282,108 @@ final class MotionService: NSObject, ObservableObject {
         isFresh = true
         // Some systems deliver usable motion before the startup connect event.
         connectionState = .connected
-        if let reference, let relative = attitude.copy() as? CMAttitude {
-            relative.multiply(byInverseOf: reference)
-            guard let yaw = VeilMath.yawRadians(Self.quaternion(relative)) else {
-                invalidateCalibration("Invalid relative attitude — Set center")
+        if referenceState == .awaitingReturn { referenceState = .retainedAfterGap }
+        if let reference {
+            guard let yaw = attitude.relativeYaw(to: reference), yaw.isFinite else {
+                invalidateCalibration("Invalid relative attitude — original center retained; use Set center")
                 return
             }
             yawDegrees = yaw * 180 / .pi
-            status = "Tracking head motion"
+            if referenceUsable {
+                isCalibrated = true
+                status = referenceState == .retainedAfterGap
+                    ? "Using your saved center after motion returned"
+                    : "Tracking head motion"
+            } else if !status.contains("Set center") {
+                status = "Original center retained, but the sensor reference changed. Use Set center."
+            }
         } else if !status.contains("Set center") {
-            status = "Motion available — face the screen and Set center"
+            status = "Motion available — face the screen and Set center once"
         }
     }
 
-    private func checkFreshness() {
+    func checkFreshness() {
         // Consume acquisition that may already be waiting before judging the
         // previous UI snapshot. This also operates during menu tracking.
         drainMotionMailbox()
         if !streamRequested { beginStreamIfAvailable() }
-        let now = ProcessInfo.processInfo.systemUptime
-        if streamRequested, let receipt = lastReceipt ?? streamStartedAt, now - receipt > 5 {
+        let now = now()
+        // Silence is not evidence of a broken reference. Restarting a known
+        // calibrated stream solely because the buds are out can destroy zero.
+        if streamRequested, !hasSavedCenter, connectionState != .disconnected,
+           let receipt = lastReceipt ?? streamStartedAt, now - receipt > 5 {
             handleStreamError(NSError(domain: "AirVeil.Motion", code: 1,
                                       userInfo: [NSLocalizedDescriptionKey: "No motion received"]))
             return
         }
         guard let lastReceipt else { return }
-        if ProcessInfo.processInfo.systemUptime - lastReceipt > staleAfter {
-            if isFresh { invalidateCalibration("Motion stalled — waiting for recovery; then Set center") }
+        if now - lastReceipt > staleAfter {
+            if isFresh { markFreshnessLost("Motion stalled — original center retained while waiting for samples") }
             isFresh = false
             sampleRate = 0
+            if hasSavedCenter, connectionState != .disconnected, now - lastReceipt > 5 {
+                status = "No motion updates. Reconnect AirPods or restart AirVeil; restarting the motion stream requires Set center."
+            }
         }
     }
 
     private func invalidateCalibration(_ message: String) {
-        reference = nil
+        referenceState = hasSavedCenter ? .invalid : .unset
         isCalibrated = false
-        yawDegrees = 0
         stableSince = nil
         status = message
     }
 
-    private func resetSamples() {
-        invalidateCalibration("Waiting for motion")
+    private func markFreshnessLost(_ message: String, awaitingReturn: Bool = false) {
+        isFresh = false
+        stableSince = nil
+        if referenceUsable { referenceState = awaitingReturn ? .awaitingReturn : .retainedAfterGap }
+        status = message
+    }
+
+    private func resetDelivery() {
         latest = nil
         mailbox = nil
         addedDeliveryLag = 0
         referenceJumpCount = 0
         lastReferenceJump = "No reference jump observed"
         lastReceipt = nil
+        reportedHeadingDegrees = -1
+        reportedMagneticAccuracy = -1
         sourceName = "No headphone sensor"
         sampleRate = 0
         isFresh = false
     }
 
-    private static func quaternion(_ attitude: CMAttitude) -> VeilQuaternion {
-        let q = attitude.quaternion
-        return VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w)
-    }
 }
 
 /// The copied attitude is immutable on the acquisition side and transferred
 /// through the lock; only the main actor makes a second, mutable relative copy.
 struct MotionReading: @unchecked Sendable {
-    let attitude: CMAttitude?
+    let attitude: (any MotionAttitude)?
     let timestamp: TimeInterval
     let receipt: TimeInterval
     let quaternion: VeilQuaternion
     let speed: Double
     let source: CMDeviceMotion.SensorLocation
+    var headingDegrees: Double = -1
+    var magneticAccuracy: Int = -1
 }
 
 struct MotionDelivery {
     let reading: MotionReading?
     let continuityIssue: String?
+    let continuityImpact: MotionContinuityImpact
     let error: String?
     let stableSince: TimeInterval?
     let sampleRate: Double
     let addedLag: Double
     let referenceJumpCount: Int
     let lastReferenceJump: MotionJumpDiagnostic?
+}
+
+enum MotionContinuityImpact: Int {
+    case none, gap, invalid
 }
 
 /// Evidence of an unexplained orientation step, not proof of an Apple reset.
@@ -364,6 +414,10 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
     private var updatePending = false
     private var latest: MotionReading?
     private var issue: String?
+    private var impact = MotionContinuityImpact.none
+    private var acceptsSamples = true
+    private var returningAfterAbsence = false
+    private var clockRecovery: MotionClockRecoveryCandidate?
     private var error: String?
     private var previous: MotionReading?
     private var clock = VeilSampleClock()
@@ -384,7 +438,7 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
     func offer(_ reading: MotionReading) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard error == nil else { return false }
+        guard error == nil, acceptsSamples else { return false }
         let notify = !notificationPending
         notificationPending = true
         updatePending = true
@@ -398,31 +452,38 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
             fail("Active AirPod changed — Set center")
             clock.reset()
             self.previous = nil
+            clockRecovery = nil
         }
         if let previous {
             let sourceGap = reading.timestamp - previous.timestamp
             let receiptGap = reading.receipt - previous.receipt
-            if sourceGap <= 0 || receiptGap < 0 {
-                fail("Motion clock changed — waiting for recovery; then Set center")
-                // Keep the lag baseline: out-of-order delivery must not make
-                // stale data fresh. An actual reset recovers via normal retry.
+            if receiptGap < 0 {
+                clockRecovery = nil
+                fail("Motion receipt clock changed — waiting for recovery; then Set center")
                 return notify
             }
-            if receiptGap >= staleAfter || sourceGap >= staleAfter {
-                fail("Motion resumed after a sensor gap — Set center")
-            } else if let distance = reading.quaternion.angularDistance(to: previous.quaternion) {
-                // Using only the newest rotation speed misclassifies a real
-                // turn that stops between samples. Both bounding samples matter.
-                // This remains a conservative heuristic, not a reference-reset
-                // API or a drift guarantee. Never correct the reference here.
-                let threshold = max(0.35, max(previous.speed, reading.speed) * sourceGap * 3 + 0.15)
-                if distance > threshold {
-                    referenceJumpCount += 1
-                    lastReferenceJump = MotionJumpDiagnostic(stepRadians: distance,
-                        thresholdRadians: threshold, sourceInterval: sourceGap,
-                        receiptInterval: receiptGap, previousSpeed: previous.speed,
-                        currentSpeed: reading.speed)
-                    fail("Head reference jumped — face the screen and Set center")
+            if sourceGap <= 0 {
+                fail("Motion clock changed — checking fresh samples; then Set center")
+                guard observeClockRecovery(reading, reason: .reversedTimestamp) else { return notify }
+                resetTimingForRecovery(reading)
+            } else {
+                if clockRecovery?.reason == .reversedTimestamp { clockRecovery = nil }
+                if returningAfterAbsence || receiptGap >= staleAfter || sourceGap >= staleAfter {
+                    fail("Motion resumed after a sensor gap — original center retained", impact: .gap)
+                } else if let distance = reading.quaternion.angularDistance(to: previous.quaternion) {
+                    // Using only the newest rotation speed misclassifies a real
+                    // turn that stops between samples. Both bounding samples matter.
+                    // This remains a conservative heuristic, not a reference-reset
+                    // API or a drift guarantee. Never correct the reference here.
+                    let threshold = max(0.35, max(previous.speed, reading.speed) * sourceGap * 3 + 0.15)
+                    if distance > threshold {
+                        referenceJumpCount += 1
+                        lastReferenceJump = MotionJumpDiagnostic(stepRadians: distance,
+                            thresholdRadians: threshold, sourceInterval: sourceGap,
+                            receiptInterval: receiptGap, previousSpeed: previous.speed,
+                            currentSpeed: reading.speed)
+                        fail("Head reference jumped — face the screen and Set center")
+                    }
                 }
             }
         }
@@ -432,10 +493,19 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
         }
         addedLag = lag
         previous = reading
-        guard lag < staleAfter else {
-            fail("Delayed sensor samples — wait for live motion and Set center")
-            return notify
+        if lag >= staleAfter {
+            fail("Delayed sensor samples — waiting for live motion with original center retained", impact: .gap)
+            // Only an explicit out-of-ear interval authorizes recovery of a
+            // changed offset. Ordinary delivery lag must never rebase itself.
+            guard returningAfterAbsence,
+                  observeClockRecovery(reading, reason: .offsetAfterAbsence) else { return notify }
+            resetTimingForRecovery(reading)
+            _ = clock.addedLag(source: reading.timestamp, receipt: reading.receipt)
+            addedLag = 0
+        } else {
+            clockRecovery = nil
         }
+        returningAfterAbsence = false
         if reading.speed >= 0.15 {
             stableSince = nil
             stableAnchor = nil
@@ -455,6 +525,27 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
         } else { rateStart = reading.receipt }
         latest = reading
         return notify
+    }
+
+    private func observeClockRecovery(_ reading: MotionReading,
+                                      reason: MotionClockRecoveryCandidate.Reason) -> Bool {
+        if clockRecovery?.reason != reason {
+            clockRecovery = MotionClockRecoveryCandidate(reading: reading, reason: reason)
+            return false
+        }
+        return clockRecovery!.observe(reading)
+    }
+
+    private func resetTimingForRecovery(_ reading: MotionReading) {
+        clock.reset()
+        clockRecovery = nil
+        previous = reading
+        rateStart = nil
+        rateSamples = 0
+        sampleRate = 0
+        // Recovery makes the new timestamps usable, NOT the old orientation
+        // reference. Only a subsequent explicit Set center can replace zero.
+        fail("Motion timing restarted. Face the display and use Set center")
     }
 
     @discardableResult
@@ -478,38 +569,146 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
         if releaseNotification { notificationPending = false }
         guard updatePending else { return nil }
         let delivery = MotionDelivery(reading: latest, continuityIssue: issue,
+            continuityImpact: impact,
             error: error, stableSince: stableSince, sampleRate: sampleRate, addedLag: addedLag,
             referenceJumpCount: referenceJumpCount, lastReferenceJump: lastReferenceJump)
         updatePending = false
         issue = nil
+        impact = .none
         latest = nil
         // A terminal error remains latched until the owner retires this buffer.
         return delivery
     }
 
-    private func fail(_ message: String) {
-        issue = message
+    func setConnected(_ connected: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        acceptsSamples = connected
+        if !connected {
+            // The disconnect event itself reaches the owner synchronously.
+            // Keep only source/frame history, not an undelivered visual pose.
+            latest = nil
+            updatePending = error != nil || impact == .invalid
+            stableSince = nil
+            stableAnchor = nil
+            returningAfterAbsence = true
+            clockRecovery = nil
+        }
+    }
+
+    private func fail(_ message: String, impact newImpact: MotionContinuityImpact = .invalid) {
+        if newImpact.rawValue >= impact.rawValue { issue = message; impact = newImpact }
         latest = nil
         stableSince = nil
         stableAnchor = nil
     }
 }
 
-/// The immutable run token makes queued delegate callbacks from previous
-/// starts harmless, including a late disconnect after reconnecting.
-private final class MotionConnectionDelegate: NSObject, CMHeadphoneMotionManagerDelegate {
-    weak var owner: MotionService?
-    let generation: UInt64
-    init(owner: MotionService, generation: UInt64) {
-        self.owner = owner
-        self.generation = generation
+/// Conservative timing-only recovery. Never estimates screen direction and
+/// never treats a single old packet, duplicate, or burst as a new live epoch.
+private struct MotionClockRecoveryCandidate {
+    enum Reason { case reversedTimestamp, offsetAfterAbsence }
+    let reason: Reason
+    private var first: MotionReading
+    private var latest: MotionReading
+    private var count = 1
+
+    init(reading: MotionReading, reason: Reason) {
+        first = reading; latest = reading; self.reason = reason
     }
-    func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
-        let run = generation
-        Task { @MainActor [weak owner] in owner?.connectionChanged(connected: true, generation: run) }
+
+    mutating func observe(_ reading: MotionReading) -> Bool {
+        let sourceStep = reading.timestamp - latest.timestamp
+        let receiptStep = reading.receipt - latest.receipt
+        guard sourceStep > 0, receiptStep > 0, receiptStep < 0.3,
+              abs(sourceStep-receiptStep) <= max(0.02, receiptStep*0.25) else {
+            first = reading; latest = reading; count = 1
+            return false
+        }
+        latest = reading
+        count += 1
+        let receiptSpan = reading.receipt-first.receipt
+        let sourceSpan = reading.timestamp-first.timestamp
+        return count >= 3 && receiptSpan >= 0.2 &&
+            abs(sourceSpan-receiptSpan) <= max(0.025, receiptSpan*0.25)
     }
-    func headphoneMotionManagerDidDisconnect(_ manager: CMHeadphoneMotionManager) {
-        let run = generation
-        Task { @MainActor [weak owner] in owner?.connectionChanged(connected: false, generation: run) }
+}
+
+/// Immutable attitude boundary: production uses Apple's copied CMAttitude and
+/// multiply(byInverseOf:); deterministic tests inject sensor attitudes without
+/// constructing Core Motion objects or replacing the lifecycle coordinator.
+protocol MotionAttitude: AnyObject, Sendable {
+    func copyForReference() -> any MotionAttitude
+    func relativeYaw(to reference: any MotionAttitude) -> Double?
+}
+
+private final class CoreMotionAttitude: MotionAttitude, @unchecked Sendable {
+    private let value: CMAttitude
+    init?(_ value: CMAttitude) {
+        guard let copy = value.copy() as? CMAttitude else { return nil }
+        self.value = copy
+    }
+    private init(copied: CMAttitude) { value = copied }
+    func copyForReference() -> any MotionAttitude {
+        // Core Motion attitudes implement NSCopying. A fallback still retains
+        // this immutable wrapper and is never multiplied in place.
+        guard let copy = value.copy() as? CMAttitude else { return self }
+        return CoreMotionAttitude(copied: copy)
+    }
+    func relativeYaw(to reference: any MotionAttitude) -> Double? {
+        guard let reference = reference as? CoreMotionAttitude,
+              let relative = value.copy() as? CMAttitude else { return nil }
+        relative.multiply(byInverseOf: reference.value)
+        let q = relative.quaternion
+        return VeilMath.yawRadians(VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w))
+    }
+}
+
+@MainActor protocol HeadphoneMotionTransport: AnyObject {
+    var authorizationStatus: CMAuthorizationStatus { get }
+    var isMotionAvailable: Bool { get }
+    func startConnectionUpdates(_ handler: @escaping @MainActor (Bool) -> Void)
+    func stopConnectionUpdates()
+    func startMotionUpdates(on queue: OperationQueue,
+        handler: @escaping @Sendable (MotionReading?, String?) -> Void)
+    func stopMotionUpdates()
+}
+
+@MainActor private final class CoreMotionTransport: NSObject, HeadphoneMotionTransport,
+    CMHeadphoneMotionManagerDelegate {
+    private let manager = CMHeadphoneMotionManager()
+    private var connectionHandler: (@MainActor (Bool) -> Void)?
+    var authorizationStatus: CMAuthorizationStatus { CMHeadphoneMotionManager.authorizationStatus() }
+    var isMotionAvailable: Bool { manager.isDeviceMotionAvailable }
+    func startConnectionUpdates(_ handler: @escaping @MainActor (Bool) -> Void) {
+        connectionHandler = handler
+        manager.delegate = self
+        manager.startConnectionStatusUpdates()
+    }
+    func stopConnectionUpdates() {
+        manager.stopConnectionStatusUpdates()
+        manager.delegate = nil
+        connectionHandler = nil
+    }
+    func startMotionUpdates(on queue: OperationQueue,
+        handler: @escaping @Sendable (MotionReading?, String?) -> Void) {
+        manager.startDeviceMotionUpdates(to: queue) { sample, error in
+            let receipt = ProcessInfo.processInfo.systemUptime
+            if let error { handler(nil, error.localizedDescription); return }
+            guard let sample else { return }
+            let q = sample.attitude.quaternion, r = sample.rotationRate
+            handler(MotionReading(attitude: CoreMotionAttitude(sample.attitude),
+                timestamp: sample.timestamp, receipt: receipt,
+                quaternion: VeilQuaternion(x: q.x, y: q.y, z: q.z, w: q.w),
+                speed: sqrt(r.x*r.x + r.y*r.y + r.z*r.z), source: sample.sensorLocation,
+                headingDegrees: sample.heading, magneticAccuracy: Int(sample.magneticField.accuracy.rawValue)), nil)
+        }
+    }
+    func stopMotionUpdates() { manager.stopDeviceMotionUpdates() }
+    nonisolated func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
+        Task { @MainActor [weak self] in self?.connectionHandler?(true) }
+    }
+    nonisolated func headphoneMotionManagerDidDisconnect(_ manager: CMHeadphoneMotionManager) {
+        Task { @MainActor [weak self] in self?.connectionHandler?(false) }
     }
 }
