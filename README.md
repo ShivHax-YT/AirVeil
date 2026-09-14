@@ -62,7 +62,7 @@ The native panel grows down from the physical notch into a compact rounded camer
 
 **Preview Notch Animation** in the AirVeil menu shows a labeled demonstration without starting a camera check or changing calibration. Cancel closes it. This preview is a visual demonstration, not sensor validation.
 
-Run `bash scripts/test-notch-ui.sh` for geometry and native controller lifecycle checks plus 22 notch states rendered at 2x in `build/notch-previews/`. The regular test script covers the camera/coach evidence, low light, crop mapping, preview lifetime and cancellation. [Notch engineering research](research/NOTCH-RESEARCH.md), the [reference motion study](research/NOTCH-MOTION-STUDY.md), and the [tracking repair investigation](research/NOTCH-TRACKING-REPAIR.md) document the implementation decisions.
+Run `bash scripts/test-notch-ui.sh` for geometry and native controller lifecycle checks plus 27 notch states rendered at 2x in `build/notch-previews/`. The regular test script covers the camera/coach evidence, low light, crop mapping, preview lifetime and cancellation. [Notch engineering research](research/NOTCH-RESEARCH.md), the [reference motion study](research/NOTCH-MOTION-STUDY.md), and the [tracking repair investigation](research/NOTCH-TRACKING-REPAIR.md) document the implementation decisions.
 
 ## Setup
 
@@ -134,7 +134,7 @@ Built-in brightness control uses a runtime-checked private DisplayServices inter
 
 Current source changes isolate motion telemetry and animated strengths from the full settings view, publish small tracking snapshots only when displayed values change, suspend hidden previews, and draw on demand. The animation clock rests after the effect settles. Transparent output and genuinely solid opaque output bypass unnecessary source copying and Gaussian blur work; intermediate blur still processes the source it needs.
 
-Native desktop capture/output resolution and the requested maximum 60 fps capture cadence are unchanged. Lower-resolution blur levels and lower content refresh rates remain research options. These changes target unnecessary work; no measured energy or battery-life saving is claimed yet. Before/after runtime measurement and visual validation are still required.
+Native desktop capture/output resolution is unchanged. The Energy use control now requests up to 30 or 60 fps as described above; lower-resolution blur remains a research option. These changes target unnecessary work; no measured energy or battery-life saving is claimed yet. Before/after runtime measurement and visual validation are still required.
 
 ## Research and validation
 
