@@ -93,7 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.centerBusy
         if !model.enabled {
             let enable = menu.addItem(withTitle:"Enable Desktop Effect",action:#selector(enable),keyEquivalent:"")
-            enable.target=self; enable.isEnabled=model.trackingValid && model.selectedDisplayCount > 0
+            enable.target=self; enable.isEnabled=model.canRequestEnable && model.selectedDisplayCount > 0
         }
         menu.addItem(withTitle:"Settings…",action:#selector(showSettings),keyEquivalent:",").target=self
         menu.addItem(withTitle:"Show Notch Controls",action:#selector(showNotch),keyEquivalent:"").target=self
@@ -190,12 +190,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "brightnessRestorePending":model.dimming.hasPendingRestore,"brightnessStatus":model.dimming.status,
             "displayIdleSleepPrevented":model.dimming.keepsDisplayAwake,
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
+            "removalEventCount":model.motion.removalEventCount,"removalConnectionState":model.motion.removalConnectionState.rawValue,
+            "wearStatus":model.motion.wearStatus,"leftBlurOnset":model.leftOnset,"rightBlurOnset":model.rightOnset,
             "displaySleepRequestCount":model.displaySleepRequestCount,
             "referenceState":model.motion.referenceState.rawValue,"hasSavedCenter":model.motion.hasSavedCenter,
             "referenceUsable":model.motion.referenceUsable,
             "centerRevision":model.motion.centerRevision,
             "cameraAssistance":model.cameraHeading.isEnabled,
             "cameraRunning":model.cameraHeading.camera.isRunning,
+            "faceLightOn":model.cameraHeading.camera.isAssistLightOn,
             "cameraCenterRevision":model.cameraHeading.centerRevision,
             "cameraHasCenteredSetup":model.cameraHeading.hasCenter,
             "cameraAlignmentRevision":model.cameraHeading.alignmentRevision,

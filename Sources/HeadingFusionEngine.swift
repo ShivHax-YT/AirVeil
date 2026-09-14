@@ -6,6 +6,10 @@ struct HeadingMotionSample: Equatable, Sendable {
     let receiptHostTime: Double
     let yawRadians: Double
     let angularSpeed: Double
+    /// Set only by an acquisition owner that checks every sensor reading and
+    /// changes epoch on any hidden gap, clock reset, source switch or jump.
+    /// A consumer may then coalesce delivery without losing an existing offset.
+    var acquisitionContinuityVerified = false
 }
 
 struct HeadingCameraSample: Equatable, Sendable {
@@ -159,10 +163,20 @@ struct HeadingFusionEngine {
             // create more evidence of stillness or a new sensor epoch.
             if previous == sample { return }
             if sample.sourceTimestamp <= previous.sourceTimestamp ||
-                sample.receiptHostTime <= previous.receiptHostTime ||
-                sample.receiptHostTime - previous.receiptHostTime > 0.3 {
+                sample.receiptHostTime <= previous.receiptHostTime {
                 invalidate()
                 epoch = sample.epoch
+            } else if sample.receiptHostTime - previous.receiptHostTime > 0.3 {
+                if sample.acquisitionContinuityVerified {
+                    // A UI delivery pause cannot erase a direction verified
+                    // in the same uninterrupted acquisition epoch. It still
+                    // cannot count as observed stillness for a camera check.
+                    motion.removeAll(keepingCapacity: true)
+                    discardCameraEvidence()
+                } else {
+                    invalidate()
+                    epoch = sample.epoch
+                }
             }
         }
         motion.append(sample)

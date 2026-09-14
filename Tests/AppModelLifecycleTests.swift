@@ -74,7 +74,7 @@ struct VeilDisplayInfo {
     var holdRestore = false
     var failRestore = false
     private var continuations: [CheckedContinuation<Void, Never>] = []
-    func setDimmed(_ dimmed: Bool, targetBrightness: Double = 0.08,
+    func setDimmed(_ dimmed: Bool, targetBrightness: Double = 0,
                    keepDisplayAwake: Bool = true) async -> Bool {
         if !dimmed { return await restore() }
         guard !isSuspended else { return false }
@@ -131,6 +131,7 @@ struct VeilDisplayInfo {
     init(motion: MotionService) { self.motion = motion }
     func requestEnable() { enableCalls += 1; isEnabled = true }
     func disable() { disableCalls += 1; isEnabled = false; alignmentValid = false; isBusy = false }
+    func resumeTracking() { refreshCalls += 1; if sessionActive && isEnabled && !trackingValid { isBusy = true } }
     func refreshDirection() { refreshCalls += 1; if sessionActive && isEnabled { isBusy = true } }
     func cancelPendingRecovery() { cancelCalls += 1; isBusy = false }
     func update(layoutKey: String) { lastLayoutKey = layoutKey }
@@ -169,6 +170,13 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
     @Published var status = "Test motion"
     var connectionState = MotionConnectionState.connected
     var disconnectEventCount: UInt64 = 0
+    var removalStateOverride: MotionConnectionState?
+    var removalCountOverride: UInt64?
+    var removalConnectionState: MotionConnectionState { removalStateOverride ?? connectionState }
+    var removalEventCount: UInt64 { removalCountOverride ?? disconnectEventCount }
+    var wearStatus = "Injected wear state"
+    var monitorsIndividualAirPods = false
+    func clearRemovalEvidence() { removalStateOverride = nil; removalCountOverride = nil }
     var canCalibrate = true
     var referenceState = MotionReferenceState.established
     var hasSavedCenter: Bool { referenceState != .unset }
@@ -1101,8 +1109,8 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         }
         do {
             let model = makeModel()
-            check(model.dimWhilePresent && model.removalBrightness == 0.08 && !model.sleepDisplaysOnRemoval,
-                  "Presence defaults to 8 percent within an opt-in removal master switch")
+            check(model.dimWhilePresent && model.removalBrightness == 0 && !model.sleepDisplaysOnRemoval,
+                  "Presence defaults to zero brightness within an opt-in removal master switch")
             check(!model.presenceReady && model.presence.startReferences.isEmpty && model.dimming.brightnessWrites == 0,
                   "Cold initialization neither invents a seat nor starts presence or brightness")
             model.dimWhilePresent = false; model.removalBrightness = 0.12
@@ -1110,13 +1118,13 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(!restored.dimWhilePresent && restored.removalBrightness == 0.12,
                   "Presence preference and chosen brightness persist")
             restored.resetDefaults()
-            check(restored.dimWhilePresent && restored.removalBrightness == 0.08 && !restored.sleepDisplaysOnRemoval,
+            check(restored.dimWhilePresent && restored.removalBrightness == 0 && !restored.sleepDisplaysOnRemoval,
                   "Reset restores presence defaults and disables the removal master switch")
             model.shutdown(); restored.shutdown()
         }
-        for (stored, expected) in [(0.01, 0.05), (0.99, 0.5), (Double.nan, 0.08)] {
+        for (stored, expected) in [(-0.1, 0.0), (0.01, 0.01), (0.99, 0.5), (Double.nan, 0.0)] {
             UserDefaults.standard.clear()
-            UserDefaults.standard.set(stored, forKey: "removalBrightness")
+            UserDefaults.standard.set(stored, forKey: "removalBrightnessV2")
             let model = AppModel()
             check(model.removalBrightness == expected, "Saved brightness is finite and clamped to the supported control range")
             model.shutdown()
@@ -1165,12 +1173,12 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.motion.connectionState = .disconnected
             model.checkAirPodsRemoval(now: now + 3.2)
             await drainTasks()
-            check(model.dimming.dimTargets == [0.08] && model.dimming.keepsDisplayAwake,
+            check(model.dimming.dimTargets == [0] && model.dimming.keepsDisplayAwake,
                   "Confirmed seated presence requests the chosen real-brightness boundary and idle assertion")
             check(model.displaySleep.requests == 0, "Seated presence does not request display sleep")
             model.removalBrightness = 0.1
             await drainTasks()
-            check(model.dimming.dimTargets == [0.08, 0.1], "Slider changes reach the active dim episode")
+            check(model.dimming.dimTargets == [0, 0.1], "Slider changes reach the active dim episode")
             model.dimWhilePresent = false
             await drainTasks()
             check(!model.presence.isRunning && !model.dimming.hasPendingRestore && !model.dimming.keepsDisplayAwake,
@@ -1372,6 +1380,71 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                   "\(inactiveDuringQuit) during quit prevents a delayed restore from writing while inactive")
             check(!model.presence.isRunning && !model.cameraHeading.sessionActive,
                   "An inactive quitting app cannot reopen presence or heading acquisition")
+            model.shutdown()
+        }
+        do {
+            UserDefaults.standard.clear()
+            UserDefaults.standard.set(13.0, forKey: "onset")
+            let model = AppModel()
+            check(model.leftOnset == 13 && model.rightOnset == 13, "Legacy shared onset migrates to both sides")
+            model.leftOnset = 18; model.rightOnset = 6
+            check(model.onsetForTurn(12) == 18 && model.onsetForTurn(-12) == 6, "Positive left and negative right choose independent onset")
+            let restored = AppModel()
+            check(restored.leftOnset == 18 && restored.rightOnset == 6, "Independent onset values persist")
+            model.leftOnset = 60
+            check(model.fullAngle > 60 && model.minimumFullAngle == 61, "Later starting angle keeps a usable blur transition")
+            model.resetDefaults()
+            check(model.leftOnset == 8 && model.rightOnset == 8, "Reset restores both onset sides")
+            model.shutdown(); restored.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.cameraHeading.isEnabled = true; model.cameraHeading.hasCenter = true
+            model.cameraHeading.trackingValid = false
+            check(model.canRequestEnable, "Enable can request recovery against a saved camera center")
+            let centers = model.cameraHeading.centerCalls
+            model.enable(); await drainTasks()
+            check(model.cameraHeading.refreshCalls == 1 && model.cameraHeading.centerCalls == centers,
+                  "Enable retries saved direction instead of requiring a new center")
+            check(model.overlay.startCalls == 0, "Recovery never enables capture before verified heading")
+            model.cameraHeading.isBusy = false; model.cameraHeading.trackingValid = true
+            model.checkReferenceRecovery(); await drainTasks()
+            check(model.enabled, "An explicit Enable intent resumes after camera recovery")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model); acceptSeat(model, now: now)
+            model.sleepDisplaysOnRemoval = true
+            check(model.motion.monitorsIndividualAirPods, "Per-bud monitoring follows the user's removal feature")
+            model.checkAirPodsRemoval(now: now)
+            model.motion.removalStateOverride = .disconnected; model.motion.removalCountOverride = 1
+            model.checkAirPodsRemoval(now: now + 0.1)
+            model.checkAirPodsRemoval(now: now + 2); await drainTasks()
+            model.presence.state = .present
+            model.checkAirPodsRemoval(now: now + 2.5); await drainTasks()
+            check(model.motion.connectionState == .connected && model.motion.isFresh && model.dimming.isDimmed,
+                  "A nonstreaming AirPod removal blacks out despite fresh remaining-bud motion")
+            model.checkAirPodsRemoval(now: now + 2.8); await drainTasks()
+            check(model.dimming.isDimmed, "Remaining-bud motion cannot falsely restore brightness")
+            model.motion.removalStateOverride = .connected
+            model.checkAirPodsRemoval(now: now + 3); await drainTasks()
+            check(!model.dimming.isDimmed && !model.presence.isRunning, "Confirmed per-bud reinsertion restores and stops presence")
+            model.sleepDisplaysOnRemoval = false
+            check(!model.motion.monitorsIndividualAirPods, "Disabling removal stops supplementary Bluetooth monitoring")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            useCamera(model); acceptSeat(model, now: ProcessInfo.processInfo.systemUptime)
+            model.enable(); await drainTasks()
+            check(model.enabled && model.presenceReady, "Display notification regression starts with valid active tracking")
+            model.handleDisplayConfigurationChange(); await drainTasks()
+            check(model.enabled && model.presenceReady, "Unchanged display inventory cannot pause or erase seat reference")
+            model.overlay.availableDisplays[0].frame.size.width += 100
+            model.handleDisplayConfigurationChange(); await drainTasks()
+            check(!model.enabled && !model.presenceReady, "An actual geometry change pauses and invalidates the old seat")
             model.shutdown()
         }
         print("PASS: \(checks) real AppModel and removal-coordinator lifecycle assertions; camera, motion, brightness, capture, display sleep, permissions, and preferences stubbed")

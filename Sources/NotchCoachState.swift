@@ -1,7 +1,7 @@
 import Foundation
 
 enum NotchCoachPhase: String, Equatable, Sendable {
-    case idle, starting, seeking, offCenter, holding, turning, success, failure
+    case idle, starting, seeking, offCenter, holding, turning, lighting, success, failure
 }
 enum NotchCoachDirection: String, Equatable, Sendable { case left, right, up, down }
 enum NotchCoachRetryAction: String, Equatable, Sendable { case enableCamera, setCenter, refreshDirection }
@@ -21,6 +21,8 @@ struct NotchCoachSnapshot: Equatable, Sendable {
     var direction: NotchCoachDirection?
     var issue: NotchCoachIssue?
     var retryAction: NotchCoachRetryAction?
+    var needsLightHelp = false
+    var isAssistLightOn = false
 }
 
 /// Presentation guidance never grants an alignment. Only the coordinator's
@@ -41,27 +43,40 @@ enum NotchCoachGuidance {
         if frame.faceCount > 1 {
             return snapshot(.seeking, "One face at a time", "Keep only your face in the camera view.", .multipleFaces)
         }
-        let hasPose = [frame.yawDegrees, frame.pitchDegrees, frame.rollDegrees].allSatisfy { $0?.isFinite == true }
-        let confidenceIsGood = frame.detectionConfidence.isFinite && frame.detectionConfidence >= 0.7 && frame.detectionConfidence <= 1
-        let visible = frame.faceCount == 1 && bounds != nil && hasPose && confidenceIsGood
-        if !visible {
-            if let luminance = frame.luminance, luminance.isFinite, luminance >= 0, luminance < 0.18 {
-                return snapshot(.seeking, "A little more light", "Light your face so the camera can see you.", .lowLight)
-            }
+        // A dark empty room is not evidence of a face needing illumination.
+        // Require one plausible face before evaluating its local luminance.
+        guard frame.faceCount == 1, let bounds,
+              [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }),
+              bounds.width > 0, bounds.height > 0,
+              frame.detectionConfidence.isFinite, frame.detectionConfidence >= 0.3,
+              frame.detectionConfidence <= 1 else {
             return snapshot(.seeking, "Looking for your face", "Face the camera and keep your face visible.", .faceMissing)
         }
-        guard let bounds, bounds.width >= 0.12, bounds.height >= 0.12 else {
+        guard bounds.width >= 0.12, bounds.height >= 0.12 else {
             return snapshot(.offCenter, "Come a little closer", "Keep your face inside the camera view.", .framing)
         }
-        // Image position is not head direction. A centered check uses the
-        // same absolute yaw limit in setup and recovery, independent of crop.
-        let yaw = abs(frame.yawDegrees!), pitch = abs(frame.pitchDegrees!), roll = abs(frame.rollDegrees!)
-        if yaw > HeadingFusionEngine.centerYawToleranceDegrees {
+        // A measured turn asks for a turn back, even in darkness. Lighting
+        // assistance is reserved for a face whose direction cannot be read.
+        if let measuredYaw = frame.yawDegrees, measuredYaw.isFinite,
+           abs(measuredYaw) > HeadingFusionEngine.centerYawToleranceDegrees {
             return snapshot(.offCenter, "Look straight ahead",
-                "\(Int(yaw.rounded()))° from center. Aim within 5°.", .pose)
+                "\(Int(abs(measuredYaw).rounded()))° from center. Aim within 5°.", .pose)
         }
-        if pitch > 20 || roll > 15 {
+        if let pitch = frame.pitchDegrees, pitch.isFinite, abs(pitch) > 20 {
             return snapshot(.offCenter, "Keep your head level", "Face straight ahead, then hold briefly.", .pose)
+        }
+        if let roll = frame.rollDegrees, roll.isFinite, abs(roll) > 15 {
+            return snapshot(.offCenter, "Keep your head level", "Face straight ahead, then hold briefly.", .pose)
+        }
+        let hasPose = [frame.yawDegrees, frame.pitchDegrees, frame.rollDegrees].allSatisfy { $0?.isFinite == true }
+        let confidenceIsGood = frame.detectionConfidence >= 0.7
+        if !hasPose || !confidenceIsGood {
+            if let luminance = frame.luminance, luminance.isFinite, luminance >= 0, luminance < 0.18 {
+                var result = snapshot(.lighting, "Light too low", "Your face is visible. Add light to read its direction.", .lowLight)
+                result.needsLightHelp = true
+                return result
+            }
+            return snapshot(.seeking, "Reading your direction", "Face the camera and keep your head level.", .pose)
         }
         return snapshot(.holding, "Hold at center", "One quick camera and AirPods check.")
     }

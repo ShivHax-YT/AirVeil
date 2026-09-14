@@ -164,6 +164,26 @@ import Foundation
         discontinuous.addMotion(motion(162, yaw: 0))
         check(discontinuous.heading(now: 162) == nil,
               "More than300ms motion receipt gap invalidates fusion despite fresh lastsample")
+        var coalesced = configure()
+        burst(&coalesced, start: 160, sensor: 7, camera: 4)
+        let coalescedRevision = coalesced.alignmentRevision
+        coalesced.addMotion(HeadingMotionSample(epoch: 1, sourceTimestamp: 157, receiptHostTime: 162,
+            yawRadians: rad(27), angularSpeed: 0, acquisitionContinuityVerified: true))
+        check(near(coalesced.heading(now: 162), 20) && coalesced.alignmentRevision == coalescedRevision,
+              "Verified continuous acquisition survives a UI delivery gap without recentering the current twenty-degree turn")
+        check(coalesced.stableMotionYaw(atCameraCaptureTime: 161.8, now: 162) == nil,
+              "Coalesced delivery still cannot fabricate a camera stationary interval")
+        coalesced.addMotion(HeadingMotionSample(epoch: 2, sourceTimestamp: 157.02, receiptHostTime: 162.02,
+            yawRadians: rad(27), angularSpeed: 0, acquisitionContinuityVerified: true))
+        check(coalesced.heading(now: 162.02) == nil, "Verified delivery in a new physical epoch cannot retain the prior offset")
+        for reversal in ["source", "receipt"] {
+            var tested = configure()
+            burst(&tested, start: 160, sensor: 7, camera: 4)
+            tested.addMotion(HeadingMotionSample(epoch: 1, sourceTimestamp: reversal == "source" ? 1 : 157,
+                receiptHostTime: reversal == "receipt" ? 160 : 162, yawRadians: rad(27), angularSpeed: 0,
+                acquisitionContinuityVerified: true))
+            check(tested.heading(now: 162) == nil, "A verified flag cannot bypass a \(reversal) clock reversal")
+        }
         let facingReference = HeadingCameraCenter(cameraID: "fixed", neutralYawRadians: 0,
             cameraSign: 0, sensorSign: 1, revision: 8, mode: .facingCamera)
         var noLegacyBypass = HeadingFusionEngine()

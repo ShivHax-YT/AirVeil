@@ -40,6 +40,18 @@ import CoreVideo
     }
 }
 
+@MainActor private final class FakeFaceLight: FaceLighting {
+    var isOn = false
+    var available = true
+    var changes: [Bool] = []
+    @discardableResult func setEnabled(_ enabled: Bool) -> Bool {
+        changes.append(enabled)
+        if enabled && !available { return false }
+        isOn = enabled
+        return true
+    }
+}
+
 @main struct CameraAnchorServiceTests {
     @MainActor static func main() async throws {
         var checks = 0
@@ -207,6 +219,54 @@ import CoreVideo
             do { try await task.value; fatalError("Timed out startup completed successfully") }
             catch CameraAnchorError.cancelled {}
             check(service.configuration == nil, "Timed out startup cannot publish a camera configuration")
+        }
+        do {
+            let capture = FakeCameraCapture(), light = FakeFaceLight()
+            let service = CameraAnchorService(capture: capture, faceLight: light)
+            check(!service.isAssistLightOn && light.changes.isEmpty, "Construction cannot illuminate the display")
+            check(!service.setAssistLightEnabled(true) && !light.isOn, "Camera-off state rejects light activation")
+            try await service.startBurst { _ in }
+            check(!light.isOn && !service.isAssistLightOn, "Every check begins with light off")
+            light.available = false
+            check(!service.setAssistLightEnabled(true) && !service.isAssistLightOn, "Unavailable display cannot report a light is on")
+            light.available = true
+            check(service.setAssistLightEnabled(true) && light.isOn && service.isAssistLightOn,
+                  "An explicit active-capture action enables the actual injected light")
+            check(capture.starts == 1, "Illumination does not restart the camera")
+            service.stop()
+            check(!light.isOn && !service.isAssistLightOn, "Camera stop turns the light off synchronously")
+            try await service.startBurst { _ in }
+            check(!light.isOn, "A new check never inherits the old light preference")
+            service.setAssistLightEnabled(true)
+            capture.failureHandlers.last?("interrupted")
+            check(!light.isOn && !service.isAssistLightOn, "Capture failure cannot leave illumination behind")
+            capture.holdStart = true
+            let startup = Task { try await service.startBurst { _ in } }
+            await settle()
+            check(!service.setAssistLightEnabled(true), "Pending capture startup cannot illuminate from stale configuration")
+            capture.releaseStart(); try await startup.value
+            service.stop()
+        }
+        do {
+            var pixels: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, 64, 48, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, nil, &pixels)
+            let buffer = pixels!
+            CVPixelBufferLockBaseAddress(buffer, [])
+            let bytes = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!.assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+            memset(bytes, 255, stride * 48)
+            // Vision upper-left quarter maps to the buffer's first rows.
+            for y in 0..<24 { for x in 0..<32 { bytes[y * stride + x] = 20 } }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            let face = CGRect(x: 0, y: 0.5, width: 0.5, height: 0.5)
+            check(CameraLuminance.mean(buffer)! > 0.5 && CameraLuminance.mean(buffer, normalizedRegion: face)! < 0.1,
+                  "A bright background cannot conceal a dark face region")
+            check(CameraLuminance.mean(buffer, normalizedRegion: CGRect(x: 0, y: 0, width: 0.5, height: 0.5))! > 0.99,
+                  "Normalized Vision lower-left coordinates map to the correct luma rows")
+            check(CameraLuminance.mean(buffer, normalizedRegion: CGRect(x: 2, y: 2, width: 1, height: 1)) == nil,
+                  "An out-of-image face region cannot produce a brightness claim")
+            check(CameraLuminance.mean(buffer, normalizedRegion: CGRect(x: 0, y: 0, width: 0, height: 0)) == nil,
+                  "An empty face region cannot produce a brightness claim")
         }
         for (pixelValue, expected) in [(UInt8(0), 0.0), (UInt8(128), 128.0 / 255), (UInt8(255), 1.0)] {
             var pixels: CVPixelBuffer?

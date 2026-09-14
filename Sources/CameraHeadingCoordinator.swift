@@ -38,6 +38,8 @@ import CoreMedia
     private var successDismissal: Task<Void, Never>?
     private var lastFrameReceipt: Double?
     private var lowLightFrames = 0
+    private var hadLiveAlignment = false
+    private var lightMissingFaceFrames = 0
 
     private enum Phase { case center, recovery }
     private struct StoredCenter: Codable {
@@ -79,6 +81,7 @@ import CoreMedia
             guard self.isEnabled else { return }
             guard let sample else {
                 self.engine.invalidate(); self.isAligned = false
+                if self.hadLiveAlignment { self.lastAttemptEpoch = nil; self.hadLiveAlignment = false }
                 if self.coach.phase == .success { self.present(NotchCoachSnapshot()) }
                 return
             }
@@ -125,7 +128,7 @@ import CoreMedia
         guard sessionActive != active else { return }
         sessionActive = active
         if !active {
-            cancelBurst(); engine.invalidate(); isAligned = false; lastAttemptEpoch = nil
+            cancelBurst(); engine.invalidate(); isAligned = false; lastAttemptEpoch = nil; hadLiveAlignment = false
             if isEnabled { status = "Camera is off while your Mac is asleep or inactive." }
         }
     }
@@ -161,6 +164,7 @@ import CoreMedia
                 return
             }
             if let lastFrameReceipt, now() - lastFrameReceipt > 0.8 {
+                camera.setAssistLightEnabled(false)
                 clearEvidence()
                 present(NotchCoachSnapshot(phase: .seeking, title: "Waiting for a clear frame", detail: "Keep your face visible to the camera.", issue: .faceMissing))
                 syncMeasurementStatus()
@@ -169,6 +173,11 @@ import CoreMedia
             return
         }
         let aligned = trackingValid
+        // One new recovery is allowed when a previously live alignment is
+        // lost, including within an epoch. A failed attempt is not itself a
+        // new loss and therefore cannot produce an endless check loop.
+        if hadLiveAlignment && !aligned { lastAttemptEpoch = nil; hadLiveAlignment = false }
+        if aligned { hadLiveAlignment = true }
         if isAligned != aligned { isAligned = aligned }
         if !aligned, coach.phase == .success { present(NotchCoachSnapshot()) }
         guard let stored else { return }
@@ -198,6 +207,43 @@ import CoreMedia
         automaticRecoveryAllowed = true
         engine.invalidate(); isAligned = false
         startBurst(.center)
+    }
+    /// The card is offered only from repeated face-local low-light evidence.
+    /// Turning on the light continues this same check; it cannot set center.
+    func toggleAssistLight() {
+        if camera.isAssistLightOn {
+            camera.setAssistLightEnabled(false)
+            present(NotchCoachSnapshot(phase: phase == nil ? .idle : .seeking,
+                title: "Reading your direction", detail: "Face light is off."))
+            return
+        }
+        guard sessionActive, phase != nil, camera.isRunning,
+              coach.phase == .lighting, coach.needsLightHelp else { return }
+        guard camera.setAssistLightEnabled(true) else {
+            present(NotchCoachSnapshot(phase: .lighting, title: "Face light unavailable",
+                detail: "Use a light in front of you and keep facing the camera.", issue: .lowLight,
+                needsLightHelp: true))
+            return
+        }
+        clearEvidence(); lowLightFrames = 0; lightMissingFaceFrames = 0
+        present(NotchCoachSnapshot(phase: .seeking, title: "Reading your direction",
+            detail: "Face light is on. Keep looking at the camera."))
+        syncMeasurementStatus()
+    }
+
+    /// Explicit Enable intent resumes a saved reference without replacing it
+    /// and never restarts a valid alignment or an already-running check.
+    func resumeTracking() {
+        guard isEnabled, sessionActive, hasCenter else { return }
+        automaticRecoveryAllowed = true
+        guard !trackingValid, phase == nil else { return }
+        lastAttemptEpoch = nil
+        guard stored?.layoutKey == layoutKey else {
+            status = "The display setup changed. Face your reference display and Set center again."
+            return
+        }
+        if motion.isFresh { startBurst(.recovery) }
+        else { status = "Waiting for AirPods before checking the saved screen direction." }
     }
     func refreshDirection() {
         guard isEnabled, sessionActive, hasCenter else { return }
@@ -246,19 +292,32 @@ import CoreMedia
         pending.removeAll()
         pendingFaceBounds.removeAll()
         burstConfiguration = ""; isBusy = false
-        holdEvidence.removeAll(); lastFrameReceipt = nil; lowLightFrames = 0
+        holdEvidence.removeAll(); lastFrameReceipt = nil; lowLightFrames = 0; lightMissingFaceFrames = 0
         if clearCoach { present(NotchCoachSnapshot()) }
     }
     private func receive(_ frame: CameraAnchorFrame, generation: UInt64) {
         notchMotion.updateCamera(frame, visualCameraSign: visualCameraSign(cameraID: frame.cameraID, configurationID: frame.configurationID))
         lastFrameReceipt = frame.receiptHostTime
         var guidance = NotchCoachGuidance.observation(frame, requiresFrontalPose: phase == .center, previous: coach)
-        lowLightFrames = guidance.issue == .lowLight ? min(2, lowLightFrames + 1) : 0
-        if guidance.issue == .lowLight && lowLightFrames < 2 {
-            guidance.title = "Looking for your face"
-            guidance.detail = "Face the camera and keep your face visible."
-            guidance.issue = .faceMissing
+        // Old or untimed camera evidence cannot offer or activate a light.
+        let time = now()
+        let fresh = frame.captureHostTime.map { $0.isFinite && $0 >= 0 && $0 <= frame.receiptHostTime + 0.05 && time - $0 <= 0.8 } == true
+            && frame.receiptHostTime.isFinite && frame.receiptHostTime <= time + 0.05 && time - frame.receiptHostTime <= 0.8
+        if guidance.issue == .lowLight && !fresh {
+            guidance.phase = .seeking; guidance.issue = .camera; guidance.needsLightHelp = false
+            guidance.title = "Waiting for a clear frame"; guidance.detail = "Keep facing the camera."
         }
+        lowLightFrames = guidance.issue == .lowLight ? min(2, lowLightFrames + 1) : 0
+        if guidance.issue == .lowLight && (lowLightFrames < 2 || camera.isAssistLightOn) {
+            guidance.phase = .seeking
+            guidance.title = "Reading your direction"
+            guidance.detail = camera.isAssistLightOn ? "Face light is on. Keep facing the camera." : "Keep facing the camera."
+            guidance.issue = .pose
+            guidance.needsLightHelp = false
+        }
+        let faceStillVisible = fresh && frame.faceCount == 1 && frame.faceBounds != nil && frame.detectionConfidence >= 0.3
+        lightMissingFaceFrames = faceStillVisible ? 0 : min(2, lightMissingFaceFrames + 1)
+        if camera.isAssistLightOn && lightMissingFaceFrames >= 2 { camera.setAssistLightEnabled(false) }
         guard let capture = frame.captureHostTime, let yaw = frame.yawDegrees,
               let pitch = frame.pitchDegrees, let roll = frame.rollDegrees,
               let bounds = frame.faceBounds, bounds.width >= 0.12, bounds.height >= 0.12 else {
@@ -356,7 +415,7 @@ import CoreMedia
                 // The same verified batch installs the center and sensor offset.
                 // Keep its motion history and alignment; never configure again
                 // or start a second capture after completing this check.
-                cancelBurst(clearCoach: false); isAligned = true
+                cancelBurst(clearCoach: false); isAligned = true; hadLiveAlignment = true
                 status = "Facing-center check complete. Camera is off."
                 showSuccess()
                 return
@@ -395,7 +454,9 @@ import CoreMedia
         let message = coach.title + ". " + coach.detail
         if status != message { status = message }
     }
-    private func present(_ snapshot: NotchCoachSnapshot) {
+    private func present(_ newSnapshot: NotchCoachSnapshot) {
+        var snapshot = newSnapshot
+        snapshot.isAssistLightOn = camera.isAssistLightOn
         if coach != snapshot { coach = snapshot }
     }
     private func retryAction(for phase: Phase) -> NotchCoachRetryAction {
@@ -410,7 +471,7 @@ import CoreMedia
         present(NotchCoachSnapshot(phase: .success, title: "Center confirmed", detail: "You're ready. Camera is off.", progress: 1))
         let ticket = burstTicket
         successDismissal = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: 1_100_000_000) } catch { return }
+            do { try await Task.sleep(nanoseconds: 1_450_000_000) } catch { return }
             guard let self, self.burstTicket == ticket, self.coach.phase == .success else { return }
             self.present(NotchCoachSnapshot())
         }

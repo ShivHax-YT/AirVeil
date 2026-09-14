@@ -37,6 +37,17 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var isFresh = false
     @Published private(set) var isRunning = false
     @Published private(set) var connectionState: MotionConnectionState = .unknown
+    /// Removal policy only. Unlike motion connectionState, a still-streaming
+    /// remaining bud cannot cancel an independently observed per-bud removal.
+    @Published private(set) var removalConnectionState: MotionConnectionState = .unknown
+    @Published private(set) var removalEventCount: UInt64 = 0
+    @Published private(set) var wearStatus = "Using AirPods connection events."
+    var monitorsIndividualAirPods = false {
+        didSet {
+            guard oldValue != monitorsIndividualAirPods else { return }
+            clearRemovalEvidence()
+        }
+    }
     /// Lifetime-monotonic count of actual delegate disconnect callbacks. With
     /// Automatic Ear Detection this can indicate removal; it does not prove
     /// both buds were removed. Stream errors and stale data are not removal.
@@ -66,6 +77,9 @@ final class MotionService: NSObject, ObservableObject {
     private var nextRetryTime: TimeInterval = 0
     private var errorRetryCount = 0
     private var mailbox: MotionDeliveryBuffer?
+    private var wearEvidence = AirPodsWearEvidence()
+    private var nextWearPoll = -Double.infinity
+    private var observedPublicDisconnect = false
     private let motionQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "AirVeil.HeadphoneAcquisition"
@@ -109,6 +123,8 @@ final class MotionService: NSObject, ObservableObject {
     func start() {
         guard !isRunning else { return }
         connectionState = .unknown
+        wearEvidence.reset(); nextWearPoll = -Double.infinity; observedPublicDisconnect = false
+        synchronizeRemovalEvidence()
         generation &+= 1
         let run = generation
         resetDelivery()
@@ -149,6 +165,8 @@ final class MotionService: NSObject, ObservableObject {
         nextRetryTime = 0
         isRunning = false
         connectionState = .unknown
+        wearEvidence.reset(); observedPublicDisconnect = false
+        synchronizeRemovalEvidence()
         resetDelivery()
         invalidateCalibration("Motion stopped — original center must be checked before reuse")
         if !hasSavedCenter { status = "Motion paused" }
@@ -170,6 +188,8 @@ final class MotionService: NSObject, ObservableObject {
     fileprivate func connectionChanged(connected: Bool, generation run: UInt64) {
         guard isRunning, generation == run else { return }
         if connected {
+            if observedPublicDisconnect { wearEvidence.noteExplicitReconnect() }
+            observedPublicDisconnect = false
             mailbox?.setConnected(true)
             connectionState = .connected
             // A connect callback may follow the first valid sample at startup.
@@ -178,6 +198,7 @@ final class MotionService: NSObject, ObservableObject {
             nextRetryTime = 0
             beginStreamIfAvailable()
         } else {
+            observedPublicDisconnect = true
             // Keep the stream for transport recovery, but the wearer test
             // disproved trusting its original zero through a removal.
             mailbox?.setConnected(false)
@@ -187,6 +208,7 @@ final class MotionService: NSObject, ObservableObject {
             // so a debounced coordinator observes a consistent service state.
             if disconnectEventCount < UInt64.max { disconnectEventCount += 1 }
         }
+        synchronizeRemovalEvidence()
     }
 
     private func beginStreamIfAvailable() {
@@ -277,7 +299,8 @@ final class MotionService: NSObject, ObservableObject {
             if hostReceipt.isFinite, hostReceipt >= 0 {
                 fusionSample = HeadingMotionSample(epoch: fusionEpoch,
                     sourceTimestamp: reading.timestamp, receiptHostTime: hostReceipt,
-                    yawRadians: rawYaw, angularSpeed: reading.speed)
+                    yawRadians: rawYaw, angularSpeed: reading.speed,
+                    acquisitionContinuityVerified: true)
             }
         }
         reportedHeadingDegrees = reading.headingDegrees.isFinite ? reading.headingDegrees : -1
@@ -295,6 +318,7 @@ final class MotionService: NSObject, ObservableObject {
         isFresh = true
         // Some systems deliver usable motion before the startup connect event.
         connectionState = .connected
+        synchronizeRemovalEvidence()
         if referenceState == .awaitingReturn { referenceState = .retainedAfterGap }
         if let reference {
             guard let yaw = attitude.relativeYaw(to: reference), yaw.isFinite else {
@@ -319,6 +343,7 @@ final class MotionService: NSObject, ObservableObject {
         // Consume acquisition that may already be waiting before judging the
         // previous UI snapshot. This also operates during menu tracking.
         drainMotionMailbox()
+        pollWearEvidence()
         if !streamRequested { beginStreamIfAvailable() }
         let now = now()
         // Silence is not evidence of a broken reference. Restarting a known
@@ -338,6 +363,44 @@ final class MotionService: NSObject, ObservableObject {
                 status = "No motion updates. Reconnect AirPods or restart AirVeil; restarting the motion stream requires Set center."
             }
         }
+    }
+
+    /// Explicit user recovery, used only by a visible manual action. A new
+    /// genuine metadata transition may arm removal again after fresh motion.
+    func clearRemovalEvidence() {
+        wearEvidence.reset(); nextWearPoll = -Double.infinity
+        synchronizeRemovalEvidence()
+    }
+
+    private func pollWearEvidence() {
+        guard isRunning, monitorsIndividualAirPods else { return }
+        let receipt = now()
+        guard receipt >= nextWearPoll else { return }
+        nextWearPoll = receipt + 0.25
+        _ = wearEvidence.update(manager?.readWearState(now: receipt),
+            freshMotion: isFresh && connectionState == .connected, now: receipt)
+        synchronizeRemovalEvidence()
+    }
+
+    private func synchronizeRemovalEvidence() {
+        let next: MotionConnectionState = wearEvidence.isRemovalLatched ? .disconnected : connectionState
+        if next != removalConnectionState {
+            let newlyRemoved = next == .disconnected && removalConnectionState != .disconnected
+            removalConnectionState = next
+            if newlyRemoved, removalEventCount < UInt64.max { removalEventCount += 1 }
+        }
+        let message: String
+        if wearEvidence.hasCurrentMetadata, let mask = wearEvidence.wornMask {
+            switch mask {
+            case 3: message = "Both AirPods are in ear."
+            case 1: message = "Right AirPod is out of ear."
+            case 2: message = "Left AirPod is out of ear."
+            default: message = "Both AirPods are out of ear."
+            }
+        } else if wearEvidence.isRemovalLatched {
+            message = "AirPod removal was observed. Waiting for reinsertion or manual brightness recovery."
+        } else { message = "Per-AirPod state unavailable. Using AirPods connection events." }
+        if wearStatus != message { wearStatus = message }
     }
 
     private func invalidateCalibration(_ message: String) {
@@ -495,7 +558,7 @@ final class MotionDeliveryBuffer: @unchecked Sendable {
                 resetTimingForRecovery(reading)
             } else {
                 if clockRecovery?.reason == .reversedTimestamp { clockRecovery = nil }
-                if returningAfterAbsence || receiptGap >= staleAfter || sourceGap >= staleAfter {
+                if returningAfterAbsence || receiptGap >= 0.3 || sourceGap >= 0.3 {
                     fail("Motion resumed after a sensor gap — original center retained", impact: .gap)
                 } else if let distance = reading.quaternion.angularDistance(to: previous.quaternion) {
                     // Using only the newest rotation speed misclassifies a real
@@ -699,11 +762,17 @@ private final class CoreMotionAttitude: MotionAttitude, @unchecked Sendable {
     func startMotionUpdates(on queue: OperationQueue,
         handler: @escaping @Sendable (MotionReading?, String?) -> Void)
     func stopMotionUpdates()
+    func readWearState(now: TimeInterval) -> AirPodsWearReading?
+}
+
+extension HeadphoneMotionTransport {
+    func readWearState(now: TimeInterval) -> AirPodsWearReading? { nil }
 }
 
 @MainActor private final class CoreMotionTransport: NSObject, HeadphoneMotionTransport,
     CMHeadphoneMotionManagerDelegate {
     private let manager = CMHeadphoneMotionManager()
+    private let wearReader = SystemAirPodsWearReader()
     private var connectionHandler: (@MainActor (Bool) -> Void)?
     var authorizationStatus: CMAuthorizationStatus { CMHeadphoneMotionManager.authorizationStatus() }
     var isMotionAvailable: Bool { manager.isDeviceMotionAvailable }
@@ -734,6 +803,7 @@ private final class CoreMotionAttitude: MotionAttitude, @unchecked Sendable {
         }
     }
     func stopMotionUpdates() { manager.stopDeviceMotionUpdates() }
+    func readWearState(now: TimeInterval) -> AirPodsWearReading? { wearReader.read(now: now) }
     nonisolated func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
         Task { @MainActor [weak self] in self?.connectionHandler?(true) }
     }

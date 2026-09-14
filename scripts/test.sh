@@ -4,14 +4,18 @@ TASK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TASK_SDK="${AIRVEIL_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk}"
 if [ ! -d "$TASK_SDK" ]; then TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
 mkdir -p "$TASK_ROOT/build/tests"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+  "$TASK_ROOT/Sources/BlurOnsetDial.swift" "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Tests/BlurOnsetDialTests.swift" \
+  -o "$TASK_ROOT/build/tests/blur-onset-dial"
+"$TASK_ROOT/build/tests/blur-onset-dial"
 swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Tests/MotionMathTests.swift" -o "$TASK_ROOT/build/tests/motion-math"
 "$TASK_ROOT/build/tests/motion-math"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/MotionService.swift" \
+  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/AirPodsWearState.swift" "$TASK_ROOT/Sources/MotionService.swift" \
   "$TASK_ROOT/Tests/MotionDeliveryTests.swift" -o "$TASK_ROOT/build/tests/motion-delivery"
 "$TASK_ROOT/build/tests/motion-delivery"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/MotionService.swift" \
+  "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/AirPodsWearState.swift" "$TASK_ROOT/Sources/MotionService.swift" \
   "$TASK_ROOT/Tests/MotionReferenceLifecycleTests.swift" -o "$TASK_ROOT/build/tests/motion-reference"
 "$TASK_ROOT/build/tests/motion-reference"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
@@ -19,20 +23,20 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   -o "$TASK_ROOT/build/tests/heading-fusion"
 "$TASK_ROOT/build/tests/heading-fusion"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Tests/CameraAnchorServiceTests.swift" \
+  "$TASK_ROOT/Sources/FaceLightService.swift" "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Tests/CameraAnchorServiceTests.swift" \
   -o "$TASK_ROOT/build/tests/camera-service"
 "$TASK_ROOT/build/tests/camera-service"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" \
+  "$TASK_ROOT/Sources/FaceLightService.swift" "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" \
   "$TASK_ROOT/Sources/NotchCoachState.swift" "$TASK_ROOT/Sources/NotchMotionFeedback.swift" "$TASK_ROOT/Sources/CameraHeadingCoordinator.swift" "$TASK_ROOT/Tests/CameraHeadingCoordinatorTests.swift" \
   -o "$TASK_ROOT/build/tests/camera-coordinator"
 "$TASK_ROOT/build/tests/camera-coordinator"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/NotchCoachState.swift" \
+  "$TASK_ROOT/Sources/FaceLightService.swift" "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/NotchCoachState.swift" \
   "$TASK_ROOT/Tests/NotchCoachStateTests.swift" -o "$TASK_ROOT/build/tests/notch-coach-state"
 "$TASK_ROOT/build/tests/notch-coach-state"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" \
+  "$TASK_ROOT/Sources/FaceLightService.swift" "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" \
   "$TASK_ROOT/Sources/NotchMotionFeedback.swift" "$TASK_ROOT/Tests/NotchMotionFeedbackTests.swift" \
   -o "$TASK_ROOT/build/tests/notch-motion-feedback"
 "$TASK_ROOT/build/tests/notch-motion-feedback"
@@ -59,6 +63,10 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   "$TASK_ROOT/Sources/DisplayDimmingService.swift" "$TASK_ROOT/Sources/RemovalPresenceCoordinator.swift" \
   "$TASK_ROOT/Tests/RemovalPresenceCoordinatorTests.swift" -o "$TASK_ROOT/build/tests/removal-presence"
 "$TASK_ROOT/build/tests/removal-presence"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/AirPodsWearState.swift" "$TASK_ROOT/Tests/AirPodsWearStateTests.swift" \
+  -o "$TASK_ROOT/build/tests/airpods-wear"
+"$TASK_ROOT/build/tests/airpods-wear"
 swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
   "$TASK_ROOT/Tests/AirPodsRemovalGuardTests.swift" -o "$TASK_ROOT/build/tests/removal-policy"
 "$TASK_ROOT/build/tests/removal-policy"
@@ -66,6 +74,11 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/DisplaySleepService.swift" "$TASK_ROOT/Tests/DisplaySleepServiceTests.swift" \
   -o "$TASK_ROOT/build/tests/display-sleep"
 "$TASK_ROOT/build/tests/display-sleep"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+  "$TASK_ROOT/Sources/DesktopOverlayController.swift" "$TASK_ROOT/Sources/VeilMetalView.swift" \
+  "$TASK_ROOT/Sources/VeilInputGeometry.swift" "$TASK_ROOT/Tests/DisplayConfigurationTests.swift" \
+  -o "$TASK_ROOT/build/tests/display-configuration"
+"$TASK_ROOT/build/tests/display-configuration"
 swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/VeilInputGeometry.swift" \
   "$TASK_ROOT/Tests/InputGeometryTests.swift" -o "$TASK_ROOT/build/tests/input-geometry"
 "$TASK_ROOT/build/tests/input-geometry"

@@ -13,6 +13,7 @@ import Foundation
     var pendingReads: [CheckedContinuation<DisplayBrightnessReading, Error>] = []
     var pendingWrites: [(Double, String, CheckedContinuation<DisplayBrightnessReading, Error>)] = []
     var beforeWrite: ((Double) -> Void)?
+    var quantizedZero: Double?
     var reading: DisplayBrightnessReading { .init(displayID: id, brightness: value) }
     func read(displayID: String?) async throws -> DisplayBrightnessReading {
         reads += 1
@@ -31,7 +32,7 @@ import Foundation
             if failAfterApplying { value = brightness }
             throw error
         }
-        value = brightness
+        value = brightness == 0 ? (quantizedZero ?? 0) : brightness
         return reading
     }
     func completeRead() { pendingReads.removeFirst().resume(returning: reading) }
@@ -100,7 +101,7 @@ import Foundation
                              "The durable baseline and next target must precede every write")
             }
             check(await f.service.setDimmed(true), "A valid built-in display can be dimmed")
-            check(f.backend.writes.count == 1 && close(f.backend.value, 0.08), "Default brightness target is eight percent")
+            check(f.backend.writes.count == 1 && close(f.backend.value, 0), "Default brightness target is zero percent without display sleep")
             check(f.service.isDimmed && f.service.keepsDisplayAwake && f.assertions.active.count == 1,
                   "Verified dim owns one idle-display assertion")
             check(await f.service.setDimmed(true), "A repeated request remains valid")
@@ -118,16 +119,33 @@ import Foundation
             check(f.backend.writes.count == count, "Repeated restore does not touch brightness")
         }
         do {
+            let f = Fixture(); f.backend.value = 0
+            check(await f.service.setDimmed(true), "Already-zero brightness can still protect a confirmed occupied seat from idle sleep")
+            check(f.backend.writes.isEmpty && f.assertions.active.count == 1 && f.store.record?.baseline == 0,
+                  "An already-black screen retains its exact zero baseline without a physical write")
+            check(await f.service.restore(), "An original zero restores safely")
+            check(f.backend.value == 0 && f.backend.writes.isEmpty && f.assertions.active.isEmpty,
+                  "Rewear never brightens a panel whose original brightness was zero")
+        }
+        do {
+            let f = Fixture(), original = f.backend.value
+            f.backend.quantizedZero = 0.01
+            check(!(await f.service.setDimmed(true)), "A driver returning a visible one percent cannot claim a zero-percent blackout")
+            await settle { !f.service.isBusy }
+            check(f.backend.value == original && f.store.record == nil,
+                  "Unconfirmed zero is restored from the durable original baseline")
+        }
+        do {
             let f = Fixture(); f.backend.value = 0.03
             check(await f.service.setDimmed(true, targetBrightness: 0.08), "An already-dark screen can enter the managed dim state")
             check(f.backend.value == 0.03 && f.backend.writes.isEmpty, "Dimming never brightens an already darker panel")
             check(await f.service.restore(), "An unchanged low baseline restores without raising brightness")
             check(f.backend.writes.isEmpty, "No write is needed when original brightness was already below target")
         }
-        for (target, expected) in [(-1.0, 0.05), (2.0, 0.5)] {
+        for (target, expected) in [(-1.0, 0.0), (0.0, 0.0), (2.0, 0.5)] {
             let f = Fixture()
             check(await f.service.setDimmed(true, targetBrightness: target), "Finite slider targets clamp to the supported range")
-            check(close(f.backend.value, expected), "Brightness range is five to fifty percent")
+            check(close(f.backend.value, expected), "Brightness range is zero to fifty percent")
             check(await f.service.restore(), "Clamped target still restores the baseline")
         }
         do {
@@ -198,6 +216,15 @@ import Foundation
             check(await f.service.recoverIfNeeded(), "Next launch recovers an interrupted brightness transaction")
             check(f.backend.value == (crashPoint == "manual" ? 0.4 : original), "Crash recovery restores only brightness still owned by AirVeil")
             check(f.store.record == nil && f.assertions.created == 0, "Startup recovery clears its ledger and never asserts idle prevention")
+        }
+        do {
+            let f = Fixture(), original = f.backend.value
+            f.store.record = DisplayBrightnessRestoreRecord(displayID: f.backend.id, baseline: original,
+                lastApplied: 0, pendingTarget: nil, createdAt: 1234)
+            f.backend.value = 0
+            check(await f.service.recoverIfNeeded(), "A crash during a zero-percent episode recovers on active relaunch")
+            check(f.backend.value == original && f.store.record == nil && f.assertions.active.isEmpty,
+                  "Blackout recovery restores the exact pre-blackout brightness without waking an idle assertion")
         }
         do {
             let f = Fixture()
@@ -271,7 +298,7 @@ import Foundation
             await Task.yield(); f.backend.holdWrites = false; f.backend.completeWrite()
             let dimResult = await dim.value, suspendResult = await suspend.value
             check(!dimResult && suspendResult, "Suspension supersedes an already-issued dim")
-            check(f.backend.writes.count == 1 && f.backend.value == 0.08 && f.service.hasPendingRestore && f.assertions.active.isEmpty,
+            check(f.backend.writes.count == 1 && f.backend.value == 0 && f.service.hasPendingRestore && f.assertions.active.isEmpty,
                   "An in-flight dim is journaled but no restoration write occurs while suspended")
             check(await f.service.recoverIfNeeded(), "Wake recovery reconciles the previously in-flight write")
             check(f.backend.value == original && f.store.record == nil, "Late dim never loses the original baseline")

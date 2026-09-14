@@ -29,6 +29,7 @@ struct CameraAnchorFrame: Sendable {
     let captureHostTime: TimeInterval?
     let receiptHostTime: TimeInterval
     let processedHostTime: TimeInterval
+    /// Mean luminance inside the detected face, excluding surrounding background.
     var luminance: Double? = nil
 }
 
@@ -73,6 +74,8 @@ extension CameraAnchorCapturing {
         isRunning && captureReady && configuration?.supportsEdgeLight == true
     }
     private let capture: any CameraAnchorCapturing
+    @Published private(set) var isAssistLightOn = false
+    private let faceLight: any FaceLighting
     private let showVideoEffects: () -> Void
     private var captureReady = false
     private var generation: UInt64 = 0
@@ -80,8 +83,10 @@ extension CameraAnchorCapturing {
 
     convenience init() { self.init(capture: SystemCameraAnchorCapture()) }
     init(capture: any CameraAnchorCapturing,
+         faceLight: (any FaceLighting)? = nil,
          showVideoEffects: @escaping () -> Void = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }) {
         self.capture = capture
+        self.faceLight = faceLight ?? FaceLightService()
         self.showVideoEffects = showVideoEffects
         authorization = capture.authorization
     }
@@ -93,6 +98,15 @@ extension CameraAnchorCapturing {
     func openEdgeLightControls() {
         guard canOpenEdgeLightControls else { return }
         showVideoEffects()
+    }
+
+    /// This controls AirVeil's own face light, not Apple's Edge Light setting.
+    /// Only an explicit action during an active capture may turn it on.
+    @discardableResult func setAssistLightEnabled(_ enabled: Bool) -> Bool {
+        if enabled && (!isRunning || !captureReady) { return false }
+        let changed = faceLight.setEnabled(enabled)
+        isAssistLightOn = faceLight.isOn
+        return changed
     }
 
     /// Call only from an explicit permission/setup action. This never starts capture.
@@ -145,6 +159,7 @@ extension CameraAnchorCapturing {
     }
 
     func stop() {
+        setAssistLightEnabled(false)
         generation &+= 1
         timeout?.cancel(); timeout = nil
         isRunning = false
@@ -385,7 +400,6 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
             let converted = CMSyncConvertTime(pts, from: clock, to: CMClockGetHostTimeClock()).seconds
             if converted.isFinite, converted >= 0, converted <= receipt + 0.05 { captureTime = converted }
         }
-        let luminance = CameraLuminance.mean(pixels)
         let request = VNDetectFaceRectanglesRequest()
         request.revision = VNDetectFaceRectanglesRequestRevision3
         do {
@@ -393,6 +407,7 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
             guard !isCancelled else { return }
             let faces = request.results ?? []
             let face = faces.count == 1 ? faces.first : nil
+            let luminance = face.flatMap { CameraLuminance.mean(pixels, normalizedRegion: $0.boundingBox.insetBy(dx: $0.boundingBox.width * 0.15, dy: $0.boundingBox.height * 0.15)) }
             func degrees(_ value: NSNumber?) -> Double? {
                 guard let radians = value?.doubleValue, radians.isFinite else { return nil }
                 return radians * 180 / .pi
@@ -420,9 +435,11 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
 }
 
 /// Sparse brightness measurement from the existing analysis frame. It is used
-/// only alongside a failed face scan, never as a replacement for confidence.
+/// only inside a detected face during a failed pose scan, never as a replacement
+/// for confidence. Vision regions have a lower-left normalized origin; luma
+/// planes are addressed from the top left.
 enum CameraLuminance {
-    static func mean(_ pixels: CVPixelBuffer) -> Double? {
+    static func mean(_ pixels: CVPixelBuffer, normalizedRegion: CGRect? = nil) -> Double? {
         guard CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
         let format = CVPixelBufferGetPixelFormatType(pixels)
@@ -432,11 +449,20 @@ enum CameraLuminance {
               let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return nil }
         let width = CVPixelBufferGetWidthOfPlane(pixels, 0), height = CVPixelBufferGetHeightOfPlane(pixels, 0)
         guard width > 0, height > 0 else { return nil }
+        let region = normalizedRegion ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        guard [region.minX, region.minY, region.width, region.height].allSatisfy({ $0.isFinite }),
+              region.width > 0, region.height > 0 else { return nil }
+        let clipped = region.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !clipped.isNull, !clipped.isEmpty else { return nil }
+        let minX = max(0, min(width - 1, Int((clipped.minX * Double(width)).rounded(.down))))
+        let maxX = max(minX + 1, min(width, Int((clipped.maxX * Double(width)).rounded(.up))))
+        let minY = max(0, min(height - 1, Int(((1 - clipped.maxY) * Double(height)).rounded(.down))))
+        let maxY = max(minY + 1, min(height, Int(((1 - clipped.minY) * Double(height)).rounded(.up))))
         let stride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
         let bytes = base.assumingMemoryBound(to: UInt8.self)
         var total = 0.0, count = 0.0
-        for y in Swift.stride(from: 0, to: height, by: max(1, height / 12)) {
-            for x in Swift.stride(from: 0, to: width, by: max(1, width / 16)) {
+        for y in Swift.stride(from: minY, to: maxY, by: max(1, (maxY - minY) / 12)) {
+            for x in Swift.stride(from: minX, to: maxX, by: max(1, (maxX - minX) / 16)) {
                 let value = Double(bytes[y * stride + x])
                 total += min(1, max(0, fullRange ? value / 255 : (value - 16) / 219))
                 count += 1

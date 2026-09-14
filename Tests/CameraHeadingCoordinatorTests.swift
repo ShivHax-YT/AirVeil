@@ -52,16 +52,25 @@ private struct StoredCameraProbe: Codable {
     let configurationID: String
     var visualCameraSign: Double? = nil
 }
+@MainActor private final class CoordinatorFaceLight: FaceLighting {
+    var isOn = false
+    var available = true
+    @discardableResult func setEnabled(_ enabled: Bool) -> Bool {
+        if enabled && !available { return false }
+        isOn = enabled; return true
+    }
+}
 @MainActor private final class CoordinatorFixture {
     var time = 100.0
     let motion = MotionService()
     let capture = CoordinatorCameraCapture()
     let defaults = UserDefaults()
     let camera: CameraAnchorService
+    let light = CoordinatorFaceLight()
     var coordinator: CameraHeadingCoordinator!
     var layout = "display-A"
     init(enabled: Bool = true, stored: Bool = false, legacy: Bool = false) {
-        camera = CameraAnchorService(capture: capture)
+        camera = CameraAnchorService(capture: capture, faceLight: light)
         defaults.set(enabled, forKey: "cameraAssistance")
         if stored {
             let value = StoredCameraProbe(center: HeadingCameraCenter(cameraID: "builtin-test", neutralYawRadians: legacy ? 15 * .pi / 180 : 0,
@@ -328,6 +337,85 @@ private struct StoredCameraProbe: Codable {
             f.camera.stop(); f.coordinator.update(layoutKey: f.layout)
             f.capture.releaseStart(); await settle()
             check(!f.coordinator.trackingValid && !f.coordinator.isBusy && !f.camera.isRunning, "Late startup cannot resurrect a timed-out centered check")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 20); await settle(); f.advance(0.8, yaw: 20)
+            f.coordinator.toggleAssistLight()
+            check(!f.light.isOn, "Light cannot turn on before measured low-light evidence")
+            f.frame(yaw: nil, faces: 0, luminance: 0.01); f.advance(0.34, yaw: 20)
+            f.frame(yaw: nil, faces: 0, luminance: 0.01)
+            check(f.coordinator.coach.issue == .faceMissing && f.coordinator.coach.phase != .lighting,
+                  "Repeated darkness without a face keeps the camera card and cannot offer a light")
+            f.frame(yaw: 22, luminance: 0.01); f.advance(0.34, yaw: 20)
+            f.frame(yaw: 22, luminance: 0.01)
+            check(f.coordinator.coach.issue == .pose && !f.coordinator.coach.needsLightHelp,
+                  "A visible twenty-two-degree turn never prompts lighting instead of center")
+            f.frame(yaw: nil, luminance: 0.05)
+            check(f.coordinator.coach.phase == .seeking && !f.coordinator.coach.needsLightHelp,
+                  "One underexposed frame cannot flash a light card")
+            f.advance(0.34, yaw: 20); f.frame(yaw: nil, luminance: 0.05)
+            check(f.coordinator.coach.phase == .lighting && f.coordinator.coach.needsLightHelp && !f.light.isOn,
+                  "Repeated close-face low-light pose failures show a truthful default-off card")
+            let starts = f.capture.starts, saved = f.defaults.data(forKey: "cameraScreenCenterV1")
+            f.coordinator.toggleAssistLight()
+            check(f.light.isOn && f.coordinator.coach.isAssistLightOn && f.coordinator.coach.phase == .seeking,
+                  "Explicit light-on immediately returns to face detection")
+            check(f.capture.starts == starts && !f.coordinator.trackingValid && f.coordinator.coach.progress == 0,
+                  "Light-on neither starts a second check nor grants calibration")
+            f.advance(0.34, yaw: 20); f.frame(yaw: nil, luminance: 0.05)
+            f.advance(0.34, yaw: 20); f.frame(yaw: nil, luminance: 0.05)
+            check(f.coordinator.coach.phase == .seeking && f.light.isOn,
+                  "Light already on does not loop back to its offer card")
+            f.frames(3, cameraYaw: 0, motionYaw: 20)
+            check(f.coordinator.trackingValid && f.coordinator.coach.phase == .success && !f.light.isOn && !f.camera.isRunning,
+                  "The same one-pass evidence finishes recovery and turns camera plus light off")
+            check(f.defaults.data(forKey: "cameraScreenCenterV1") == saved && f.capture.starts == starts,
+                  "Illumination leaves the saved center and one-check count intact")
+            f.end()
+        }
+        for cancellation in ["manual", "sleep", "disable", "face-left", "stale", "failure"] {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 8); await settle(); f.advance(0.8, yaw: 8)
+            f.frame(yaw: nil, luminance: 0.05); f.advance(0.34, yaw: 8); f.frame(yaw: nil, luminance: 0.05)
+            f.coordinator.toggleAssistLight(); check(f.light.isOn, "Fixture begins with explicit face light")
+            switch cancellation {
+            case "manual": f.coordinator.cancelPendingRecovery()
+            case "sleep": f.coordinator.setSessionActive(false)
+            case "disable": f.coordinator.disable()
+            case "face-left": f.frame(yaw: nil, faces: 0); f.advance(0.34, yaw: 8); f.frame(yaw: nil, faces: 0)
+            case "stale": f.advance(0.9, yaw: 8)
+            default: f.camera.stop(); f.coordinator.update(layoutKey: f.layout)
+            }
+            check(!f.light.isOn && !f.coordinator.coach.isAssistLightOn,
+                  "\(cancellation) cannot leave the face light on")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 8); await settle(); f.advance(0.8, yaw: 8); f.frames(3, cameraYaw: 0, motionYaw: 8)
+            let saved = f.defaults.data(forKey: "cameraScreenCenterV1"), starts = f.capture.starts
+            f.advance(0.2, yaw: 28); f.coordinator.resumeTracking(); await settle()
+            check(f.coordinator.trackingValid && close(f.coordinator.yawDegrees, 20) && f.capture.starts == starts,
+                  "Enable preserves a valid twenty-degree turn without a second center check")
+            f.motion.fusionSample = nil
+            f.advance(0.02, yaw: 28); await settle()
+            check(f.capture.starts == starts + 1,
+                  "Losing a previously aligned reference once allows one same-epoch recovery")
+            f.camera.stop(); f.coordinator.update(layoutKey: f.layout)
+            f.advance(2, yaw: 28); await settle()
+            check(f.capture.starts == starts + 1,
+                  "A failed recovery cannot become an endless same-epoch camera loop")
+            f.coordinator.cancelPendingRecovery()
+            f.coordinator.resumeTracking(); await settle()
+            check(f.capture.starts == starts + 2,
+                  "Explicit Enable rearms a paused saved-reference recovery")
+            f.coordinator.resumeTracking(); await settle()
+            check(f.capture.starts == starts + 2, "Enable during the active recovery does not restart it")
+            f.advance(0.8, yaw: 8); f.frames(3, cameraYaw: 0, motionYaw: 8)
+            check(f.coordinator.trackingValid && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                  "Enable recovery leaves the durable center unchanged")
             f.end()
         }
         print("PASS: \(checks) centered coordinator/service/fusion checks; injected inputs, no hardware access")

@@ -11,6 +11,40 @@ struct VeilDisplayInfo: Identifiable, Equatable {
     let backingScale: CGFloat
 }
 
+/// Only values that affect capture geometry or its input-blocking surface.
+/// Display names and enumeration order can change without changing capture.
+struct VeilDisplayCaptureLayout: Equatable {
+    let id: UInt32
+    let stableID: String
+    let frame: NSRect
+    let backingScale: CGFloat
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let menuBand: CGFloat
+}
+
+/// The capture owner compares notifications against its committed startup
+/// layout. A notification alone is not evidence that running streams changed.
+struct VeilDisplayConfigurationGuard {
+    private var baseline: [VeilDisplayCaptureLayout]?
+
+    mutating func begin(_ layout: [VeilDisplayCaptureLayout]) { baseline = normalized(layout) }
+    mutating func stop() { baseline = nil }
+
+    mutating func shouldRebuild(current: [VeilDisplayCaptureLayout]?, isRunning: Bool) -> Bool {
+        guard isRunning else { return false }
+        let next = current.map(normalized)
+        guard next != baseline else { return false }
+        // Keep guarding the fault cover layout until stop/re-enable. Duplicate
+        // notifications must not recreate those windows either.
+        baseline = next
+        return true
+    }
+    private func normalized(_ layout: [VeilDisplayCaptureLayout]) -> [VeilDisplayCaptureLayout] {
+        layout.sorted { $0.id < $1.id }
+    }
+}
+
 private final class VeilPointerBlockerView: NSView {
     var onBlockedPointer: (() -> Void)?
     override var isOpaque: Bool { false }
@@ -155,20 +189,20 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             window.orderFrontRegardless()
         }
     }
-    private struct DisplayIdentity: Equatable {
-        let id: UInt32
-        let frame: NSRect
-        let backingScale: CGFloat
-    }
-    private static func identities(for screens: [NSScreen]) throws -> [DisplayIdentity] {
+    private static func identities(for screens: [NSScreen]) throws -> [VeilDisplayCaptureLayout] {
         try screens.map { screen in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
                 throw VeilRenderError.unavailable("An active display has no capture identifier.")
             }
-            return DisplayIdentity(id: number.uint32Value, frame: screen.frame, backingScale: screen.backingScaleFactor)
+            let id = number.uint32Value
+            let stableID = CGDisplayCreateUUIDFromDisplayID(id).map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String }
+                ?? "display-id-\(id)"
+            return VeilDisplayCaptureLayout(id: id, stableID: stableID, frame: screen.frame,
+                backingScale: screen.backingScaleFactor, pixelWidth: CGDisplayPixelsWide(id), pixelHeight: CGDisplayPixelsHigh(id),
+                menuBand: max(NSStatusBar.system.thickness, screen.safeAreaInsets.top))
         }.sorted { $0.id < $1.id }
     }
-    private func validateStartup(generation run: UInt64, initialDisplays: [DisplayIdentity]) throws {
+    private func validateStartup(generation run: UInt64, initialDisplays: [VeilDisplayCaptureLayout]) throws {
         guard run == generation else { throw CancellationError() }
         guard !failed else {
             throw VeilRenderError.unavailable(failureReason ?? "Capture failed while starting. Enable again.")
@@ -178,6 +212,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         }
     }
 
+    private var displayConfiguration = VeilDisplayConfigurationGuard()
     private var sessions: [DisplaySession] = []
     private var generation: UInt64 = 0
     private var failed = false
@@ -275,6 +310,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 try validateStartup(generation: run, initialDisplays: initialDisplays)
             }
             try validateStartup(generation: run, initialDisplays: initialDisplays)
+            displayConfiguration.begin(initialDisplays)
             isRunning = true
             status = "Waiting for first desktop frames…"
             applyEffect()
@@ -293,6 +329,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
 
     /// Explicit disable always hides synchronously. Obsolete callbacks cannot restore coverage.
     func stop() {
+        displayConfiguration.stop()
         generation &+= 1
         let old = sessions
         sessions.removeAll()
@@ -348,7 +385,8 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     }
     private func displaysChanged() {
         refreshDisplays()
-        guard isRunning else { return }
+        guard displayConfiguration.shouldRebuild(current: try? Self.identities(for: NSScreen.screens),
+                                                  isRunning: isRunning) else { return }
         captureFailed("Display arrangement changed. Pause and enable again to rebuild capture.", generation: generation)
         // Disconnected-screen windows can be moved by AppKit onto another screen.
         // Replace fault covers using only the user's currently connected selection.

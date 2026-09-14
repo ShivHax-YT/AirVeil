@@ -40,9 +40,9 @@ import Foundation
               "Excessive pitch asks for a level head before recovery")
         check(NotchCoachGuidance.observation(frame(luminance: 0.05), requiresFrontalPose: true).issue == nil,
               "A confident usable face never gets a spurious low-light warning")
-        check(NotchCoachGuidance.observation(frame(confidence: 0.2, luminance: 0.05), requiresFrontalPose: true).issue == .lowLight,
+        check(NotchCoachGuidance.observation(frame(confidence: 0.45, luminance: 0.05), requiresFrontalPose: true).issue == .lowLight,
               "Measured darkness combined with poor confidence provides light guidance")
-        for luminance: Double? in [nil, .nan, -1, 0.6] {
+        for luminance: Double? in [nil, .nan, -1, 0.01, 0.6] {
             check(NotchCoachGuidance.observation(frame(faces: 0, yaw: nil, luminance: luminance), requiresFrontalPose: true).issue == .faceMissing,
                   "Missing, invalid, or adequate brightness never becomes a low-light claim")
         }
@@ -50,6 +50,17 @@ import Foundation
               "Multiple visible faces request one wearer even in a dim frame")
         check(NotchCoachGuidance.observation(frame(bounds: CGRect(x: 0.48, y: 0.48, width: 0.05, height: 0.05)), requiresFrontalPose: true).issue == .framing,
               "A distant tiny face cannot provide a usable hold")
+        let dimPose = NotchCoachGuidance.observation(frame(yaw: nil, luminance: 0.08), requiresFrontalPose: true)
+        check(dimPose.phase == .lighting && dimPose.needsLightHelp && !dimPose.isAssistLightOn,
+              "A visible close face with unreadable pose in measured darkness offers a default-off light card")
+        check(NotchCoachGuidance.observation(frame(yaw: nil, confidence: 0.2, luminance: 0.02), requiresFrontalPose: true).issue == .faceMissing,
+              "Very weak face evidence cannot claim a wearer needs illumination")
+        check(NotchCoachGuidance.observation(frame(yaw: 22, confidence: 0.45, luminance: 0.02), requiresFrontalPose: true).issue == .pose,
+              "An observable off-axis turn asks for center rather than blaming the light")
+        check(NotchCoachGuidance.observation(frame(yaw: nil, bounds: CGRect(x: 0.48, y: 0.48, width: 0.05, height: 0.05), luminance: 0.02), requiresFrontalPose: true).issue == .framing,
+              "A far-away dim face asks for proximity and cannot offer illumination")
+        check(NotchCoachGuidance.observation(frame(yaw: nil, luminance: 0.5), requiresFrontalPose: true).issue == .pose,
+              "Unreadable direction with adequate illumination never becomes a lighting failure")
         print("PASS: \(checks) notch guidance, mirrored geometry, and measured-light checks")
     }
 }

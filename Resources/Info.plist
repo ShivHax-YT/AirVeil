@@ -15,15 +15,17 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.10.0</string>
+	<string>0.11.0</string>
 	<key>CFBundleVersion</key>
-	<string>13</string>
+	<string>14</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>AirVeil reads whether either of your connected AirPods is in ear so removal can black out the display and reinsertion can restore brightness. Status stays on this Mac.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>AirVeil uses AirPods head motion to blur the opposite side of your screen when you turn your head. Motion is processed locally.</string>
 	<key>NSScreenCaptureUsageDescription</key>

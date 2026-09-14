@@ -69,6 +69,13 @@ enum VeilMath {
                               : VeilStrength(left: strength, right: 0)
     }
 
+    static func target(yawDegrees: Double, leftOnset: Double, rightOnset: Double,
+                       full: Double = 32, wholeScreen: Bool = false) -> VeilStrength {
+        guard leftOnset.isFinite, rightOnset.isFinite, leftOnset >= 0, rightOnset >= 0 else { return .zero }
+        return target(yawDegrees: yawDegrees, onset: yawDegrees >= 0 ? leftOnset : rightOnset,
+                      full: full, wholeScreen: wholeScreen)
+    }
+
     /// Exact first-order response per channel; release takes twice the attack
     /// time. The coordinator handles suspension/staleness before calling this.
     static func advance(current: VeilStrength, target: VeilStrength,

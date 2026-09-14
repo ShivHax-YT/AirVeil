@@ -11,6 +11,7 @@ struct TrackingSnapshot: Equatable {
     var trackingValid = false
     var hasSavedCenter = false
     var centerBusy = false
+    var canEnable = false
 }
 
 /// Only the small tracking controls observe telemetry. Motion and animation

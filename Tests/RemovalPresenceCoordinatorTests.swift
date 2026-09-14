@@ -84,6 +84,7 @@ import CoreGraphics
     var sleepGate: RemovalTestGate?
     var prepares = 0
     var sleeps = 0
+    var sleepFails = false
     lazy var coordinator = RemovalPresenceCoordinator(presence: presence, dimmer: dimmer,
         prepareCamera: { [weak self] in
             guard let self else { return }
@@ -93,6 +94,7 @@ import CoreGraphics
             guard let self else { return }
             sleeps += 1
             if let sleepGate { await sleepGate.wait() }
+            if sleepFails { throw NSError(domain: "FakeSleep", code: 1) }
         })
     func begin(now: Double = 100, allowSleep: Bool = true) {
         coordinator.begin(reference: reference, now: now, allowSleepBeforePresence: allowSleep)
@@ -121,9 +123,9 @@ import CoreGraphics
             f.coordinator.update(now: 101); await settle()
             for time in [101.1, 101.2, 101.3] { f.coordinator.update(now: time) }
             await settle()
-            check(f.dimmer.targets == [0.08] && f.dimmer.isDimmed, "Repeated present ticks request one default dim")
+            check(f.dimmer.targets == [0] && f.dimmer.isDimmed, "Repeated present ticks request one zero-brightness blackout")
             f.coordinator.updateTarget(0.1); f.coordinator.updateTarget(0.1); await settle()
-            check(f.dimmer.targets == [0.08, 0.1], "Repeated target values do not overwrite the dim baseline")
+            check(f.dimmer.targets == [0, 0.1], "Repeated target values do not overwrite the dim baseline")
             f.presence.state = .unknown
             f.coordinator.update(now: 102); f.coordinator.update(now: 109); await settle()
             check(f.sleeps == 0 && f.dimmer.isDimmed, "Brief uncertain presence keeps the existing dim without sleeping")
@@ -134,6 +136,27 @@ import CoreGraphics
             check(f.sleeps == 1 && f.coordinator.phase == .sleeping, "Sustained unknown invokes the explicit bounded fallback")
             f.coordinator.update(now: 130); await settle()
             check(f.sleeps == 1 && !f.presence.running, "An episode sleeps once and stops its camera")
+        }
+        do {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let restores = f.dimmer.restores
+            check(f.dimmer.targets == [0] && f.sleeps == 0,
+                  "Zero brightness for an occupied seat never invokes display sleep")
+            f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
+            check(f.sleeps == 1 && f.dimmer.suspends == 1 && f.dimmer.restores == restores && f.dimmer.hasPendingRestore,
+                  "Leaving the blacked-out seat releases idle protection without flashing original brightness before sleep")
+            let restored = await f.coordinator.recoverAfterActivation()
+            check(restored && f.dimmer.restores == restores + 1 && !f.dimmer.hasPendingRestore,
+                  "Only a verified active session restores the retained blackout baseline after departure")
+        }
+        do {
+            let f = RemovalFixture(); f.sleepFails = true; f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let restores = f.dimmer.restores
+            f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
+            check(f.sleeps == 1 && f.coordinator.phase == .failed && f.dimmer.restores == restores + 1 && !f.dimmer.isDimmed,
+                  "Failed display sleep restores an active user's brightness instead of stranding the panel at zero")
         }
         do {
             let f = RemovalFixture(); f.prepareGate = RemovalTestGate()
@@ -168,7 +191,7 @@ import CoreGraphics
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             f.coordinator.updateTarget(0.09); await settle()
             f.coordinator.updateTarget(0.09)
-            check(f.dimmer.targets == [0.08, 0.09] && gate.waiters == 2,
+            check(f.dimmer.targets == [0, 0.09] && gate.waiters == 2,
                   "An in-flight dim accepts the latest target once")
             gate.release(); f.dimmer.dimGate = nil; await settle()
             check(f.dimmer.isDimmed && !f.coordinator.isBusy && f.coordinator.phase == .present,

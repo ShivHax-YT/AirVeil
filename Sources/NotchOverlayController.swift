@@ -23,7 +23,7 @@ private final class NotchPanel: NSPanel {
     private var demoTask: Task<Void, Never>?
     private var active = true
     private var pointerInside = false
-    private var contentHeight: CGFloat = 232
+    private var contentHeight: CGFloat = 190
 
     init(model: AppModel) {
         self.model = model
@@ -31,6 +31,7 @@ private final class NotchPanel: NSPanel {
         presentation.refresh = { [weak self] in self?.retry() }
         presentation.cancel = { [weak self] in self?.cancel() }
         presentation.settings = { [weak self] in self?.model.showWindow?() }
+        presentation.toggleAssistLight = { [weak self] in self?.model.cameraHeading.toggleAssistLight() }
         presentation.toggleEffect = { [weak self] in
             guard let self else { return }
             if model.enabled || model.starting { model.pause() } else { model.enable() }
@@ -116,7 +117,8 @@ private final class NotchPanel: NSPanel {
             presentation.controls = false; presentation.snapshot = snapshot
             show()
         } else if !presentation.demo {
-            presentation.snapshot = snapshot
+            // Keep the accepted face (or last guidance) while the silhouette
+            // retracts. Swapping to idle here flashes the camera during close.
             hide()
         }
     }
@@ -157,29 +159,43 @@ private final class NotchPanel: NSPanel {
         hoverWork?.cancel(); hoverWork = nil; pointerInside = false
         closeWork?.cancel()
         presentation.expanded = false
+        presentation.hovering = false
         panel?.ignoresMouseEvents = true
-        if immediately { panel?.orderOut(nil); return }
+        if immediately {
+            panel?.orderOut(nil)
+            clearDismissedSnapshot()
+            return
+        }
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.presentation.expanded else { return }
             self.panel?.orderOut(nil)
+            self.clearDismissedSnapshot()
         }
         closeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.50, execute: work)
+    }
+    private func clearDismissedSnapshot() {
+        guard !presentation.expanded, !presentation.demo,
+              model.cameraHeading.coach.phase == .idle else { return }
+        presentation.snapshot = NotchCoachSnapshot()
     }
     private var visibleContentRect: CGRect? {
         guard let panel, let geometry else { return nil }
         let height = contentHeight
-        return CGRect(x: panel.frame.minX, y: panel.frame.maxY - geometry.topInset - height,
-                      width: panel.frame.width, height: height)
+        return CGRect(x: panel.frame.midX - presentation.contentWidth / 2, y: panel.frame.maxY - geometry.topInset - height,
+                      width: presentation.contentWidth, height: height)
     }
     private func updateHitTesting() {
-        panel?.ignoresMouseEvents = !presentation.expanded || !contentContains(NSEvent.mouseLocation)
+        let inside = presentation.expanded && contentContains(NSEvent.mouseLocation)
+        if presentation.hovering != inside { presentation.hovering = inside }
+        panel?.ignoresMouseEvents = !inside
     }
     private func contentContains(_ point: CGPoint) -> Bool {
         guard let panel, let geometry, visibleContentRect?.contains(point) == true else { return false }
         let local = CGPoint(x: point.x - panel.frame.minX, y: panel.frame.maxY - point.y)
         let bounds = CGRect(x: 0, y: 0, width: panel.frame.width, height: geometry.topInset + contentHeight)
-        return NotchCanopy(hardwareWidth: geometry.hardwareWidth, topInset: geometry.topInset).path(in: bounds).contains(local)
+        return NotchCanopy(hardwareWidth: geometry.hardwareWidth, topInset: geometry.topInset,
+                           bodyWidth: presentation.contentWidth, bodyHeight: contentHeight).path(in: bounds).contains(local)
     }
     private func pointerMoved() {
         guard active, let geometry else { return }
@@ -208,9 +224,9 @@ private final class NotchPanel: NSPanel {
             let stages: [(NotchCoachSnapshot, UInt64)] = [
                 (.init(phase: .seeking, title: "Find your frame", detail: "A small camera preview lives here."), 1_200_000_000),
                 (.init(phase: .offCenter, title: "Look straight ahead", detail: "13° from center. Aim within 5°.", horizontalError: -0.3, issue: .pose), 1_600_000_000),
-                (.init(phase: .seeking, title: "More light needed", detail: "Light your face from the front.", issue: .lowLight), 1_500_000_000),
+                (.init(phase: .lighting, title: "More light needed", detail: "Face light starts off.", issue: .lowLight), 1_500_000_000),
                 (.init(phase: .holding, title: "Hold at center", detail: "One quick camera and AirPods check.", progress: 0.65), 1_300_000_000),
-                (.init(phase: .success, title: "Ready", detail: "", progress: 1), 1_100_000_000)
+                (.init(phase: .success, title: "Ready", detail: "", progress: 1), 1_450_000_000)
             ]
             for (snapshot, duration) in stages {
                 guard !Task.isCancelled else { return }

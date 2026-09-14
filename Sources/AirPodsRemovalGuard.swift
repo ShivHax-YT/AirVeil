@@ -1,7 +1,7 @@
 import Foundation
 
-/// An explicit headphone disconnect may mean ear removal or Bluetooth loss.
-/// Sample gaps and calibration changes never enter this policy as removals.
+/// The caller supplies explicit headphone disconnection or validated per-bud
+/// loss. Sample gaps, source handoffs, and calibration changes are not removals.
 struct AirPodsRemovalGuard {
     private(set) var armed = false
     private(set) var deadline: TimeInterval?

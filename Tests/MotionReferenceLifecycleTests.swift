@@ -26,6 +26,7 @@ private final class SyntheticAttitude: MotionAttitude {
     var connectionStops = 0
     var connection: (@MainActor (Bool) -> Void)?
     var sample: (@Sendable (MotionReading?, String?) -> Void)?
+    var wornMask: UInt8?
     func startConnectionUpdates(_ handler: @escaping @MainActor (Bool) -> Void) {
         connectionStarts += 1; connection = handler
     }
@@ -35,6 +36,9 @@ private final class SyntheticAttitude: MotionAttitude {
         streamStarts += 1; sample = handler
     }
     func stopMotionUpdates() { streamStops += 1 }
+    func readWearState(now: TimeInterval) -> AirPodsWearReading? {
+        wornMask.map { .init(deviceToken: "test-headset", wornMask: $0, receipt: now) }
+    }
 }
 
 @main @MainActor struct MotionReferenceLifecycleTests {
@@ -183,6 +187,83 @@ private final class SyntheticAttitude: MotionAttitude {
         check(factories == 2 && !service.referenceUsable,
               "New manager after deliberate stop requires explicit frame establishment")
         service.stop()
+        do {
+            let backlogClock = SensorClock(), backlogTransport = FakeHeadphoneTransport()
+            let backlog = MotionService(transportFactory: { backlogTransport },
+                now: { backlogClock.time }, usesAutomaticWatchdog: false)
+            func acquire(dt: Double, drain: Bool, source: CMDeviceMotion.SensorLocation = .headphoneLeft) {
+                backlogClock.time += dt
+                backlogTransport.sample?(MotionReading(attitude: SyntheticAttitude(0),
+                    timestamp: backlogClock.time - 1000, receipt: backlogClock.time,
+                    quaternion: VeilQuaternion(x: 0, y: 0, z: 0, w: 1), speed: 0, source: source), nil)
+                if drain { backlog.checkFreshness() }
+            }
+            backlog.start(); acquire(dt: 0.02, drain: true)
+            let epoch = backlog.fusionEpoch, firstReceipt = backlog.fusionSample!.receiptHostTime
+            for _ in 0..<50 { acquire(dt: 0.02, drain: false) }
+            backlog.checkFreshness()
+            check(backlog.isFresh && backlog.fusionEpoch == epoch &&
+                  backlog.fusionSample!.receiptHostTime - firstReceipt > 0.9 &&
+                  backlog.fusionSample!.acquisitionContinuityVerified,
+                  "A busy app UI may coalesce one second of continuous acquisition without invalidating the sensor epoch")
+            acquire(dt: 0.35, drain: true)
+            check(backlog.fusionEpoch > epoch,
+                  "An actual acquisition gap above300ms still invalidates even below the freshness timeout")
+            let afterGap = backlog.fusionEpoch
+            acquire(dt: 0.02, drain: true, source: .headphoneRight)
+            check(backlog.fusionEpoch > afterGap,
+                  "The verified continuity flag never allows an AirPod source change to reuse its old frame")
+            check(backlog.removalEventCount == 0 && backlog.removalConnectionState == .connected,
+                  "Physical acquisition gaps and source handoffs never fabricate ear removal")
+            backlog.stop()
+        }
+        for source in [CMDeviceMotion.SensorLocation.headphoneLeft, .headphoneRight] {
+            let wearClock = SensorClock(), wearTransport = FakeHeadphoneTransport()
+            let wear = MotionService(transportFactory: { wearTransport },
+                now: { wearClock.time }, usesAutomaticWatchdog: false)
+            wear.monitorsIndividualAirPods = true
+            func poll(_ mask: UInt8?) {
+                wearTransport.wornMask = mask
+                for _ in 0..<3 {
+                    wearClock.time += 0.125
+                    wearTransport.sample?(MotionReading(attitude: SyntheticAttitude(0),
+                        timestamp: wearClock.time - 1000, receipt: wearClock.time,
+                        quaternion: VeilQuaternion(x: 0, y: 0, z: 0, w: 1), speed: 0, source: source), nil)
+                    wear.checkFreshness()
+                }
+            }
+            wear.start(); poll(3); poll(3)
+            // Remove the bud opposite the one supplying motion: Core Motion
+            // can keep streaming with no delegate disconnect or source switch.
+            let remaining: UInt8 = source == .headphoneLeft ? 1 : 2
+            poll(remaining); poll(remaining)
+            check(wear.connectionState == .connected && wear.isFresh && wear.disconnectEventCount == 0 &&
+                  wear.removalConnectionState == .disconnected && wear.removalEventCount == 1,
+                  "Either nonstreaming bud can trigger removal independently of live motion")
+            poll(nil); poll(nil)
+            check(wear.removalConnectionState == .disconnected && wear.removalEventCount == 1,
+                  "A disappearing metadata feed cannot let remaining-bud motion restore blackout")
+            poll(3); poll(3)
+            check(wear.removalConnectionState == .connected && wear.removalEventCount == 1,
+                  "Either removed bud returning restores while the original motion source remains unchanged")
+            poll(remaining); poll(remaining)
+            let event = wear.removalEventCount
+            wearTransport.connection?(false)
+            check(wear.removalEventCount == event && wear.disconnectEventCount == 1,
+                  "Removing the second bud does not cancel or replace the ongoing per-bud episode")
+            wearTransport.wornMask = nil
+            wearTransport.connection?(true)
+            check(wear.connectionState == .connected && wear.removalConnectionState == .disconnected,
+                  "A transport reconnect cannot erase known per-bud removal while that AirPod may still be out")
+            poll(nil); poll(nil)
+            check(wear.removalConnectionState == .disconnected,
+                  "An unavailable metadata feed after transport reconnect still cannot fabricate reinsertion")
+            poll(3); poll(3); poll(remaining); poll(remaining)
+            wear.clearRemovalEvidence()
+            check(wear.removalConnectionState == .connected,
+                  "Visible manual recovery can clear a stale metadata latch without resetting head calibration")
+            wear.stop()
+        }
         print("PASS: \(checks) real MotionService reference lifecycle assertions; sensor transport/attitude/clock injected, no hardware access")
     }
 }

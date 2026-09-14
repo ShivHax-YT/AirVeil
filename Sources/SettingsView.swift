@@ -46,7 +46,7 @@ private struct EnableEffectButton: View {
     let model: AppModel
     var body: some View {
         Button("Enable desktop effect") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
-            .disabled(!presentation.snapshot.trackingValid || model.selectedDisplayCount == 0)
+            .disabled(!presentation.snapshot.canEnable)
     }
 }
 private struct RefreshDirectionButton: View {
@@ -158,7 +158,7 @@ struct SettingsView: View {
                             Spacer()
                             Button("Turn camera assistance off") { model.disableCameraAssistance() }
                         }
-                        Text("Face straight ahead, within 5° of center, and hold briefly. Setup and later checks each finish in one pass. Keep the Mac camera and display in the same position.")
+                        Text("Face straight ahead, within 5° of center, and hold briefly. Each check finishes in one pass. If your face needs more light, the notch offers Face light. It starts off and switches off after the check.")
                             .font(.caption2).foregroundStyle(.secondary)
                     } else {
                         Button(model.cameraHeading.isBusy ? "Waiting for camera permission…" : "Enable camera assistance") { model.enableCameraAssistance() }
@@ -201,21 +201,21 @@ struct SettingsView: View {
                             .toggleStyle(.switch).controlSize(.small)
                         if model.dimWhilePresent {
                             HStack {
-                                Text("Dimmed brightness")
-                                Slider(value: $model.removalBrightness, in: 0.05...0.50, step: 0.01)
+                                Text("Screen brightness while seated")
+                                Slider(value: $model.removalBrightness, in: 0...0.50, step: 0.01)
                                     .accessibilityLabel("Dimmed brightness")
                                 Text("\(Int((model.removalBrightness * 100).rounded()))%")
                                     .monospacedDigit().frame(width: 38, alignment: .trailing)
                             }
                             Text(model.cameraHeading.isEnabled
-                                ? (model.presenceReady ? "Your seat is ready. Turning away is fine. Put AirPods back in to restore your brightness." : "Use Set center once to remember your seat before removing AirPods.")
+                                ? (model.presenceReady ? "Your seat is ready. Turning away is fine. At 0%, the display goes black without locking. Put an AirPod back in to restore your brightness." : "Use Set center once to remember your seat before removing AirPods.")
                                 : "Enable camera assistance and use Set center to check your seat.")
                                 .font(.caption).foregroundStyle(.secondary)
                             Text("The built-in camera stays on while AirPods are removed. Foreground position and size help exclude background or side occupants. No identity recognition or recordings. If you leave, or the view cannot be confirmed, displays turn off. Only the built-in display is dimmed.")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                     }
-                    Text("Keep Automatic Ear Detection on. Removing both earbuds or disconnecting AirPods starts the check after a brief delay. A short tracking interruption only pauses the blur.")
+                    Text("Keep Automatic Ear Detection on. Removing either AirPod starts the check when its in-ear status is available. Disconnecting AirPods also starts it; a short tracking interruption only pauses the blur.")
                         .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment:.top) {
                         Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")
@@ -235,8 +235,8 @@ struct SettingsView: View {
                         Text("Directional half").tag(false)
                         Text("Whole-screen sweep").tag(true)
                     }.pickerStyle(.segmented).accessibilityLabel("Screen coverage")
-                    setting("Starts blurring",value:$model.onset,range:0...25,unit:"°")
-                    setting("Fully obscured",value:$model.fullAngle,range:26...70,unit:"°")
+                    BlurOnsetDial(left: $model.leftOnset, right: $model.rightOnset)
+                    setting("Fully obscured",value:$model.fullAngle,range:model.minimumFullAngle...70,unit:"°")
                     HStack {
                         Toggle("Opaque cover",isOn:$model.opaque).toggleStyle(.switch)
                         Spacer()

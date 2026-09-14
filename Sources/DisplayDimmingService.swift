@@ -80,8 +80,8 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     var hasPendingRestore: Bool { record != nil }
     var keepsDisplayAwake: Bool { assertion != nil }
     var isSuspended: Bool { desired == .suspended }
-    static let defaultTargetBrightness = 0.08
-    static let targetRange = 0.05...0.5
+    static let defaultTargetBrightness = 0.0
+    static let targetRange = 0.0...0.5
     /// Permits hardware quantization, but is much smaller than one normal key step.
     private static let ownershipTolerance = 0.0125
 
@@ -127,7 +127,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     /// Call only while the removal policy explicitly requests dimming. The
     /// assertion prevents idle display sleep, never manual lock or system sleep.
     @discardableResult
-    func setDimmed(_ dimmed: Bool, targetBrightness: Double = 0.08,
+    func setDimmed(_ dimmed: Bool, targetBrightness: Double = 0,
                    keepDisplayAwake: Bool = true) async -> Bool {
         guard dimmed else { return await restore() }
         guard !isSuspended else { return false }
@@ -270,7 +270,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         if abs(current.brightness - applied) <= 0.000001 { actual = current }
         else { actual = try await brightness.write(applied, displayID: original.displayID) }
         try validate(actual, matching: original.displayID)
-        guard abs(actual.brightness - applied) <= Self.ownershipTolerance else { throw DisplayDimmingError.verificationFailed }
+        guard matchesRequestedBrightness(actual.brightness, requested: applied) else { throw DisplayDimmingError.verificationFailed }
         journal.lastApplied = actual.brightness; journal.pendingTarget = nil
         try store.save(journal); record = journal
         isDimmed = true
@@ -302,7 +302,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
             try store.save(journal); record = journal
             let restored = try await brightness.write(journal.baseline, displayID: journal.displayID)
             try validate(restored, matching: journal.displayID)
-            guard abs(restored.brightness - journal.baseline) <= Self.ownershipTolerance else { throw DisplayDimmingError.verificationFailed }
+            guard matchesRequestedBrightness(restored.brightness, requested: journal.baseline) else { throw DisplayDimmingError.verificationFailed }
         }
         try store.clear(); record = nil
         isDimmed = false; lastError = nil
@@ -319,6 +319,11 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     private func owns(_ value: Double, record: DisplayBrightnessRestoreRecord) -> Bool {
         abs(value - record.lastApplied) <= Self.ownershipTolerance ||
         record.pendingTarget.map { abs(value - $0) <= Self.ownershipTolerance } == true
+    }
+    private func matchesRequestedBrightness(_ actual: Double, requested: Double) -> Bool {
+        // "0%" must be zero, not a visible 1% value hidden by the normal
+        // quantization tolerance used by this display's nonzero slider values.
+        abs(actual - requested) <= (requested == 0 ? 0.000001 : Self.ownershipTolerance)
     }
     private func relinquishOwnership() throws {
         // Brightness ownership and seated-presence idle protection are

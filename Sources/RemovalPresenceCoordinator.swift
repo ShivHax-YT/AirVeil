@@ -60,7 +60,7 @@ enum RemovalPresencePhase: String, Equatable {
     private var departureArmed = false
     private var unknownSince: Double?
     private var lastTime = 0.0
-    private var target = 0.08
+    private var target = 0.0
     private var requestedTarget: Double?
     private var dimError: String?
 
@@ -82,7 +82,7 @@ enum RemovalPresencePhase: String, Equatable {
     /// Call once for an explicit, debounced removal event. A resumed episode
     /// requires fresh presence before it may put a manually woken display back
     /// to sleep. No reference means no invented foreground seat.
-    func begin(reference: PresenceSeatReference?, targetBrightness: Double = 0.08,
+    func begin(reference: PresenceSeatReference?, targetBrightness: Double = 0,
                now: Double, allowSleepBeforePresence: Bool = true) {
         guard !inactive else { status = "Presence checks are paused while the session is inactive."; return }
         guard now.isFinite, now >= 0 else { cancel(); status = "Presence timing is unavailable."; return }
@@ -216,12 +216,14 @@ enum RemovalPresencePhase: String, Equatable {
         sleepConsumed = true
         let ticket = invalidate()
         isBusy = true; phase = .finishing; status = reason
-        let cleanup = startCleanup(ticket: ticket, suspend: false)
+        let cleanup = startCleanup(ticket: ticket, suspend: true)
         Task { [weak self] in
             _ = await cleanup.value
             guard let self, self.current(ticket), self.sleepConsumed else { return }
-            // A brightness restore failure must not disable the existing
-            // security action. Stop/restore is attempted before that action.
+            // Preserve black through the transition to display sleep. Raising
+            // brightness here would flash the desktop before it locks. Release
+            // idle protection now; the durable baseline is restored after an
+            // independently confirmed awake/unlocked session or fresh rewear.
             do {
                 try await self.requestDisplaySleep()
                 guard self.current(ticket) else { return }
@@ -229,8 +231,11 @@ enum RemovalPresencePhase: String, Equatable {
                 self.status = "Display sleep was requested. Manual wake remains available."
             } catch {
                 guard self.current(ticket) else { return }
+                let failure = error.localizedDescription
+                _ = await self.startCleanup(ticket: ticket, suspend: false).value
+                guard self.current(ticket) else { return }
                 self.isActive = false; self.isBusy = false; self.phase = .failed
-                self.status = "Display sleep could not be requested: \(error.localizedDescription)"
+                self.status = "Display sleep could not be requested: \(failure)"
             }
         }
     }
@@ -301,6 +306,6 @@ enum RemovalPresencePhase: String, Equatable {
     }
 
     private func normalizedTarget(_ value: Double) -> Double {
-        value.isFinite ? min(0.5, max(0.05, value)) : 0.08
+        value.isFinite ? min(0.5, max(0, value)) : 0
     }
 }
