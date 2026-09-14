@@ -130,6 +130,8 @@ Native desktop capture/output resolution and the requested maximum 60 fps captur
 
 The [latest notch motion study](research/NOTCH-REDESIGN-STUDY.md) records frame-by-frame reference analysis. [Proposed next features](research/NEXT-FEATURES.md) ranks a guided setup rehearsal and named workspace profiles; these proposals are not included in the current update.
 
+The [feature opportunity report](research/FEATURE-RESEARCH-2026-09.md) evaluates eight additional privacy, reliability, and usability ideas against macOS APIs and the 0.13.0 release. It includes ranked recommendations, proposed flows, and validation gates; no proposed features are implemented.
+
 Four research reports precede implementation:
 
 - [Sensor API](research/01-sensor-api.md)
