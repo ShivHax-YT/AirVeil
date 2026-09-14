@@ -14,7 +14,7 @@ The only AppModel integration is policy delivery, wake refresh, reset, and teard
 - New production-policy tests: full mode/thermal/power matrix, initial read, invalid saved values, persistence/reset, background notifications, explicit refresh, duplicate suppression, and observer shutdown.
 - New production-cadence tests: rapid changes, serialized reconciliation, failure retention/no retry loop, stopped and replacement sessions, invalid requests, and independent displays.
 - `bash scripts/test-notch-ui.sh`: passed 18 geometry and 43 native lifecycle checks; rendered 27 notch states and two face-light frames.
-- `bash scripts/test-settings-tour-ui.sh`: generated 60 native tour renders and eight energy-control renders without starting sensors or desktop capture. New energy card inspected in light/dark appearances. The locked/offscreen tour rendering did not establish scrolling to the target; live verification remains pending.
+- `bash scripts/test-settings-tour-ui.sh`: generated 60 native tour renders and eight energy-control renders without starting sensors or desktop capture. New energy card inspected in light/dark appearances. The offscreen harness did not establish scrolling; the installed live walkthrough subsequently confirmed correct camera and energy spotlight positioning and traversal of all 15 steps.
 - `git diff --check`: passed.
 - Signed macOS 14-target Apple silicon build and compressed DMG verification passed. Read-only mount verified app, Applications link, install notes, version/build, strict signature, and executable equality with the signed build; volume detached.
 
@@ -24,4 +24,4 @@ Executable SHA-256: `9940d965dd9aac8a5bcb7b542fb47fa6517f96ca967777edebcc2327748
 
 ## Remaining acceptance
 
-The Mac was locked during the native UI handoff. Installed picker/persistence and live tutorial spotlight verification, installation, and GitHub publication are pending unlock. No physical AirPods, camera, brightness, Low Power Mode toggle, thermal stress, or battery-runtime measurement was performed. Existing physical wearer acceptance remains separate from software regression evidence. This build remains development-signed and not Apple-notarized.
+Installed `/Applications/AirVeil.app` matches the signed executable above. Live checks passed all three energy selections, real Low Power Mode explanation, saved selection across normal quit/relaunch, restored Automatic mode, all 15 Settings tour steps, and simulated positive/negative coverage plus centering. No production UI correction was needed. The user explicitly deferred physical AirPods testing. Twenty-six old app bundles were moved to Finder Trash. GitHub publication follows these checks. No physical AirPods, camera, brightness, Low Power Mode toggle, thermal stress, or battery-runtime measurement was performed. Existing physical wearer acceptance remains separate from software regression evidence. This build remains development-signed and not Apple-notarized.

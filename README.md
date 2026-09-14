@@ -1,10 +1,12 @@
 # AirVeil
 
+**[Download AirVeil 0.14.0 RC 1 — macOS DMG](https://github.com/ShivHax-YT/AirVeil/releases/download/v0.14.0-rc.1/AirVeil-0.14.0-apple-silicon.dmg)** · [Latest release and installation notes](https://github.com/ShivHax-YT/AirVeil/releases/latest)
+
 AirVeil is a native macOS menu-bar app that uses AirPods head motion to progressively obscure the opposite side of your desktop. Turn left to blur the right side; turn right to blur the left. The untouched side stays transparent. Clicks and scrolling are blocked in blurred areas by default, with a control to block the entire affected display instead.
 
 ## Download
 
-Download [AirVeil 0.14.0 beta 1](https://github.com/ShivHax-YT/AirVeil/releases/tag/v0.14.0-beta.1) and its matching `.dmg` from GitHub Releases. Open it and drag AirVeil into Applications, then launch AirVeil from Applications. The current download is an Apple silicon prerelease for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
+Download [AirVeil 0.14.0 RC 1](https://github.com/ShivHax-YT/AirVeil/releases/tag/v0.14.0-rc.1) and its matching `.dmg` from GitHub Releases. Open it and drag AirVeil into Applications, then launch AirVeil from Applications. The current download is an Apple silicon release candidate for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
 
 Build the distributable locally with `bash scripts/package-dmg.sh`; it produces a DMG and SHA-256 checksum under `build/releases/`. The package includes only the app, an Applications shortcut and installation notes; local preferences, diagnostics, recordings and signing secrets are excluded.
 
