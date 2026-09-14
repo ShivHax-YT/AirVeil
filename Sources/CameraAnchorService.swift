@@ -135,6 +135,7 @@ enum CameraAnchorError: LocalizedError {
 
 @MainActor private final class SystemCameraAnchorCapture: CameraAnchorCapturing {
     private var worker: CameraAnchorWorker?
+    private var previewMailbox: CameraPreviewMailbox?
     var authorization: CameraAuthorization {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: return .authorized
@@ -152,17 +153,64 @@ enum CameraAnchorError: LocalizedError {
                onPreview: @escaping @MainActor (CGImage) -> Void,
                onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration {
         stop()
+        let previewMailbox = CameraPreviewMailbox()
+        self.previewMailbox = previewMailbox
         let worker = CameraAnchorWorker(onFrame: { frame in
             Task { @MainActor in onFrame(frame) }
         }, onPreview: { image in
-            Task { @MainActor in onPreview(image) }
+            guard previewMailbox.offer(image) else { return }
+            Task { @MainActor in
+                guard let newest = previewMailbox.take() else { return }
+                onPreview(newest)
+            }
         }, onFailure: { detail in
             Task { @MainActor in onFailure(detail) }
         })
         self.worker = worker
         return try await worker.start()
     }
-    func stop() { worker?.stop(); worker = nil }
+    func stop() {
+        // Stop and publication share the main actor, so a drained image cannot
+        // be delivered after this cancellation or into the next capture run.
+        previewMailbox?.cancel(); previewMailbox = nil
+        worker?.stop(); worker = nil
+    }
+}
+
+/// A capture run owns one mailbox. The producer replaces a superseded image
+/// while exactly one main-actor notification is pending; UI congestion cannot
+/// create a backlog of thumbnails. All state crosses queues under this lock.
+final class CameraPreviewMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+    private var notificationPending = false
+    private var newest: CGImage?
+
+    /// True means the caller must schedule the only outstanding notification.
+    func offer(_ image: CGImage) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard active else { return false }
+        newest = image
+        guard !notificationPending else { return false }
+        notificationPending = true
+        return true
+    }
+
+    func take() -> CGImage? {
+        lock.lock(); defer { lock.unlock() }
+        notificationPending = false
+        guard active else { return nil }
+        let image = newest
+        newest = nil
+        return image
+    }
+
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        active = false
+        notificationPending = false
+        newest = nil
+    }
 }
 
 /// All session/device/Vision state belongs to this one serial queue. The lock
@@ -277,15 +325,9 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
             onFailure("Camera framing changed. Set up its reference again."); stop(); return
         }
         guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        if receipt - lastPreview >= 1 / 15.0 - 0.005 {
-            lastPreview = receipt
-            let source = CIImage(cvPixelBuffer: pixels)
-            let scale = min(1, 320 / source.extent.width)
-            let thumbnail = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            if let image = imageContext.createCGImage(thumbnail, from: thumbnail.extent), !isCancelled {
-                onPreview(image)
-            }
-        }
+        // When analysis is due, publish its evidence before doing optional
+        // thumbnail conversion. A preview must not delay the same frame's pose.
+        defer { publishPreviewIfDue(pixels, receipt: receipt) }
         // Preview and Vision share this one bounded capture session. More
         // preview frames never create additional heading evidence.
         guard receipt - lastAnalysis >= 1 / 3.0 else { return }
@@ -315,6 +357,17 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
                 receiptHostTime: receipt, processedHostTime: Self.hostTime(), luminance: luminance))
         } catch {
             onFailure("Face analysis could not complete."); stop()
+        }
+    }
+
+    private func publishPreviewIfDue(_ pixels: CVPixelBuffer, receipt: Double) {
+        guard !isCancelled, receipt - lastPreview >= 1 / 15.0 - 0.005 else { return }
+        lastPreview = receipt
+        let source = CIImage(cvPixelBuffer: pixels)
+        let scale = min(1, 320 / source.extent.width)
+        let thumbnail = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        if let image = imageContext.createCGImage(thumbnail, from: thumbnail.extent), !isCancelled {
+            onPreview(image)
         }
     }
 }

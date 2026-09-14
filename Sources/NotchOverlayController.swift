@@ -139,7 +139,8 @@ private final class NotchPanel: NSPanel {
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle, .canJoinAllApplications]
         window.ignoresMouseEvents = true
         window.title = "AirVeil Notch Coach"
-        window.contentView = NSHostingView(rootView: NotchCoachView(presentation: presentation, camera: model.cameraHeading.camera)
+        window.contentView = NSHostingView(rootView: NotchCoachView(presentation: presentation, camera: model.cameraHeading.camera,
+                                                                  headMotion: model.cameraHeading.notchMotion)
             .frame(width: 360, height: frame.height, alignment: .top))
         window.setFrame(frame, display: false)
         panel = window

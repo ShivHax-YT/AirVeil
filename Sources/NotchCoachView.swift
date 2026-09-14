@@ -51,6 +51,7 @@ struct NotchCanopy: Shape {
 @MainActor struct NotchCoachView: View {
     @ObservedObject var presentation: NotchOverlayPresentation
     @ObservedObject var camera: CameraAnchorService
+    let headMotion: NotchMotionFeedback
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var snapshot: NotchCoachSnapshot { presentation.snapshot }
     private var success: Bool { snapshot.phase == .success }
@@ -118,10 +119,8 @@ struct NotchCanopy: Shape {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            AlignmentRail(error: snapshot.horizontalError, verticalError: snapshot.verticalError,
-                          accent: accent, centered: snapshot.phase == .holding, turning: snapshot.phase == .turning)
-                .frame(height: 24)
-                .accessibilityLabel(snapshot.phase == .holding ? "Centered" : snapshot.title)
+            NotchHeadMotionRail(feedback: headMotion, demoError: presentation.demo ? snapshot.horizontalError : nil,
+                                isDemo: presentation.demo, accent: accent)
             GeometryReader { geo in
                 Capsule().fill(.white.opacity(0.10))
                 Capsule().fill(accent).frame(width: geo.size.width * min(1, max(0, snapshot.progress)))
@@ -234,31 +233,69 @@ private struct NotchTextButton: ButtonStyle {
     }
 }
 
-private struct AlignmentRail: View {
-    var error: Double
-    var verticalError: Double
+@MainActor private struct NotchHeadMotionRail: View {
+    @ObservedObject var feedback: NotchMotionFeedback
+    var demoError: Double?
+    var isDemo: Bool
     var accent: Color
-    var centered: Bool
-    var turning: Bool
+    private var pose: NotchPoseSnapshot { feedback.snapshot }
+    private var label: String {
+        if isDemo { return "Head movement preview" }
+        switch pose.source {
+        case .waiting: return "Waiting for head motion"
+        case .airPods: return pose.isScreenRelative ? "AirPods · camera reference held" : "AirPods · head movement"
+        case .cameraAndAirPods: return "Camera + AirPods"
+        }
+    }
+    private var value: String {
+        guard !isDemo, let angle = pose.yawDegrees else { return "—" }
+        let magnitude = Int(abs(angle).rounded())
+        if magnitude == 0 { return pose.isScreenRelative ? "Facing center" : "0° movement" }
+        return "\(magnitude)° \(angle > 0 ? "left" : "right")"
+    }
+    private var tint: Color {
+        guard !isDemo, pose.isScreenRelative, let angle = pose.yawDegrees else { return accent }
+        return abs(angle) <= 8 ? Color(red: 0.42, green: 0.91, blue: 0.64) : Color(red: 1, green: 0.43, blue: 0.43)
+    }
+    var body: some View {
+        VStack(spacing: 3) {
+            AlignmentRail(error: isDemo ? demoError : pose.normalizedYaw, accent: tint)
+                .frame(height: 24)
+            HStack {
+                Text(label)
+                Spacer(minLength: 4)
+                Text(value).monospacedDigit()
+            }
+            .font(.system(size: 9)).foregroundStyle(.white.opacity(0.55))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label).accessibilityValue(value)
+    }
+}
+
+private struct AlignmentRail: View {
+    var error: Double?
+    var accent: Color
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         GeometryReader { geo in
             let width = min(230, geo.size.width)
-            let selected = Int((min(1, max(-1, error)) * 15).rounded())
+            let selected = error.map { Int((min(1, max(-1, $0)) * 15).rounded()) }
             ZStack {
                 ForEach(-15...15, id: \.self) { index in
-                    let highlighted = abs(index - selected) <= 1
+                    let highlighted = selected.map { abs(index - $0) <= 1 } ?? false
                     Capsule().fill(highlighted ? accent : .white.opacity(index == 0 ? 0.50 : 0.20))
                         .frame(width: index == 0 ? 2 : 1.5, height: highlighted ? 12 : (index == 0 ? 10 : 5))
                         .position(x: geo.size.width / 2 + CGFloat(index) * width / 30,
                                   y: 10 - pow(CGFloat(index) / 15, 2) * 7)
                 }
-                Circle().fill(accent).frame(width: 3, height: 3)
-                    .position(x: geo.size.width / 2 + min(1, max(-1, error)) * width / 2, y: 22)
+                if let error {
+                    Circle().fill(accent).frame(width: 3, height: 3)
+                        .position(x: geo.size.width / 2 + min(1, max(-1, error)) * width / 2, y: 22)
+                }
             }
         }
-        .animation(reduceMotion ? .none : .spring(response: 0.18, dampingFraction: 0.94), value: error)
-        .animation(.easeInOut(duration: 0.18), value: centered)
+        .animation(reduceMotion ? .none : .linear(duration: 0.04), value: error)
         .accessibilityHidden(true)
     }
 }

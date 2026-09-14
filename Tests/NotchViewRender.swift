@@ -31,7 +31,7 @@ import SwiftUI
         print("Rendered \(states.count + 2) notch states at 2x without camera capture")
     }
     @MainActor static func render(_ name: String, _ p: NotchOverlayPresentation, _ camera: CameraAnchorService, _ destination: URL) throws {
-        let renderer = ImageRenderer(content: NotchCoachView(presentation: p, camera: camera))
+        let renderer = ImageRenderer(content: NotchCoachView(presentation: p, camera: camera, headMotion: NotchMotionFeedback()))
         renderer.scale = 2
         guard let cg = renderer.cgImage,
               let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else {

@@ -7,6 +7,7 @@ import Combine
 @MainActor final class StubCoordinator: ObservableObject {
     @Published var coach = NotchCoachSnapshot()
     let camera = CameraAnchorService()
+    let notchMotion = NotchMotionFeedback()
     var isBusy = false
     var isEnabled = true
     var hasCenter = true

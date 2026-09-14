@@ -44,6 +44,28 @@ import CoreVideo
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let thumbnail = context.makeImage()!
         do {
+            let newerContext = CGContext(data: nil, width: 3, height: 2, bitsPerComponent: 8, bytesPerRow: 12,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let newerThumbnail = newerContext.makeImage()!
+            let mailbox = CameraPreviewMailbox()
+            check(mailbox.offer(thumbnail), "First preview schedules one main-actor delivery")
+            var extraNotifications = 0
+            for _ in 0..<100 {
+                if mailbox.offer(newerThumbnail) { extraNotifications += 1 }
+            }
+            check(extraNotifications == 0, "Blocked UI accumulates no extra preview delivery tasks")
+            check(mailbox.take()?.width == 3, "Pending delivery consumes the newest thumbnail, not the first queued image")
+            check(mailbox.take() == nil, "A thumbnail is consumed only once")
+            check(mailbox.offer(thumbnail), "A drained mailbox permits the next delivery notification")
+            mailbox.cancel()
+            check(mailbox.take() == nil, "Stop discards a queued preview before its callback runs")
+            check(!mailbox.offer(newerThumbnail), "A late producer cannot revive a cancelled capture run")
+            let nextRun = CameraPreviewMailbox()
+            check(nextRun.offer(newerThumbnail) && nextRun.take()?.width == 3,
+                  "A new capture run owns independent preview delivery state")
+            check(mailbox.take() == nil, "An obsolete callback cannot consume the new run's image")
+        }
+        do {
             let capture = FakeCameraCapture(); capture.authorization = .notDetermined
             let service = CameraAnchorService(capture: capture)
             do { try await service.startBurst { _ in }; fatalError("Unapproved capture started") }

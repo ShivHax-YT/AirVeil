@@ -22,6 +22,8 @@ import Combine
     var permissionRequests = 0
     var starts = 0
     var stops = 0
+    var cameraID = "builtin-test"
+    var configurationID = "vision3-up-unmirrored-vga"
     var holdStart = false
     var startContinuation: CheckedContinuation<CameraAnchorConfiguration, Error>?
     var handlers: [@MainActor (CameraAnchorFrame) -> Void] = []
@@ -38,8 +40,8 @@ import Combine
         return configuration
     }
     var configuration: CameraAnchorConfiguration {
-        CameraAnchorConfiguration(cameraID: "builtin-test", cameraName: "Fake camera",
-            configurationID: "vision3-up-unmirrored-vga", captureFramesPerSecond: 3)
+        CameraAnchorConfiguration(cameraID: cameraID, cameraName: "Fake camera",
+            configurationID: configurationID, captureFramesPerSecond: 3)
     }
     func releaseStart() { startContinuation?.resume(returning: configuration); startContinuation = nil }
     func stop() { stops += 1 }
@@ -67,12 +69,12 @@ private struct StoredCameraProbe: Codable {
         }
         coordinator = CameraHeadingCoordinator(motion: motion, camera: camera, defaults: defaults, now: { [unowned self] in self.time })
     }
-    func advance(_ seconds: Double, yaw: Double = 0, update: Bool = true) {
+    func advance(_ seconds: Double, yaw: Double = 0, update: Bool = true, angularSpeed: Double = 0) {
         let end = time + seconds
         while time < end - 0.000001 {
             time = min(end, time + 0.02)
             motion.fusionSample = HeadingMotionSample(epoch: motion.fusionEpoch, sourceTimestamp: time - 90,
-                receiptHostTime: time, yawRadians: yaw * .pi / 180, angularSpeed: 0)
+                receiptHostTime: time, yawRadians: yaw * .pi / 180, angularSpeed: angularSpeed)
             if update { coordinator.update(layoutKey: layout) }
         }
     }
@@ -81,7 +83,7 @@ private struct StoredCameraProbe: Codable {
                bounds: CGRect = CGRect(x: 0.3, y: 0.25, width: 0.3, height: 0.4)) {
         let index = handler ?? capture.handlers.count - 1
         guard index >= 0 else { fatalError("Camera burst has not started") }
-        capture.handlers[index](CameraAnchorFrame(cameraID: "builtin-test", configurationID: "vision3-up-unmirrored-vga",
+        capture.handlers[index](CameraAnchorFrame(cameraID: capture.cameraID, configurationID: capture.configurationID,
             faceCount: faces, yawDegrees: yaw, pitchDegrees: 0, rollDegrees: 0, detectionConfidence: confidence,
             faceBounds: bounds, captureHostTime: time,
             receiptHostTime: time, processedHostTime: time, luminance: luminance))
@@ -198,6 +200,163 @@ private struct StoredCameraProbe: Codable {
                   "Rewear alignment never changes stored screen center or its revision")
             f.end()
         }
+        do {
+            // Vision's nonzero camera yaw and the position of the face in the
+            // thumbnail are not the user-selected screen direction. This was
+            // accepted before the notch introduced its narrower visual gates.
+            let f = CoordinatorFixture()
+            f.advance(0.8, yaw: 20)
+            f.coordinator.setCenter(layoutKey: f.layout); await settle()
+            f.advance(0.8, yaw: 20)
+            let bounds = CGRect(x: 0.06, y: 0.30, width: 0.3, height: 0.4)
+            for _ in 0..<3 {
+                f.frame(yaw: 15, bounds: bounds)
+                check(f.coordinator.coach.phase == .holding && f.coordinator.coach.issue == nil,
+                      "A usable explicit neutral never flashes a contradictory red thumbnail correction")
+                f.advance(0.34, yaw: 20)
+            }
+            check(!f.coordinator.hasCenter && f.coordinator.coach.phase == .turning,
+                  "Stable explicit neutral at 15 degrees and near the thumbnail edge reaches the sign turn")
+            f.advance(0.8, yaw: 40)
+            for _ in 0..<3 { f.frame(yaw: 35, bounds: bounds); f.advance(0.34, yaw: 40) }
+            check(f.coordinator.hasCenter && f.coordinator.centerRevision == 1,
+                  "A real paired turn completes setup without centering the cropped preview")
+            let value = try JSONDecoder().decode(StoredCameraProbe.self,
+                from: f.defaults.data(forKey: "cameraScreenCenterV1")!)
+            check(value.center.cameraSign == 1 && close(value.center.neutralYawRadians * 180 / .pi, 15),
+                  "Explicit center preserves measured neutral rather than assuming zero camera yaw")
+            check(!f.coordinator.trackingValid && f.coordinator.coach.phase != .success,
+                  "Relaxed visual framing still requires independent paired recovery before success")
+            await settle(); f.advance(0.8, yaw: 40); await settle()
+            for _ in 0..<3 { f.frame(yaw: 35, bounds: bounds); f.advance(0.34, yaw: 40) }
+            check(f.coordinator.trackingValid && close(f.coordinator.yawDegrees, 20) && !f.camera.isRunning,
+                  "Setup and recovery preserve the current turned angle with normal evidence duration")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture()
+            f.advance(0.8, yaw: 20)
+            f.coordinator.setCenter(layoutKey: f.layout); await settle()
+            f.advance(0.8, yaw: 20); f.frames(3, cameraYaw: 0, motionYaw: 20)
+            f.frames(3, cameraYaw: 0, motionYaw: 20)
+            check(!f.coordinator.hasCenter && f.coordinator.coach.phase == .turning && f.coordinator.coach.progress == 0,
+                  "Holding the neutral pose never pretends to complete most of the direction-learning turn")
+            check(f.coordinator.coach.title == "Turn a little farther",
+                  "Insufficient measured turn explains what action is still needed")
+            f.frame(yaw: 0)
+            check(f.coordinator.coach.title == "Turn a little farther",
+                  "A new clear frame preserves the measured turn instruction while awaiting its motion pair")
+            f.advance(0.8, yaw: 40)
+            f.frames(1, cameraYaw: 20, motionYaw: 40)
+            check(f.coordinator.coach.title == "Hold at this angle" && f.coordinator.coach.progress > 0,
+                  "A real camera and AirPods turn switches to hold guidance and evidence-based progress")
+            f.frames(2, cameraYaw: 20, motionYaw: 40)
+            check(f.coordinator.hasCenter, "Truthful turn guidance leaves accepted sign-learning behavior intact")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            let saved = f.defaults.data(forKey: "cameraScreenCenterV1")
+            f.advance(0.8, yaw: 8); await settle()
+            for x in [0.08, 0.10, 0.07] {
+                f.frame(yaw: 30, bounds: CGRect(x: x, y: 0.28, width: 0.3, height: 0.4))
+                f.advance(0.34, yaw: 8)
+            }
+            check(f.coordinator.trackingValid && close(f.coordinator.yawDegrees, 30),
+                  "A clear face outside the square thumbnail's central guide recovers from three actual paired samples")
+            check(f.coordinator.centerRevision == 5 && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                  "Cosmetic framing never alters the saved reference")
+            check(f.coordinator.coach.phase == .success && !f.camera.isRunning,
+                  "Successful off-center recovery stops the camera and reports real alignment")
+            f.end()
+        }
+        do {
+            // The UI timer and AirPods callback do not run in lockstep. A
+            // render tick can be >200 ms after capture with the latest actual
+            // motion receipt still at 180 ms. The frame must survive this tick.
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 8); await settle()
+            for index in 0..<3 {
+                let captureTime = f.time
+                f.frame(yaw: 30)
+                f.advance(0.18, yaw: 8)
+                f.time = captureTime + 0.21
+                f.coordinator.update(layoutKey: f.layout)
+                check(!f.coordinator.trackingValid,
+                      "Display time alone never accepts camera frame \(index + 1) before its required motion receipt")
+                if index > 0 {
+                    check(f.coordinator.coach.progress > 0,
+                          "A timer tick awaiting the next AirPods receipt does not erase already paired hold evidence")
+                }
+                f.advance(0.13, yaw: 8)
+            }
+            check(f.coordinator.trackingValid && close(f.coordinator.yawDegrees, 30),
+                  "Three camera frames recover normally with independently scheduled render and motion callbacks")
+            check(f.coordinator.coach.phase == .success && !f.camera.isRunning,
+                  "Jittered callbacks only produce success once actual camera and AirPods evidence is complete")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            let saved = f.defaults.data(forKey: "cameraScreenCenterV1")
+            f.layout = "display-B"
+            f.advance(0.8, yaw: 20); await settle()
+            check(f.capture.starts == 0 && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                  "A changed display layout cannot automatically replace the saved screen center")
+            f.coordinator.setCenter(layoutKey: f.layout); await settle()
+            f.advance(0.8, yaw: 20); f.frames(3, cameraYaw: 15, motionYaw: 20)
+            check(f.coordinator.centerRevision == 6 && f.coordinator.coach.phase == .starting,
+                  "Explicit center on a changed layout reuses the matching camera's learned sign without another turn")
+            let value = try JSONDecoder().decode(StoredCameraProbe.self,
+                from: f.defaults.data(forKey: "cameraScreenCenterV1")!)
+            check(value.layoutKey == "display-B" && value.center.cameraSign == 1 && close(value.center.neutralYawRadians * 180 / .pi, 15),
+                  "Only the deliberate new neutral and display layout are saved; learned camera handedness is retained")
+            check(!f.coordinator.trackingValid && f.coordinator.coach.phase != .success,
+                  "Reusing a camera sign never bypasses fresh AirPods alignment")
+            await settle(); f.advance(0.8, yaw: 20); await settle()
+            f.frames(3, cameraYaw: 15, motionYaw: 20)
+            check(f.coordinator.trackingValid && close(f.coordinator.yawDegrees, 0) && !f.camera.isRunning,
+                  "Independent paired recovery aligns against the deliberately reset screen direction")
+            f.end()
+        }
+        for change in ["camera", "configuration"] {
+            let f = CoordinatorFixture(stored: true)
+            let saved = f.defaults.data(forKey: "cameraScreenCenterV1")
+            f.layout = "display-B"
+            if change == "camera" { f.capture.cameraID = "different-camera" }
+            else { f.capture.configurationID = "different-camera-pipeline" }
+            f.advance(0.8, yaw: 20)
+            f.coordinator.setCenter(layoutKey: f.layout); await settle()
+            f.advance(0.8, yaw: 20); f.frames(3, cameraYaw: 0, motionYaw: 20)
+            check(f.coordinator.coach.phase == .turning && f.coordinator.centerRevision == 5,
+                  "A changed \(change) requires a newly observed camera/AirPods sign turn")
+            check(f.defaults.data(forKey: "cameraScreenCenterV1") == saved && !f.coordinator.trackingValid,
+                  "Neutral evidence cannot replace the previous reference before the changed \(change)'s sign is learned")
+            f.advance(0.8, yaw: 40); f.frames(3, cameraYaw: -20, motionYaw: 40)
+            let value = try JSONDecoder().decode(StoredCameraProbe.self,
+                from: f.defaults.data(forKey: "cameraScreenCenterV1")!)
+            check(f.coordinator.centerRevision == 6 && value.center.cameraSign == -1,
+                  "Changed \(change) stores the sign of the actual observed turn rather than reusing the old sign")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 8); await settle()
+            f.frames(2, cameraYaw: 30, motionYaw: 8)
+            f.frame(yaw: 30)
+            f.advance(0.08, yaw: 12, angularSpeed: 0.3)
+            f.advance(0.26, yaw: 8)
+            check(!f.coordinator.trackingValid && f.coordinator.coach.progress == 0,
+                  "Real motion inside a camera frame's pairing window rejects that frame and clears visual hold")
+            f.advance(0.8, yaw: 8)
+            f.frames(1, cameraYaw: 30, motionYaw: 8)
+            check(!f.coordinator.trackingValid,
+                  "Retained older candidates cannot bridge a moving interval or substitute for a new stationary burst")
+            f.frames(2, cameraYaw: 30, motionYaw: 8)
+            check(f.coordinator.trackingValid && close(f.coordinator.yawDegrees, 30),
+                  "The unchanged fusion gate accepts three fresh stationary samples after real movement")
+            f.end()
+        }
         for cancellation in ["manual", "epoch", "layout", "sleep"] {
             let f = CoordinatorFixture(stored: true)
             f.advance(0.8, yaw: 8); await settle()
@@ -237,11 +396,11 @@ private struct StoredCameraProbe: Codable {
             f.advance(0.8, yaw: 20)
             f.coordinator.setCenter(layoutKey: f.layout); await settle()
             f.advance(0.8, yaw: 20)
-            f.frames(5, cameraYaw: 35, motionYaw: 20)
+            f.frames(5, cameraYaw: 50, motionYaw: 20)
             check(!f.coordinator.hasCenter && f.coordinator.coach.phase == .offCenter,
-                  "Stable turned head cannot silently become the explicit screen center")
+                  "A pose outside the fusion camera limit cannot become the explicit screen center")
             check(f.coordinator.coach.issue == .pose && f.coordinator.coach.progress == 0,
-                  "Turned center setup gets red pose guidance without fake progress")
+                  "An unusable center pose gets guidance without fake progress")
             f.frame(yaw: nil, faces: 0, confidence: 0, luminance: 0.08)
             check(f.coordinator.coach.issue == .faceMissing, "One dim frame cannot flash a low-light warning")
             f.frame(yaw: nil, faces: 0, confidence: 0, luminance: 0.08)
@@ -251,8 +410,8 @@ private struct StoredCameraProbe: Codable {
             check(f.coordinator.coach.issue == .faceMissing,
                   "An unmeasured failed scan never guesses low light")
             f.frame(yaw: 0, bounds: CGRect(x: 0.03, y: 0.3, width: 0.2, height: 0.3))
-            check(f.coordinator.coach.direction == .left && f.coordinator.coach.horizontalError > 0,
-                  "A face at the mirrored preview's right edge gets a leftward guide")
+            check(f.coordinator.coach.phase == .holding && f.coordinator.coach.direction == nil && f.coordinator.coach.horizontalError > 0,
+                  "Usable face framing remains visible without a crop-only correction or an acquisition barrier")
             f.coordinator.cancelPendingRecovery()
             check(f.coordinator.coach.phase == .idle && !f.camera.isRunning, "Cancel hides all guidance")
             f.end()
