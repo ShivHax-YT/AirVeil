@@ -4,7 +4,7 @@ AirVeil is a native macOS menu-bar app that uses AirPods head motion to progress
 
 ## Download
 
-Download [AirVeil 0.13.0 beta 1](https://github.com/ShivHax-YT/AirVeil/releases/tag/v0.13.0-beta.1) and its matching `.dmg` from GitHub Releases. Open it and drag AirVeil into Applications, then launch AirVeil from Applications. The current download is an Apple silicon prerelease for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
+Download [AirVeil 0.14.0 beta 1](https://github.com/ShivHax-YT/AirVeil/releases/tag/v0.14.0-beta.1) and its matching `.dmg` from GitHub Releases. Open it and drag AirVeil into Applications, then launch AirVeil from Applications. The current download is an Apple silicon prerelease for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
 
 Build the distributable locally with `bash scripts/package-dmg.sh`; it produces a DMG and SHA-256 checksum under `build/releases/`. The package includes only the app, an Applications shortcut and installation notes; local preferences, diagnostics, recordings and signing secrets are excluded.
 
@@ -30,11 +30,19 @@ To build without installing, run `./scripts/build.sh`. Open `/Applications/AirVe
 
 ## First-launch walkthrough
 
-The first time you open an installed or locally built AirVeil app, Settings opens with an animated welcome and a 14-step spotlight tour. The rest of Settings dims while the actual control is highlighted and scrolled into view. Back, Continue, Skip tour, and Get started support a self-paced walkthrough. Closing the window also dismisses the tour. **Take a tour** at the top of Settings replays it later; completion is saved per macOS user and survives app updates. Downloading or copying the app does not execute it.
+The first time you open an installed or locally built AirVeil app, Settings opens with an animated welcome and a 15-step spotlight tour. The rest of Settings dims while the actual control is highlighted and scrolled into view. Back, Continue, Skip tour, and Get started support a self-paced walkthrough. Closing the window also dismisses the tour. **Take a tour** at the top of Settings replays it later; completion is saved per macOS user and survives app updates. Downloading or copying the app does not execute it.
 
-The tour covers the preview, head tracking, screen access, camera assistance and Face light, displays, interaction blocking, removal and brightness behavior, coverage, independent onset angles, full angle, appearance, fine tuning, and enable/pause controls. It does not change your effect preferences or grant permissions. Initial sensor startup waits until the tour finishes or is skipped; any previously owned brightness restoration still runs immediately. Light and dark appearances use native materials, and Reduce Motion removes the entrance and scroll movement.
+The tour covers the preview, head tracking, screen access, camera assistance and Face light, displays, interaction blocking, removal and brightness behavior, energy use, coverage, independent onset angles, full angle, appearance, fine tuning, and enable/pause controls. It does not change your effect preferences or grant permissions. Initial sensor startup waits until the tour finishes or is skipped; any previously owned brightness restoration still runs immediately. Light and dark appearances use native materials, and Reduce Motion removes the entrance and scroll movement.
 
 `bash scripts/test-settings-tour-ui.sh` renders all steps at regular and minimum window sizes in both appearances. These offscreen native renders exercise layout without opening the camera, starting AirPods tracking, or capturing the desktop.
+
+## Energy use
+
+Settings offers **Automatic**, **Smoothest**, and **Reduced energy**. Automatic keeps the usual desktop refresh unless macOS reports Low Power Mode or serious/critical thermal pressure. Reduced energy always requests up to 30 desktop frames per second; Smoothest requests up to 60. Actual delivery depends on changing desktop content.
+
+Only desktop capture cadence changes. Head tracking, coverage movement, camera checks, and removal/brightness behavior keep their existing timing. The setting is saved, takes effect on running capture without restarting it, and refreshes system state after wake. If a display rejects an energy update, its working capture continues and Settings explains the failure. No new permission or network service is involved. Battery-life savings have not been measured.
+
+See the [energy implementation research](research/ENERGY-AWARE-IMPLEMENTATION.md) for Apple API evidence, tradeoffs, and validation boundaries.
 
 ## Notch recenter coach
 
@@ -130,7 +138,7 @@ Native desktop capture/output resolution and the requested maximum 60 fps captur
 
 The [latest notch motion study](research/NOTCH-REDESIGN-STUDY.md) records frame-by-frame reference analysis. [Proposed next features](research/NEXT-FEATURES.md) ranks a guided setup rehearsal and named workspace profiles; these proposals are not included in the current update.
 
-The [feature opportunity report](research/FEATURE-RESEARCH-2026-09.md) evaluates eight additional privacy, reliability, and usability ideas against macOS APIs and the 0.13.0 release. It includes ranked recommendations, proposed flows, and validation gates; no proposed features are implemented.
+The [feature opportunity report](research/FEATURE-RESEARCH-2026-09.md) evaluates eight additional privacy, reliability, and usability ideas against macOS APIs and the 0.13.0 release. It includes ranked recommendations, proposed flows, and validation gates; energy-aware capture is now implemented as described above; the other proposals remain research only.
 
 Four research reports precede implementation:
 

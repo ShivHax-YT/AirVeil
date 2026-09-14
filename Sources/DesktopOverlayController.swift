@@ -130,6 +130,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     @Published private(set) var isRunning = false
     @Published private(set) var isReady = false
     @Published private(set) var failureReason: String?
+    @Published private(set) var captureEnergyStatus: String?
     @Published private(set) var availableDisplays: [VeilDisplayInfo] = []
     @Published private(set) var blockedPointerEventCount: UInt64 = 0
     var activeDisplayCount: Int { isRunning ? sessions.count : 0 }
@@ -145,6 +146,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         let menuBand: CGFloat
         var sink: DisplayCaptureSink?
         var stream: SCStream?
+        var cadence: CaptureCadenceController?
         var ready = false
         init(screen: NSScreen) {
             menuBand = max(NSStatusBar.system.thickness, screen.safeAreaInsets.top)
@@ -216,6 +218,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     private var sessions: [DisplaySession] = []
     private var generation: UInt64 = 0
     private var failed = false
+    private var captureFramesPerSecond = 60
     private var displayObserver: NSObjectProtocol?
     private var selectedDisplayIDs: Set<UInt32>?
     private var effect: (left: Double, right: Double, blur: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool, blockInput: Bool, blocksEntireDisplay: Bool) = (0, 0, 32, 0.12, false, false, false, false, false)
@@ -280,19 +283,14 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 }
                 let filter = SCContentFilter(display: display, excludingApplications: [ownApp], exceptingWindows: [])
                 if #available(macOS 14.2, *) { filter.includeMenuBar = true }
-                let config = SCStreamConfiguration()
                 let scale = Double(filter.pointPixelScale)
                 guard scale.isFinite, scale > 0, filter.contentRect.width > 0, filter.contentRect.height > 0 else {
                     throw VeilRenderError.unavailable("Invalid display capture geometry.")
                 }
-                config.width = Int((filter.contentRect.width * scale).rounded())
-                config.height = Int((filter.contentRect.height * scale).rounded())
-                config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.colorSpaceName = CGColorSpace.sRGB
-                config.showsCursor = false
-                config.capturesAudio = false
-                config.queueDepth = 3
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                let width = Int((filter.contentRect.width * scale).rounded())
+                let height = Int((filter.contentRect.height * scale).rounded())
+                let initialFPS = captureFramesPerSecond
+                let config = Self.captureConfiguration(width: width, height: height, framesPerSecond: initialFPS)
                 session.view.sourcePixelScale = scale
                 let sink = DisplayCaptureSink(mailbox: session.mailbox)
                 sink.onFailure = { [weak self] reason in Task { @MainActor [weak self] in self?.captureFailed(reason, generation: run) } }
@@ -308,6 +306,19 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 try await stream.startCapture()
                 guard run == generation else { try? await stream.stopCapture(); throw CancellationError() }
                 try validateStartup(generation: run, initialDisplays: initialDisplays)
+                let cadence = CaptureCadenceController(initialFramesPerSecond: initialFPS) { fps in
+                    // Fresh configurations use the exact same fields as startup.
+                    // Never mutate a configuration while SCStream is consuming it.
+                    let next = Self.captureConfiguration(width: width, height: height, framesPerSecond: fps)
+                    try await stream.updateConfiguration(next)
+                }
+                session.cadence = cadence
+                cadence.onStateChange = { [weak self] in
+                    guard let self, self.generation == run, !self.failed else { return }
+                    self.refreshCaptureEnergyStatus()
+                }
+                // The policy may have changed while startCapture was suspended.
+                cadence.request(captureFramesPerSecond)
             }
             try validateStartup(generation: run, initialDisplays: initialDisplays)
             displayConfiguration.begin(initialDisplays)
@@ -335,7 +346,9 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         sessions.removeAll()
         isRunning = false; isReady = false; failed = false; failureReason = nil
         status = "Desktop effect paused"
+        captureEnergyStatus = nil
         for session in old {
+            session.cadence?.stop()
             session.mailbox.invalidate()
             session.view.isPaused = true
             session.view.onFirstFrame = nil
@@ -351,6 +364,39 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 session.window.close()
             }
         }
+    }
+
+    /// Only desktop pixel delivery changes; geometry and input blockers retain
+    /// their existing event-driven update path.
+    func setCaptureFramesPerSecond(_ framesPerSecond: Int) {
+        guard [30, 60].contains(framesPerSecond), captureFramesPerSecond != framesPerSecond else { return }
+        captureFramesPerSecond = framesPerSecond
+        guard !failed else { return }
+        for session in sessions { session.cadence?.request(framesPerSecond) }
+        refreshCaptureEnergyStatus()
+    }
+
+    private func refreshCaptureEnergyStatus() {
+        if sessions.contains(where: { $0.cadence?.state == .failed }) {
+            captureEnergyStatus = "Energy setting could not be applied to every display. Capture continues at its last working cadence."
+        } else if sessions.contains(where: { $0.cadence?.state == .updating }) {
+            captureEnergyStatus = "Updating desktop capture cadence…"
+        } else {
+            captureEnergyStatus = nil
+        }
+    }
+
+    static func captureConfiguration(width: Int, height: Int, framesPerSecond: Int) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.colorSpaceName = CGColorSpace.sRGB
+        config.showsCursor = false
+        config.capturesAudio = false
+        config.queueDepth = 3
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(framesPerSecond))
+        return config
     }
 
     func update(left: Double, right: Double, blurPoints: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool = false, blockInput: Bool = false, blocksEntireDisplay: Bool = false) {
@@ -374,7 +420,8 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         failureReason = message
         status = "Covered — \(message)"
         // A solid AppKit backing remains effective even if the GPU caused this failure.
-        for session in sessions { session.mailbox.invalidate(); session.coverWithoutGPU() }
+        captureEnergyStatus = nil
+        for session in sessions { session.cadence?.stop(); session.mailbox.invalidate(); session.coverWithoutGPU() }
         updateBlockers()
         let stoppedSessions = sessions
         Task {

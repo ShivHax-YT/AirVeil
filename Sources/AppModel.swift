@@ -15,6 +15,7 @@ final class AppModel: NSObject, ObservableObject {
     private var previewVisible = true
     private var forceFrame = false
     let overlay = DesktopOverlayController()
+    let energy = EnergyController()
     let displaySleep = DisplaySleepService()
     let presence = PresenceService()
     let dimming = DisplayDimmingService()
@@ -162,6 +163,11 @@ final class AppModel: NSObject, ObservableObject {
     }
     override init() {
         super.init()
+        energy.onChange = { [weak self] fps in
+            guard let self, !self.isShuttingDown else { return }
+            self.overlay.setCaptureFramesPerSecond(fps)
+        }
+        overlay.setCaptureFramesPerSecond(energy.targetFramesPerSecond)
         let d = UserDefaults.standard
         onset = Self.read(d, "onset", 8, 0...25)
         leftOnset = Self.read(d, "blurOnsetLeft", onset, 0...60)
@@ -538,6 +544,7 @@ final class AppModel: NSObject, ObservableObject {
             return
         }
         if isMacSessionActive {
+            energy.refresh()
             if !wasActive { recoverRemovalAfterActivation() }
             else { startMotionAutomatically() }
         } else { cameraHeading.setSessionActive(false); suspend() }
@@ -630,6 +637,7 @@ final class AppModel: NSObject, ObservableObject {
         sleepDisplaysOnRemoval = false; dimWhilePresent = true; removalBrightness = 0
         seatReference = nil; seatLayout = nil
         pause()
+        energy.reset()
         selectedDisplayKeys = nil; persist()
         message = "Default settings restored."
     }
@@ -749,6 +757,7 @@ final class AppModel: NSObject, ObservableObject {
     }
     func prepareForTermination() async {
         isShuttingDown = true
+        energy.shutdown()
         removalTicket += 1
         displaySleep.cancel()
         cameraHeading.shutdown()
@@ -757,6 +766,7 @@ final class AppModel: NSObject, ObservableObject {
     }
     func shutdown() {
         isShuttingDown = true
+        energy.shutdown()
         pause(cancelRemoval: false); cameraHeading.shutdown(); motion.stop()
         clock?.invalidate(); removalTimer?.invalidate()
     }

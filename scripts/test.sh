@@ -5,6 +5,14 @@ TASK_SDK="${AIRVEIL_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 if [ ! -d "$TASK_SDK" ]; then TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
 mkdir -p "$TASK_ROOT/build/tests"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+  "$TASK_ROOT/Sources/EnergyPolicy.swift" "$TASK_ROOT/Tests/EnergyPolicyTests.swift" \
+  -o "$TASK_ROOT/build/tests/energy-policy"
+"$TASK_ROOT/build/tests/energy-policy"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+  "$TASK_ROOT/Sources/CaptureCadenceController.swift" "$TASK_ROOT/Tests/CaptureCadenceTests.swift" \
+  -o "$TASK_ROOT/build/tests/capture-cadence"
+"$TASK_ROOT/build/tests/capture-cadence"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/SettingsTour.swift" "$TASK_ROOT/Tests/SettingsTourTests.swift" \
   -o "$TASK_ROOT/build/tests/settings-tour"
 "$TASK_ROOT/build/tests/settings-tour"
@@ -79,7 +87,7 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   -o "$TASK_ROOT/build/tests/display-sleep"
 "$TASK_ROOT/build/tests/display-sleep"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
-  "$TASK_ROOT/Sources/DesktopOverlayController.swift" "$TASK_ROOT/Sources/VeilMetalView.swift" \
+  "$TASK_ROOT/Sources/CaptureCadenceController.swift" "$TASK_ROOT/Sources/DesktopOverlayController.swift" "$TASK_ROOT/Sources/VeilMetalView.swift" \
   "$TASK_ROOT/Sources/VeilInputGeometry.swift" "$TASK_ROOT/Tests/DisplayConfigurationTests.swift" \
   -o "$TASK_ROOT/build/tests/display-configuration"
 "$TASK_ROOT/build/tests/display-configuration"

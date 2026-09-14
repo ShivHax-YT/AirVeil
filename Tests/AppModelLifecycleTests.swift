@@ -201,6 +201,18 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
     }
 }
 
+// System power observation and persistence are exercised separately with the
+// real EnergyController. Here only its delivery boundary is injected.
+@MainActor final class EnergyController {
+    var targetFramesPerSecond = 60
+    var onChange: ((Int) -> Void)?
+    private(set) var stopped = false
+    func request(_ fps: Int) { targetFramesPerSecond = fps; onChange?(fps) }
+    func refresh() {}
+    func reset() { request(60) }
+    func shutdown() { stopped = true }
+}
+
 @MainActor final class DesktopOverlayController: ObservableObject {
     @Published var isRunning = false
     @Published var isReady = false
@@ -211,6 +223,9 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
     private(set) var stopCalls = 0
     private(set) var lastSelectedIDs: Set<UInt32>?
     private(set) var updateCalls = 0
+    private(set) var requestedCaptureFPS = 60
+    private(set) var cadenceRequests = 0
+    func setCaptureFramesPerSecond(_ fps: Int) { requestedCaptureFPS = fps; cadenceRequests += 1 }
     var suspendNextStart = false
     private var startupContinuation: CheckedContinuation<Void, Never>?
     func start(selectedDisplayIDs: Set<UInt32>?) async throws {
@@ -1466,6 +1481,33 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.startMotionAutomatically()
             check(model.motion.isRunning, "Completing or skipping the tour permits sensor startup")
             model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            useCamera(model); acceptSeat(model, now: ProcessInfo.processInfo.systemUptime)
+            model.enable(); await drainTasks()
+            let starts = model.overlay.startCalls, stops = model.overlay.stopCalls
+            let savedSeat = model.presenceReady
+            let cameraStatus = model.cameraHeading.status
+            let left = model.leftOnset, right = model.rightOnset, smoothing = model.response
+            model.energy.request(30)
+            await drainTasks()
+            check(model.overlay.requestedCaptureFPS == 30, "Energy selection reaches desktop capture")
+            check(model.enabled && model.overlay.startCalls == starts && model.overlay.stopCalls == stops,
+                  "Energy selection cannot restart or pause capture")
+            check(model.presenceReady == savedSeat && model.cameraHeading.status == cameraStatus,
+                  "Energy selection leaves camera and seat state alone")
+            check(model.leftOnset == left && model.rightOnset == right && model.response == smoothing,
+                  "Energy selection cannot alter turn thresholds or smoothing")
+            model.energy.request(60)
+            check(model.overlay.requestedCaptureFPS == 60, "Smoothest returns requested desktop cadence")
+            model.energy.request(30); model.resetDefaults()
+            check(model.overlay.requestedCaptureFPS == 60 && !model.enabled, "Reset restores energy default and remains paused")
+            model.shutdown()
+            let requests = model.overlay.cadenceRequests
+            model.energy.request(30)
+            check(model.energy.stopped && model.overlay.cadenceRequests == requests,
+                  "Shutdown prevents late energy delivery reaching capture")
         }
         print("PASS: \(checks) real AppModel and removal-coordinator lifecycle assertions; camera, motion, brightness, capture, display sleep, permissions, and preferences stubbed")
     }

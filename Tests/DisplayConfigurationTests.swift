@@ -1,6 +1,8 @@
 import AppKit
+import ScreenCaptureKit
+import CoreMedia
 
-@main struct DisplayConfigurationTests {
+@main @MainActor struct DisplayConfigurationTests {
     static func main() {
         var checks = 0
         func check(_ value: @autoclosure () -> Bool, _ reason: String) {
@@ -65,6 +67,25 @@ import AppKit
         check(rebuilds == beforeStopped, "Re-enable owns a fresh baseline and does not inherit the prior display setup")
         notify([])
         check(rebuilds == beforeStopped + 1, "Removing every display still invalidates running capture")
-        print("PASS: \(checks) capture-owner display notification decisions; synthetic layouts, no capture or windows")
+        let smooth = DesktopOverlayController.captureConfiguration(width: 3024, height: 1964, framesPerSecond: 60)
+        let reduced = DesktopOverlayController.captureConfiguration(width: 3024, height: 1964, framesPerSecond: 30)
+        for config in [smooth, reduced] {
+            check(config.width == 3024 && config.height == 1964, "Cadence preserves exact pixel dimensions")
+            check(config.pixelFormat == kCVPixelFormatType_32BGRA, "Cadence preserves BGRA capture")
+            check(config.colorSpaceName == CGColorSpace.sRGB, "Cadence preserves sRGB capture")
+            check(!config.showsCursor && !config.capturesAudio, "Cadence keeps cursor and audio capture disabled")
+            check(config.queueDepth == 3, "Cadence preserves the existing queue depth")
+        }
+        check(CMTimeCompare(smooth.minimumFrameInterval, CMTime(value: 1, timescale: 60)) == 0,
+              "Standard capture retains its 60 fps maximum")
+        check(CMTimeCompare(reduced.minimumFrameInterval, CMTime(value: 1, timescale: 30)) == 0,
+              "Reduced capture requests a 30 fps maximum")
+        check(smooth !== reduced, "Each stream update receives a separate configuration object")
+        // One configuration can be consumed asynchronously without a later policy
+        // request modifying its fields in place.
+        reduced.minimumFrameInterval = CMTime(value: 1, timescale: 15)
+        check(CMTimeCompare(smooth.minimumFrameInterval, CMTime(value: 1, timescale: 60)) == 0,
+              "Preparing another cadence never mutates a configuration already in use")
+        print("PASS: \(checks) capture-owner display decisions and capture configuration invariants; no capture or windows")
     }
 }

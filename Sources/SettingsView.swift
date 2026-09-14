@@ -98,6 +98,33 @@ private struct HeadTrackingControls: View {
     }
 }
 
+/// Energy changes publish only when a mode or system condition changes.
+/// Keep them separate from the high-frequency tracking presentation.
+struct EnergySettingsView: View {
+    @ObservedObject var energy: EnergyController
+    @ObservedObject var overlay: DesktopOverlayController
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Energy use", systemImage: "leaf").font(.headline)
+            Picker("Energy use", selection: $energy.mode) {
+                ForEach(EnergyMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented).controlSize(.large)
+            .frame(minHeight: 44).accessibilityLabel("Energy use")
+            Text(energy.reason).font(.subheadline).foregroundStyle(.secondary)
+            if let status = overlay.captureEnergyStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Desktop refresh status: " + status)
+            }
+            Text("Reduced energy refreshes the desktop image less often. Head tracking and the movement of the cover stay responsive; camera and AirPod-removal checks keep their normal timing.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 20))
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var tour: SettingsTour
@@ -256,6 +283,8 @@ struct SettingsView: View {
                         Button("Lock Screen settings") { model.openLockScreenSettings() }
                     }
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+
+                EnergySettingsView(energy: model.energy, overlay: model.overlay).tourTarget(.energy)
 
                 VStack(alignment:.leading,spacing:16) {
                     HStack {

@@ -4,7 +4,7 @@ import Combine
 /// Stable identifiers also serve as scroll destinations and spotlight anchors.
 enum SettingsTourStep: String, CaseIterable, Identifiable {
     case welcome, preview, tracking, access, camera, displays, input, removal
-    case coverage, onset, full, appearance, tuning, ready
+    case energy, coverage, onset, full, appearance, tuning, ready
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -16,6 +16,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .displays: return "Choose your displays"
         case .input: return "Keep covered areas protected"
         case .removal: return "When an AirPod comes out"
+        case .energy: return "Choose how AirVeil uses energy"
         case .coverage: return "Choose how the screen fades"
         case .onset: return "Pick when blur begins"
         case .full: return "Set the finishing angle"
@@ -34,6 +35,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .displays: return "Select the screens AirVeil should cover. Check displays refreshes the list after connecting a monitor. Only selected displays receive the effect."
         case .input: return "Block clicks and scrolling in the blurred area, or across the entire affected display. AirVeil controls and the menu bar stay available so you can pause."
         case .removal: return "Optional removal control needs confirmed in-ear status and Automatic Ear Detection. Seated dimming uses the camera: 0% goes black without locking; reinsertion restores brightness. If your seat cannot be confirmed, displays turn off. Lock Screen settings controls the wake password."
+        case .energy: return "Automatic reduces desktop refresh in Low Power Mode or when your Mac is running hot. Smoothest keeps the usual refresh; Reduced energy always refreshes less often. Head tracking, camera checks, and removal behavior keep their normal timing."
         case .coverage: return "Directional half covers one side as you turn. Whole-screen sweep spreads the effect across the screen. You can compare both in the preview after this tour."
         case .onset: return "Set separate left and right angles with the dial. A smaller angle begins blur sooner; a larger angle gives you more room to move before it starts."
         case .full: return "Fully obscured sets the angle where the effect reaches maximum coverage. Keep it beyond the starting angles for a gradual transition."
@@ -51,6 +53,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .camera: return "camera"
         case .input: return "cursorarrow"
         case .removal: return "airpodspro"
+        case .energy: return "leaf"
         case .coverage, .appearance: return "circle.lefthalf.filled"
         case .tuning: return "slider.horizontal.3"
         case .ready: return "checkmark"
