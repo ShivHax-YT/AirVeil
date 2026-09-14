@@ -58,6 +58,30 @@ import Foundation
         check(confirm(4) == .unchanged && !evidence.isRemovalLatched, "Unsupported masks fail to unknown")
         evidence.reset()
         check(!evidence.isRemovalLatched && evidence.wornMask == nil, "Manual recovery clears anonymous evidence")
+        do {
+            var cached = AirPodsWearEvidence()
+            func sample(_ mask: UInt8, receipt: Double, now: Double) -> AirPodsWearTransition {
+                cached.update(.init(deviceToken: "cached-reader", wornMask: mask, receipt: receipt),
+                    freshMotion: true, now: now)
+            }
+            _ = sample(3, receipt: 200, now: 200)
+            _ = sample(3, receipt: 200, now: 200.25)
+            _ = sample(3, receipt: 200.5, now: 200.5)
+            check(cached.wornMask == 3,
+                  "Fresh cached duplicates between real readings must not prevent establishing the wear baseline")
+            _ = sample(2, receipt: 201, now: 201)
+            _ = sample(2, receipt: 201, now: 201.25)
+            check(sample(2, receipt: 201.5, now: 201.5) == .removed,
+                  "A slow asynchronous reader still confirms removal across cached duplicate polls")
+            _ = sample(3, receipt: 202, now: 202)
+            _ = sample(3, receipt: 202, now: 202.25)
+            check(sample(3, receipt: 202.5, now: 202.5) == .reworn,
+                  "Cached polling likewise cannot prevent reinsertion recovery")
+            _ = sample(2, receipt: 203, now: 203)
+            _ = sample(2, receipt: 203, now: 204)
+            check(sample(2, receipt: 204.1, now: 204.1) == .unchanged && !cached.isRemovalLatched,
+                  "A genuinely stale sample still breaks stability instead of turning one new sample into removal")
+        }
         print("PASS: \(checks) per-AirPod wear-state assertions; no Bluetooth, sensor, or screen access")
     }
 }

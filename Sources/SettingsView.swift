@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 struct VeilPreview: NSViewRepresentable {
     let model: AppModel
@@ -45,7 +46,7 @@ private struct EnableEffectButton: View {
     @ObservedObject var presentation: TrackingPresentation
     let model: AppModel
     var body: some View {
-        Button("Enable desktop effect") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
+        Button("Enable blur") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
             .disabled(!presentation.snapshot.canEnable)
     }
 }
@@ -81,6 +82,22 @@ private struct HeadTrackingControls: View {
     }
 }
 
+/// Observe just the low-frequency wear-status publisher. MotionService also
+/// publishes head pose at sensor rate; the whole Settings view must not subscribe.
+@MainActor private struct AirPodsWearStatus: View {
+    let motion: MotionService
+    @State private var status: String
+    init(motion: MotionService) {
+        self.motion = motion
+        _status = State(initialValue: motion.wearStatus)
+    }
+    var body: some View {
+        Label(status, systemImage: "airpodspro")
+            .font(.caption2).foregroundStyle(.secondary)
+            .onReceive(motion.$wearStatus.removeDuplicates()) { status = $0 }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @State private var advanced = false
@@ -97,7 +114,7 @@ struct SettingsView: View {
                         Text("A screen that follows your attention.").font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(model.enabled ? "ON" : "PAUSED").font(.caption.weight(.bold))
+                    Text(model.enabled ? "BLUR ON" : "BLUR PAUSED").font(.caption.weight(.bold))
                         .foregroundStyle(model.enabled ? Color.green : Color.secondary)
                         .padding(.horizontal,12).padding(.vertical,7)
                         .background(.quaternary,in:Capsule())
@@ -131,7 +148,7 @@ struct SettingsView: View {
                     HeadTrackingControls(presentation:model.presentation,model:model)
                     Divider()
                     VStack(alignment:.leading,spacing:10) {
-                        Label("Desktop access",systemImage:"display").font(.headline)
+                        Label("Live blur access",systemImage:"display").font(.headline)
                         Text(model.permissionGranted ? "Screen capture allowed. Frames stay on this Mac." : "Allow screen capture for live blur. Preview needs no permission.")
                             .font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
                         HStack {
@@ -139,6 +156,8 @@ struct SettingsView: View {
                                 model.requestScreenPermission()
                             }.controlSize(.large).disabled(model.checkingAccess)
                         }
+                        Text("Screen Recording permission is only needed for live blur. AirPod removal, seated blackout and display off work without it.")
+                            .font(.caption2).foregroundStyle(.secondary)
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                     }.frame(maxWidth:.infinity,alignment:.leading)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
@@ -197,6 +216,7 @@ struct SettingsView: View {
                         .toggleStyle(.switch).controlSize(.small)
                     Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
                     if model.sleepDisplaysOnRemoval {
+                        AirPodsWearStatus(motion: model.motion)
                         Toggle("Dim while I am still seated", isOn: $model.dimWhilePresent)
                             .toggleStyle(.switch).controlSize(.small)
                         if model.dimWhilePresent {

@@ -41,11 +41,14 @@ struct AirPodsWearEvidence {
     mutating func update(_ reading: AirPodsWearReading?, freshMotion: Bool,
                          now: TimeInterval) -> AirPodsWearTransition {
         guard now.isFinite, let reading, reading.isValid,
-              now >= reading.receipt, now - reading.receipt <= 0.75,
-              latestReceipt.map({ reading.receipt > $0 }) ?? true else {
+              now >= reading.receipt, now - reading.receipt <= 0.75 else {
             candidate = nil; candidateCount = 0; hasCurrentMetadata = false
             return .unchanged
         }
+        // A background framework query can take longer than the polling tick.
+        // Seeing its still-fresh cached result again is not a new observation
+        // and must not erase the preceding candidate's stability evidence.
+        if let latestReceipt, reading.receipt <= latestReceipt { return .unchanged }
         latestReceipt = reading.receipt
         hasCurrentMetadata = true
         if let accepted, accepted.deviceToken != reading.deviceToken {
@@ -86,6 +89,7 @@ struct AirPodsWearEvidence {
 /// read-only, and never used to connect, pair, scan, or change ear detection.
 /// Unsupported, disabled, ambiguous, and unknown values return no evidence.
 @MainActor final class SystemAirPodsWearReader {
+    private(set) var diagnosticStatus = "Individual-AirPod metadata has not been queried."
     private let queue = DispatchQueue(label: "AirVeil.IndividualAirPods", qos: .utility)
     private let worker = BluetoothWearWorker()
     private var reading: AirPodsWearReading?
@@ -97,8 +101,10 @@ struct AirPodsWearEvidence {
             pending = true
             queue.async { [worker, weak self] in
                 let result = worker.read()
+                let detail = worker.diagnosticStatus
                 Task { @MainActor [weak self] in
                     self?.reading = result
+                    self?.diagnosticStatus = detail
                     self?.pending = false
                 }
             }
@@ -111,11 +117,25 @@ struct AirPodsWearEvidence {
 /// sensor acquisition queue. A slow query stays one in-flight operation and
 /// stale cached evidence expires instead of blocking animations/head tracking.
 private final class BluetoothWearWorker: @unchecked Sendable {
+    private(set) var diagnosticStatus = "Bluetooth metadata has not been queried."
     private var selected: IOBluetoothDevice?
     private var token = UUID().uuidString
 
     func read() -> AirPodsWearReading? {
-        guard let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else { return nil }
+        guard let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+            diagnosticStatus = "Paired-device enumeration is unavailable."
+            return nil
+        }
+        let connected = devices.filter { $0.isConnected() }
+        let supported = devices.filter { byte($0, "isAppleDevice") == 1 && byte($0, "isInEarDetectionSupported") == 1 }
+        let fields = supported.map { device in
+            let value: (String) -> String = { name in self.byte(device, name).map(String.init) ?? "unavailable" }
+            return "connected=\(device.isConnected()),multiBattery=\(value("isMultiBatteryDevice")),earDetection=\(value("inEarDetect")),primarySide=\(value("primaryBud")),primaryInEar=\(value("primaryInEar")),secondaryInEar=\(value("secondaryInEar"))"
+        }.joined(separator: "; ")
+        // Explicit diagnostic data only: no device names, addresses, tokens,
+        // serial numbers or metadata history. This explains unsupported APIs
+        // instead of silently treating a missing ear-state feed as evidence.
+        diagnosticStatus = "Paired \(devices.count); connected \(connected.count); ear-capable \(supported.count). \(fields)"
         let eligible = devices.filter {
             $0.isConnected() && byte($0, "isAppleDevice") == 1 &&
             byte($0, "isMultiBatteryDevice") == 1 &&

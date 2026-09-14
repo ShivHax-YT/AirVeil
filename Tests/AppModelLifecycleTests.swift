@@ -1418,6 +1418,8 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             useCamera(model); acceptSeat(model, now: now)
             model.sleepDisplaysOnRemoval = true
             check(model.motion.monitorsIndividualAirPods, "Per-bud monitoring follows the user's removal feature")
+            model.permissionGranted = false
+            let screenRequests = SCShareableContent.requestCalls
             model.checkAirPodsRemoval(now: now)
             model.motion.removalStateOverride = .disconnected; model.motion.removalCountOverride = 1
             model.checkAirPodsRemoval(now: now + 0.1)
@@ -1428,9 +1430,13 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                   "A nonstreaming AirPod removal blacks out despite fresh remaining-bud motion")
             model.checkAirPodsRemoval(now: now + 2.8); await drainTasks()
             check(model.dimming.isDimmed, "Remaining-bud motion cannot falsely restore brightness")
+            check(!model.permissionGranted && model.overlay.startCalls == 0 && SCShareableContent.requestCalls == screenRequests,
+                  "Removal presence and seated blackout neither require nor request screen capture permission")
             model.motion.removalStateOverride = .connected
             model.checkAirPodsRemoval(now: now + 3); await drainTasks()
             check(!model.dimming.isDimmed && !model.presence.isRunning, "Confirmed per-bud reinsertion restores and stops presence")
+            check(model.overlay.startCalls == 0 && SCShareableContent.requestCalls == screenRequests,
+                  "Reinsertion brightness restoration does not start screen capture")
             model.sleepDisplaysOnRemoval = false
             check(!model.motion.monitorsIndividualAirPods, "Disabling removal stops supplementary Bluetooth monitoring")
             model.shutdown()

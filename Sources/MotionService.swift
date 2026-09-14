@@ -42,6 +42,7 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var removalConnectionState: MotionConnectionState = .unknown
     @Published private(set) var removalEventCount: UInt64 = 0
     @Published private(set) var wearStatus = "Using AirPods connection events."
+    @Published private(set) var wearDiagnosticStatus = "Individual-AirPod metadata has not been queried."
     var monitorsIndividualAirPods = false {
         didSet {
             guard oldValue != monitorsIndividualAirPods else { return }
@@ -379,6 +380,8 @@ final class MotionService: NSObject, ObservableObject {
         nextWearPoll = receipt + 0.25
         _ = wearEvidence.update(manager?.readWearState(now: receipt),
             freshMotion: isFresh && connectionState == .connected, now: receipt)
+        let diagnostic = manager?.readWearDiagnosticStatus() ?? "Headphone transport is unavailable."
+        if wearDiagnosticStatus != diagnostic { wearDiagnosticStatus = diagnostic }
         synchronizeRemovalEvidence()
     }
 
@@ -763,10 +766,12 @@ private final class CoreMotionAttitude: MotionAttitude, @unchecked Sendable {
         handler: @escaping @Sendable (MotionReading?, String?) -> Void)
     func stopMotionUpdates()
     func readWearState(now: TimeInterval) -> AirPodsWearReading?
+    func readWearDiagnosticStatus() -> String
 }
 
 extension HeadphoneMotionTransport {
     func readWearState(now: TimeInterval) -> AirPodsWearReading? { nil }
+    func readWearDiagnosticStatus() -> String { "Transport has no individual-AirPod metadata reader." }
 }
 
 @MainActor private final class CoreMotionTransport: NSObject, HeadphoneMotionTransport,
@@ -804,6 +809,7 @@ extension HeadphoneMotionTransport {
     }
     func stopMotionUpdates() { manager.stopDeviceMotionUpdates() }
     func readWearState(now: TimeInterval) -> AirPodsWearReading? { wearReader.read(now: now) }
+    func readWearDiagnosticStatus() -> String { wearReader.diagnosticStatus }
     nonisolated func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
         Task { @MainActor [weak self] in self?.connectionHandler?(true) }
     }

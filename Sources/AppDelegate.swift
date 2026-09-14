@@ -53,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if CommandLine.arguments.contains("--settings") { showSettings() }
         settingsVisibleAtLaunch = window.isVisible
         model.startMotionAutomatically()
+        // Explicit read-only wear diagnostic hook. With removal disabled it
+        // observes the production reader in this app's permission context but
+        // cannot arm display sleep, brightness changes, or camera presence.
+        if CommandLine.arguments.contains("--diagnose-airpods-wear"), !model.sleepDisplaysOnRemoval {
+            model.motion.monitorsIndividualAirPods = true
+        }
         if let index = CommandLine.arguments.firstIndex(of:"--diagnostics"),CommandLine.arguments.count > index+1 {
             let path = CommandLine.arguments[index+1]
             diagnosticTimer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
@@ -92,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(withTitle:model.pauseShortcutAvailable ? "Pause & Clear Screen  ⌃⌥⌘P" : "Pause & Clear Screen",action:#selector(pause),keyEquivalent:"").target = self
         let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.centerBusy
         if !model.enabled {
-            let enable = menu.addItem(withTitle:"Enable Desktop Effect",action:#selector(enable),keyEquivalent:"")
+            let enable = menu.addItem(withTitle:"Enable Desktop Blur",action:#selector(enable),keyEquivalent:"")
             enable.target=self; enable.isEnabled=model.canRequestEnable && model.selectedDisplayCount > 0
         }
         menu.addItem(withTitle:"Settings…",action:#selector(showSettings),keyEquivalent:",").target=self
@@ -191,7 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "displayIdleSleepPrevented":model.dimming.keepsDisplayAwake,
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
             "removalEventCount":model.motion.removalEventCount,"removalConnectionState":model.motion.removalConnectionState.rawValue,
-            "wearStatus":model.motion.wearStatus,"leftBlurOnset":model.leftOnset,"rightBlurOnset":model.rightOnset,
+            "wearStatus":model.motion.wearStatus,"individualAirPodsMonitoring":model.motion.monitorsIndividualAirPods,
+            "wearDiagnosticStatus":model.motion.wearDiagnosticStatus,"leftBlurOnset":model.leftOnset,"rightBlurOnset":model.rightOnset,
             "displaySleepRequestCount":model.displaySleepRequestCount,
             "referenceState":model.motion.referenceState.rawValue,"hasSavedCenter":model.motion.hasSavedCenter,
             "referenceUsable":model.motion.referenceUsable,

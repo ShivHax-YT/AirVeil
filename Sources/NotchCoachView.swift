@@ -218,7 +218,7 @@ struct NotchCanopy: Shape {
                 Image(systemName: "circle.lefthalf.filled").foregroundStyle(.white.opacity(0.7))
                 Text("AirVeil").font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Text(presentation.enabled ? "Following your head" : "Paused")
+                Text(presentation.enabled ? "Following your head" : "Blur paused")
                     .font(.system(size: 10)).foregroundStyle(.white.opacity(0.48))
                 Button(action: presentation.settings) { Image(systemName: "slider.horizontal.3") }
                     .buttonStyle(NotchTextButton()).help("Settings")
@@ -231,7 +231,7 @@ struct NotchCanopy: Shape {
                 }
                 .buttonStyle(.plain).background(.white.opacity(0.14), in: Capsule())
                 .disabled(presentation.cameraEnabled && !presentation.canCenter)
-                Button(presentation.enabled ? "Pause" : "Enable", action: presentation.toggleEffect)
+                Button(presentation.enabled ? "Pause" : "Enable blur", action: presentation.toggleEffect)
                     .buttonStyle(NotchTextButton())
             }
         }
