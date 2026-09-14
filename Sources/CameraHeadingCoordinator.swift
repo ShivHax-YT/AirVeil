@@ -137,18 +137,22 @@ import CoreMedia
                 return
             }
             if burstStarted && !camera.isRunning {
-                let needsLight = coach.issue == .lowLight
+                let lastGuidance = coach
+                let needsLight = lastGuidance.issue == .lowLight
+                let issue = lastGuidance.issue ?? .camera
+                let title = needsLight ? "A little more light" : "Try the direction check again"
+                let detail = needsLight ? "Light your face, then retry the direction check." :
+                    (lastGuidance.issue != nil ? lastGuidance.title + ". " + lastGuidance.detail : "Keep your face visible and hold still briefly.")
                 let action = retryAction(for: phase)
                 cancelBurst()
-                status = "Camera check ended without a reliable direction. Keep your face visible and use Refresh direction, or Set center for setup."
-                fail(needsLight ? "A little more light" : "Try the direction check again",
-                    detail: needsLight ? "Light your face, then retry the direction check." : "Keep your face visible and hold still briefly.",
-                    issue: needsLight ? .lowLight : .camera, retryAction: action)
+                status = title + ". " + detail
+                fail(title, detail: detail, issue: issue, retryAction: action)
                 return
             }
             if let lastFrameReceipt, now() - lastFrameReceipt > 0.8 {
                 clearEvidence()
                 present(NotchCoachSnapshot(phase: .seeking, title: "Waiting for a clear frame", detail: "Keep your face visible to the camera.", issue: .faceMissing))
+                syncMeasurementStatus()
             }
             processPendingFrames()
             return
@@ -297,6 +301,7 @@ import CoreMedia
                 detail: phase == .center ? "Measuring your screen direction." : "Hold briefly. Your saved center stays the same.",
                 horizontalError: guidance.horizontalError, verticalError: guidance.verticalError))
         }
+        syncMeasurementStatus()
         pending.append(sample)
         if pending.count > 6 { pending.removeFirst(pending.count - 6) }
     }
@@ -330,6 +335,7 @@ import CoreMedia
                 present(NotchCoachSnapshot(phase: phase == .direction ? .turning : .holding,
                     title: phase == .direction ? "Turn, then hold briefly" : "Hold your head still",
                     detail: "Waiting for steady AirPods motion.", issue: .motion))
+                syncMeasurementStatus()
                 continue
             }
             addHoldEvidence(sample, sensorYaw: sensorYaw, phase: phase)
@@ -392,7 +398,7 @@ import CoreMedia
         let snapshot = guidance.issue != nil ? guidance : NotchCoachSnapshot(phase: .seeking,
             title: "Waiting for a usable frame", detail: "Keep your face visible and hold briefly.", issue: .camera)
         present(snapshot)
-        status = snapshot.title + ". " + snapshot.detail
+        syncMeasurementStatus()
     }
     private func addHoldEvidence(_ sample: HeadingCameraSample, sensorYaw: Double, phase: Phase) {
         if phase == .direction, let neutral = setupNeutral,
@@ -409,7 +415,7 @@ import CoreMedia
             snapshot.progress = 0
             snapshot.issue = nil; snapshot.direction = nil
             present(snapshot)
-            status = snapshot.title + ". " + snapshot.detail
+            syncMeasurementStatus()
             return
         }
         if let first = holdEvidence.first, let last = holdEvidence.last,
@@ -427,6 +433,11 @@ import CoreMedia
         snapshot.progress = min(0.9, Double(holdEvidence.count) / 3)
         snapshot.issue = nil; snapshot.direction = nil
         present(snapshot)
+        syncMeasurementStatus()
+    }
+    private func syncMeasurementStatus() {
+        let message = coach.title + ". " + coach.detail
+        if status != message { status = message }
     }
     private func present(_ snapshot: NotchCoachSnapshot) {
         if coach != snapshot { coach = snapshot }

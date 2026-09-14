@@ -391,6 +391,43 @@ private struct StoredCameraProbe: Codable {
             check(f.coordinator.trackingValid, "Three new valid frames recover after \(malformed)")
             f.end()
         }
+        for obstacle in ["face", "framing"] {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 8); await settle()
+            if obstacle == "face" { f.frame(yaw: nil, faces: 0) }
+            else { f.frame(yaw: 30, bounds: CGRect(x: 0.45, y: 0.45, width: 0.08, height: 0.08)) }
+            let rejectedStatus = f.coordinator.status
+            check(f.coordinator.coach.issue != nil, "The \(obstacle) rejection is visible before the next usable frame")
+            f.frame(yaw: 30)
+            check(f.coordinator.coach.phase == .holding && f.coordinator.status != rejectedStatus &&
+                  f.coordinator.status == f.coordinator.coach.title + ". " + f.coordinator.coach.detail,
+                  "Settings immediately clears the stale \(obstacle) rejection when the notch accepts a usable frame")
+            f.advance(0.24, yaw: 8)
+            check(f.coordinator.coach.progress > 0 && f.coordinator.status == f.coordinator.coach.title + ". " + f.coordinator.coach.detail,
+                  "Settings follows actual paired hold guidance after the \(obstacle) clears")
+            f.end()
+        }
+        for obstacle in ["face", "motion"] {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8, yaw: 8); await settle()
+            if obstacle == "face" { f.frame(yaw: nil, faces: 0) }
+            else {
+                f.frame(yaw: 30)
+                f.advance(0.08, yaw: 12, angularSpeed: 0.3)
+                f.advance(0.26, yaw: 8)
+            }
+            let reason = f.coordinator.coach.detail
+            let issue = f.coordinator.coach.issue
+            f.camera.stop()
+            f.coordinator.update(layoutKey: f.layout)
+            check(f.coordinator.coach.phase == .failure && f.coordinator.coach.issue == issue &&
+                  f.coordinator.coach.detail.contains(reason),
+                  "A bounded camera timeout retains the last \(obstacle) obstacle instead of replacing it with generic advice")
+            check(f.coordinator.coach.retryAction == .refreshDirection &&
+                  f.coordinator.status == f.coordinator.coach.title + ". " + f.coordinator.coach.detail,
+                  "The \(obstacle) timeout retains the correct retry and consistent Settings explanation")
+            f.end()
+        }
         do {
             let f = CoordinatorFixture()
             f.advance(0.8, yaw: 20)
