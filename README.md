@@ -2,6 +2,12 @@
 
 AirVeil is a native macOS menu-bar app that uses AirPods head motion to progressively obscure the opposite side of your desktop. Turn left to blur the right side; turn right to blur the left. The untouched side stays transparent. Clicks and scrolling are blocked in blurred areas by default, with a control to block the entire affected display instead.
 
+## Download
+
+Download the latest `.dmg` from [GitHub Releases](https://github.com/ShivHax-YT/AirVeil/releases). Open it and drag AirVeil into Applications, then launch AirVeil from Applications. The current download is an Apple silicon prerelease for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
+
+Build the distributable locally with `bash scripts/package-dmg.sh`; it produces a DMG and SHA-256 checksum under `build/releases/`. The package includes only the app, an Applications shortcut and installation notes; local preferences, diagnostics, recordings and signing secrets are excluded.
+
 ## Requirements
 
 - macOS 14 or later and a Metal-capable Mac.
