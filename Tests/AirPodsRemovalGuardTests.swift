@@ -45,6 +45,13 @@ import Foundation
               "An unobserved rapid reconnect and newer disconnect restarts delay")
         check(!update(152.6, false, true, false, 10), "Old disconnect deadline cannot fire newer event")
         check(update(153.5, false, true, false, 10), "Latest event fires only after its own full delay")
+        _ = update(160, true, false, true, 10)
+        check(!update(161, false, false, false, 10) && guardState.armed && guardState.deadline == nil,
+              "Unknown transport never acts and preserves the observed worn baseline")
+        check(!update(200, false, false, false, 10), "Long idle audio never starts removal")
+        check(!update(201, false, true, false, 11) && guardState.deadline == 202.5,
+              "Confirmed ear loss arriving after disconnect still receives its delay")
+        check(update(202.5, false, true, false, 11), "Only confirmed ear loss can complete removal after a transport gap")
         print("PASS: \(checks) AirPods removal policy assertions; no device or display actions")
     }
 }

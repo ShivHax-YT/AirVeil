@@ -54,7 +54,7 @@ final class AppModel: NSObject, ObservableObject {
     private var isMacSessionActive: Bool { systemAwake && screensAwake && sessionActive && !screenLocked }
     @Published var sleepDisplaysOnRemoval = false {
         didSet {
-            motion.monitorsIndividualAirPods = sleepDisplaysOnRemoval
+            motion.monitorsIndividualAirPods = sleepDisplaysOnRemoval || cameraHeading.isEnabled
             cancelRemovalAction()
             persist()
         }
@@ -180,12 +180,16 @@ final class AppModel: NSObject, ObservableObject {
         removalBrightness = Self.read(d, "removalBrightnessV2", 0, 0...0.5)
         selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
         lastDisplayLayout = cameraLayoutKey
-        motion.monitorsIndividualAirPods = sleepDisplaysOnRemoval
+        motion.monitorsIndividualAirPods = sleepDisplaysOnRemoval || cameraHeading.isEnabled
         loading = false
         refreshPermission()
         motion.$fusionSample.receive(on: DispatchQueue.main).sink { [weak self] _ in
             self?.checkTrackingSafety()
             self?.wakeAnimation()
+        }.store(in: &subscriptions)
+        cameraHeading.$isEnabled.removeDuplicates().sink { [weak self] enabled in
+            guard let self else { return }
+            self.motion.monitorsIndividualAirPods = self.sleepDisplaysOnRemoval || enabled
         }.store(in: &subscriptions)
         cameraHeading.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
@@ -336,7 +340,7 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     /// Separate from tracking safety: a reference jump clears the blur but
-    /// cannot turn off displays. Only a debounced disconnect or confirmed per-bud removal can.
+    /// cannot turn off displays. Only a debounced, confirmed per-bud removal can.
     func checkAirPodsRemoval(now: TimeInterval = CMClockGetHostTimeClock().time.seconds) {
         guard !isShuttingDown, isMacSessionActive else {
             if removalActionPending { cancelRemovalAction() }
@@ -393,7 +397,7 @@ final class AppModel: NSObject, ObservableObject {
                 setRemovalStatus(removalPresence.status)
                 return
             }
-            setRemovalStatus("AirPods removed or disconnected. Turning off displays…")
+            setRemovalStatus("AirPod removal confirmed. Turning off displays…")
             Task {
                 guard removalTicket == ticket, sleepDisplaysOnRemoval, motion.isRunning,
                       motion.removalConnectionState == .disconnected, motion.removalEventCount == event else {
@@ -414,11 +418,11 @@ final class AppModel: NSObject, ObservableObject {
         } else if !sleepDisplaysOnRemoval {
             setRemovalStatus("Automatic display off is off.")
         } else if removalGuard.deadline != nil {
-            setRemovalStatus("AirPods disconnected. Waiting briefly for a reconnect…")
+            setRemovalStatus("AirPod removal detected. Waiting briefly for reinsertion…")
         } else if removalGuard.armed {
             setRemovalStatus(usesRemovalPresence
                 ? (presenceReady ? "Ready. Stay seated to dim; leave the seat to turn off displays." : "Use Set center once to remember your seat. Until then, removal turns off displays.")
-                : "Ready. Displays turn off after AirPods removal or disconnection.")
+                : "Ready. Displays turn off after confirmed AirPod removal.")
         } else if motion.removalConnectionState != .disconnected {
             setRemovalStatus("Wear your AirPods to arm automatic display off.")
         }
@@ -462,8 +466,10 @@ final class AppModel: NSObject, ObservableObject {
             NSWorkspace.shared.open(url)
         }
     }
+    var startupTourActive = false
+
     func startMotionAutomatically() {
-        guard !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
+        guard !startupTourActive, !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
         motion.start()
         message = "AirPods are detected automatically. Face the display and use Set center once."
     }
@@ -471,7 +477,7 @@ final class AppModel: NSObject, ObservableObject {
     /// Camera recovery measures against the saved screen anchor. Manual mode
     /// requires explicit calibration after a gap; stillness never establishes zero.
     func checkReferenceRecovery() {
-        guard !isShuttingDown else { return }
+        guard !startupTourActive, !isShuttingDown else { return }
         guard removalPresence.canResumeHeading, !restoringRemoval else {
             cameraHeading.setSessionActive(false)
             checkTrackingSafety()

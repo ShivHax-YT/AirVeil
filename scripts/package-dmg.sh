@@ -26,6 +26,8 @@ AirVeil for Apple silicon — prerelease
 1. Quit an older AirVeil version normally before replacing it.
 2. Drag AirVeil.app onto the Applications shortcut.
 3. Open AirVeil from Applications, then eject this disk image.
+4. Follow the first-launch Settings tour, or skip it and replay it later
+   using Take a tour at the top of Settings.
 
 Requires macOS 14 or later and compatible head-tracking AirPods.
 This is a development-signed build, not Apple-notarized. macOS may

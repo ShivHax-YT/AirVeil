@@ -1438,7 +1438,9 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.overlay.startCalls == 0 && SCShareableContent.requestCalls == screenRequests,
                   "Reinsertion brightness restoration does not start screen capture")
             model.sleepDisplaysOnRemoval = false
-            check(!model.motion.monitorsIndividualAirPods, "Disabling removal stops supplementary Bluetooth monitoring")
+            check(model.motion.monitorsIndividualAirPods, "Camera assistance still monitors confirmed rewear when display removal is off")
+            model.disableCameraAssistance()
+            check(!model.motion.monitorsIndividualAirPods, "Disabling both features stops supplementary Bluetooth monitoring")
             model.shutdown()
         }
         do {
@@ -1451,6 +1453,18 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.overlay.availableDisplays[0].frame.size.width += 100
             model.handleDisplayConfigurationChange(); await drainTasks()
             check(!model.enabled && !model.presenceReady, "An actual geometry change pauses and invalidates the old seat")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            model.motion.stop()
+            model.startupTourActive = true
+            model.startMotionAutomatically()
+            model.checkReferenceRecovery()
+            check(!model.motion.isRunning, "Startup tutorial defers sensor startup")
+            model.startupTourActive = false
+            model.startMotionAutomatically()
+            check(model.motion.isRunning, "Completing or skipping the tour permits sensor startup")
             model.shutdown()
         }
         print("PASS: \(checks) real AppModel and removal-coordinator lifecycle assertions; camera, motion, brightness, capture, display sleep, permissions, and preferences stubbed")

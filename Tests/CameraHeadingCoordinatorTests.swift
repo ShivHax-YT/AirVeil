@@ -11,7 +11,10 @@ import Combine
     func data(forKey key: String) -> Data? { values[key] as? Data }
     func set(_ value: Any?, forKey key: String) { values[key] = value }
 }
+enum MotionConnectionState { case connected, disconnected, unknown }
 @MainActor final class MotionService: ObservableObject {
+    var removalEventCount: UInt64 = 0
+    var removalConnectionState = MotionConnectionState.connected
     @Published var fusionSample: HeadingMotionSample?
     var fusionEpoch: UInt64 = 1
     var isFresh = true
@@ -143,6 +146,7 @@ private struct StoredCameraProbe: Codable {
             check(value.center.mode == .facingCamera && value.center.neutralYawRadians == 0 && value.center.cameraSign == 0, "New reference explicitly records camera-facing zero and no inferred camera sign")
             f.advance(0.3, yaw: 35); await settle()
             check(close(f.coordinator.yawDegrees, 15) && f.capture.starts == 1, "AirPods turn remains fifteen degrees after success; no second check or zero shift")
+            f.motion.removalEventCount += 1
             f.motion.isFresh = false; f.motion.fusionEpoch += 1; f.motion.fusionSample = nil
             check(!f.coordinator.trackingValid && f.coordinator.coach.phase == .idle, "Epoch loss immediately removes aligned success")
             f.coordinator.update(layoutKey: f.layout); f.motion.isFresh = true
@@ -401,21 +405,37 @@ private struct StoredCameraProbe: Codable {
                   "Enable preserves a valid twenty-degree turn without a second center check")
             f.motion.fusionSample = nil
             f.advance(0.02, yaw: 28); await settle()
-            check(f.capture.starts == starts + 1,
-                  "Losing a previously aligned reference once allows one same-epoch recovery")
+            check(f.capture.starts == starts,
+                  "Idle motion loss never starts an unsolicited camera recovery")
             f.camera.stop(); f.coordinator.update(layoutKey: f.layout)
             f.advance(2, yaw: 28); await settle()
-            check(f.capture.starts == starts + 1,
-                  "A failed recovery cannot become an endless same-epoch camera loop")
+            check(f.capture.starts == starts,
+                  "An idle tracking gap cannot become an endless camera loop")
             f.coordinator.cancelPendingRecovery()
             f.coordinator.resumeTracking(); await settle()
-            check(f.capture.starts == starts + 2,
+            check(f.capture.starts == starts + 1,
                   "Explicit Enable rearms a paused saved-reference recovery")
             f.coordinator.resumeTracking(); await settle()
-            check(f.capture.starts == starts + 2, "Enable during the active recovery does not restart it")
+            check(f.capture.starts == starts + 1, "Enable during the active recovery does not restart it")
             f.advance(0.8, yaw: 8); f.frames(3, cameraYaw: 0, motionYaw: 8)
             check(f.coordinator.trackingValid && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
                   "Enable recovery leaves the durable center unchanged")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8); await settle()
+            let starts = f.capture.starts
+            for _ in 0..<20 {
+                f.motion.isFresh = false; f.motion.fusionEpoch += 1; f.motion.fusionSample = nil
+                f.coordinator.update(layoutKey: f.layout)
+                f.motion.isFresh = true; f.advance(0.8); await settle()
+            }
+            check(f.capture.starts == starts && !f.camera.isRunning,
+                  "Twenty idle or handoff epochs cannot restart an interrupted camera check")
+            f.motion.removalEventCount += 1
+            f.advance(0.1); await settle()
+            check(f.capture.starts == starts + 1, "Confirmed ear return permits one recovery after idle")
             f.end()
         }
         print("PASS: \(checks) centered coordinator/service/fusion checks; injected inputs, no hardware access")

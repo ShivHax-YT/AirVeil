@@ -6,6 +6,7 @@ import ScreenCaptureKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var model: AppModel!
+    private let tour = SettingsTour()
     private var window: NSWindow!
     private var item: NSStatusItem!
     private var hotKey: EventHotKeyRef?
@@ -32,6 +33,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 }
             })
         }
+        model.startupTourActive = tour.isActive
+        tour.onFinish = { [weak self] in
+            guard let self, model.startupTourActive else { return }
+            model.startupTourActive = false
+            model.startMotionAutomatically()
+        }
+        // Restore any previously owned brightness immediately; sensor startup
+        // waits for the welcome tour, while restoration must never wait on UI.
         model.prepareAfterLaunch()
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
         window = NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)),
@@ -41,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width:740,height:660)
         window.level = .normal
-        window.contentView = NSHostingView(rootView:SettingsView(model:model))
+        window.contentView = NSHostingView(rootView:SettingsView(model:model,tour:tour))
         window.center()
         model.showWindow = { [weak self] in self?.showSettings() }
         model.stateChanged = { [weak self] in self?.refreshStatus() }
@@ -50,9 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         notch = NotchOverlayController(model: model)
         refreshStatus(); configureAppMenu(); installHotKey()
         model.setPreviewVisible(false)
-        if CommandLine.arguments.contains("--settings") { showSettings() }
+        if tour.isActive || CommandLine.arguments.contains("--settings") { showSettings() }
         settingsVisibleAtLaunch = window.isVisible
-        model.startMotionAutomatically()
+        if !tour.isActive { model.startMotionAutomatically() }
         // Explicit read-only wear diagnostic hook. With removal disabled it
         // observes the production reader in this app's permission context but
         // cannot arm display sleep, brightness changes, or camera presence.
@@ -126,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
         model.setPreviewVisible(true); model.refreshPermission()
     }
-    func windowWillClose(_ notification: Notification) { model.setPreviewVisible(false) }
+    func windowWillClose(_ notification: Notification) { tour.finish(); model.setPreviewVisible(false) }
     func windowDidMiniaturize(_ notification: Notification) { model.setPreviewVisible(false) }
     func windowDidDeminiaturize(_ notification: Notification) { updatePreviewVisibility() }
     func windowDidChangeOcclusionState(_ notification: Notification) { updatePreviewVisibility() }

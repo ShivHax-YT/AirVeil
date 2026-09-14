@@ -16,7 +16,7 @@ struct AirPodsWearReading: Equatable, Sendable {
 enum AirPodsWearTransition { case unchanged, removed, reworn }
 
 /// Source selection is not ear detection. Only stable per-bud metadata changes
-/// can supplement the public Core Motion connection events. Unknown metadata
+/// can establish removal independently of Core Motion connection events. Unknown metadata
 /// never fabricates a removal, and never clears an already observed removal.
 struct AirPodsWearEvidence {
     private(set) var isRemovalLatched = false

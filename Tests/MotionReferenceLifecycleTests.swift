@@ -83,7 +83,9 @@ private final class SyntheticAttitude: MotionAttitude {
         check(service.fusionEpoch > originalEpoch && service.fusionSample == nil,
               "Removal advances fusion epoch and clears the old raw sample")
         check(service.connectionState == .disconnected && service.disconnectEventCount == 1,
-              "Actual disconnect emits the existing removal event")
+              "Actual disconnect remains available as a transport diagnostic")
+        check(service.removalEventCount == 0 && service.removalConnectionState == .unknown,
+              "Idle audio or device handoff disconnect cannot fabricate ear removal")
         check(service.hasSavedCenter && !service.isCalibrated && service.referenceState == .invalid && !service.trackingValid,
               "Absence retains diagnostic zero but invalidates unverified reference")
         emit(80)

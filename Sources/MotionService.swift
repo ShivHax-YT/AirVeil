@@ -41,7 +41,7 @@ final class MotionService: NSObject, ObservableObject {
     /// remaining bud cannot cancel an independently observed per-bud removal.
     @Published private(set) var removalConnectionState: MotionConnectionState = .unknown
     @Published private(set) var removalEventCount: UInt64 = 0
-    @Published private(set) var wearStatus = "Using AirPods connection events."
+    @Published private(set) var wearStatus = "Waiting for confirmed in-ear status."
     @Published private(set) var wearDiagnosticStatus = "Individual-AirPod metadata has not been queried."
     var monitorsIndividualAirPods = false {
         didSet {
@@ -386,7 +386,10 @@ final class MotionService: NSObject, ObservableObject {
     }
 
     private func synchronizeRemovalEvidence() {
-        let next: MotionConnectionState = wearEvidence.isRemovalLatched ? .disconnected : connectionState
+        // A Core Motion disconnect also occurs during idle audio and device
+        // handoff. Only observed in-ear metadata loss can start removal policy.
+        let next: MotionConnectionState = wearEvidence.isRemovalLatched ? .disconnected :
+            (connectionState == .disconnected ? .unknown : connectionState)
         if next != removalConnectionState {
             let newlyRemoved = next == .disconnected && removalConnectionState != .disconnected
             removalConnectionState = next
@@ -402,7 +405,7 @@ final class MotionService: NSObject, ObservableObject {
             }
         } else if wearEvidence.isRemovalLatched {
             message = "AirPod removal was observed. Waiting for reinsertion or manual brightness recovery."
-        } else { message = "Per-AirPod state unavailable. Using AirPods connection events." }
+        } else { message = "Per-AirPod state unavailable. Waiting for confirmed in-ear status." }
         if wearStatus != message { wearStatus = message }
     }
 

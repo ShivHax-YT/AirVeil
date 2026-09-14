@@ -5,6 +5,10 @@ TASK_SDK="${AIRVEIL_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 if [ ! -d "$TASK_SDK" ]; then TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
 mkdir -p "$TASK_ROOT/build/tests"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+  "$TASK_ROOT/Sources/SettingsTour.swift" "$TASK_ROOT/Tests/SettingsTourTests.swift" \
+  -o "$TASK_ROOT/build/tests/settings-tour"
+"$TASK_ROOT/build/tests/settings-tour"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/BlurOnsetDial.swift" "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Tests/BlurOnsetDialTests.swift" \
   -o "$TASK_ROOT/build/tests/blur-onset-dial"
 "$TASK_ROOT/build/tests/blur-onset-dial"

@@ -100,9 +100,14 @@ private struct HeadTrackingControls: View {
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var tour: SettingsTour
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var advanced = false
+    @State private var advancedBeforeTour = false
     private let accent = Color(red:0.18,green:0.43,blue:0.92)
     var body: some View {
+        ScrollViewReader { proxy in
+        VStack(spacing: 0) {
         ScrollView {
             VStack(alignment:.leading,spacing:22) {
                 HStack(spacing:14) {
@@ -114,17 +119,20 @@ struct SettingsView: View {
                         Text("A screen that follows your attention.").font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if !tour.isActive {
+                        Button("Take a tour") { tour.replay() }.controlSize(.large)
+                    }
                     Text(model.enabled ? "BLUR ON" : "BLUR PAUSED").font(.caption.weight(.bold))
                         .foregroundStyle(model.enabled ? Color.green : Color.secondary)
                         .padding(.horizontal,12).padding(.vertical,7)
                         .background(.quaternary,in:Capsule())
-                }
+                }.tourTarget(.welcome)
                 VStack(alignment:.leading,spacing:12) {
                     TrackingHeader(presentation:model.presentation)
                     VeilPreview(model:model)
                         .frame(height:280).clipShape(RoundedRectangle(cornerRadius:14))
                         .overlay(RoundedRectangle(cornerRadius:14).stroke(.primary.opacity(0.08)))
-                        .accessibilityLabel("Directional blur preview")
+                        .accessibilityLabel("Directional blur preview").tourTarget(.preview)
                     HStack {
                         TrackingDirection(presentation:model.presentation)
                         Spacer()
@@ -145,7 +153,7 @@ struct SettingsView: View {
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 HStack(alignment:.top,spacing:16) {
-                    HeadTrackingControls(presentation:model.presentation,model:model)
+                    HeadTrackingControls(presentation:model.presentation,model:model).tourTarget(.tracking)
                     Divider()
                     VStack(alignment:.leading,spacing:10) {
                         Label("Live blur access",systemImage:"display").font(.headline)
@@ -159,7 +167,7 @@ struct SettingsView: View {
                         Text("Screen Recording permission is only needed for live blur. AirPod removal, seated blackout and display off work without it.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                    }.frame(maxWidth:.infinity,alignment:.leading)
+                    }.frame(maxWidth:.infinity,alignment:.leading).tourTarget(.access)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 VStack(alignment:.leading,spacing:12) {
@@ -184,9 +192,10 @@ struct SettingsView: View {
                             .disabled(model.cameraHeading.isBusy)
                         Text(model.cameraHeading.status).font(.caption2).foregroundStyle(.secondary)
                     }
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.camera)
 
                 VStack(alignment:.leading,spacing:12) {
+                    VStack(alignment:.leading,spacing:12) {
                     HStack {
                         Label("Displays",systemImage:"display.2").font(.headline)
                         Spacer()
@@ -199,6 +208,8 @@ struct SettingsView: View {
                             Text(display.name)
                         }.toggleStyle(.checkbox)
                     }
+                    }.tourTarget(.displays)
+                    VStack(alignment:.leading,spacing:12) {
                     Toggle("Block clicks and scrolling while blurred",isOn:$model.blockInput).toggleStyle(.switch).controlSize(.small)
                     if model.blockInput {
                         Picker("Block interaction in",selection:$model.blocksEntireDisplay) {
@@ -208,12 +219,13 @@ struct SettingsView: View {
                     }
                     Text("The clear area stays usable in Blurred area mode. AirVeil controls and the menu bar remain available.")
                         .font(.caption2).foregroundStyle(.secondary)
+                    }.tourTarget(.input)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 VStack(alignment:.leading,spacing:12) {
                     Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
                     Toggle("Automatically manage displays when AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
-                        .toggleStyle(.switch).controlSize(.small)
+                        .toggleStyle(.switch).controlSize(.small).tourTarget(.removal)
                     Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
                     if model.sleepDisplaysOnRemoval {
                         AirPodsWearStatus(motion: model.motion)
@@ -235,7 +247,7 @@ struct SettingsView: View {
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                     }
-                    Text("Keep Automatic Ear Detection on. Removing either AirPod starts the check when its in-ear status is available. Disconnecting AirPods also starts it; a short tracking interruption only pauses the blur.")
+                    Text("Keep Automatic Ear Detection on. Removing either AirPod starts the check when its in-ear status is available. Idle audio, device switching, and unavailable in-ear status do not start removal checks. Tracking interruptions pause the blur; use Refresh direction to resume.")
                         .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment:.top) {
                         Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")
@@ -254,21 +266,21 @@ struct SettingsView: View {
                     Picker("Screen coverage",selection:$model.wholeScreen) {
                         Text("Directional half").tag(false)
                         Text("Whole-screen sweep").tag(true)
-                    }.pickerStyle(.segmented).accessibilityLabel("Screen coverage")
-                    BlurOnsetDial(left: $model.leftOnset, right: $model.rightOnset)
-                    setting("Fully obscured",value:$model.fullAngle,range:model.minimumFullAngle...70,unit:"°")
+                    }.pickerStyle(.segmented).accessibilityLabel("Screen coverage").tourTarget(.coverage)
+                    BlurOnsetDial(left: $model.leftOnset, right: $model.rightOnset).tourTarget(.onset)
+                    setting("Fully obscured",value:$model.fullAngle,range:model.minimumFullAngle...70,unit:"°").tourTarget(.full)
                     HStack {
                         Toggle("Opaque cover",isOn:$model.opaque).toggleStyle(.switch)
                         Spacer()
                         Toggle("Invert direction",isOn:$model.inverted).toggleStyle(.switch)
-                    }.controlSize(.small)
+                    }.controlSize(.small).tourTarget(.appearance)
                     DisclosureGroup("Fine-tune the animation",isExpanded:$advanced) {
                         VStack(spacing:14) {
                             setting("Blur strength",value:$model.blurPoints,range:8...64,unit:" pt")
                             setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%")
                             setting("Response",value:Binding(get:{model.response*1000},set:{model.response=$0/1000}),range:25...200,unit:" ms")
                         }.padding(.top,14)
-                    }.font(.subheadline)
+                    }.font(.subheadline).tourTarget(.tuning)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 HStack(spacing:12) {
@@ -279,7 +291,7 @@ struct SettingsView: View {
                     } else {
                         EnableEffectButton(presentation:model.presentation,model:model)
                     }
-                }
+                }.tourTarget(.ready)
                 HStack(alignment:.top) {
                     Text("Blur affects everyone viewing a selected display. Tracking loss pauses the blur. Camera assistance needs a clear view of your face; manual mode needs Set center after an interrupted reference.")
                     Spacer()
@@ -287,7 +299,35 @@ struct SettingsView: View {
                 }.font(.caption2).foregroundStyle(.secondary)
             }.padding(28).frame(maxWidth:800)
         }
+        .scrollDisabled(tour.isActive)
+        .allowsHitTesting(!tour.isActive)
+        .accessibilityHidden(tour.isActive)
+        .overlayPreferenceValue(TourAnchorKey.self) { anchors in
+            if let step = tour.step {
+                GeometryReader { geometry in
+                    TourSpotlight(rect: anchors[step].map { geometry[$0] })
+                }
+            }
+        }
+        .clipped()
+        if tour.isActive { SettingsTourCard(tour: tour).transition(.move(edge: .bottom).combined(with: .opacity)) }
+        }
+        .onChange(of: tour.step) { old, step in
+            if old == nil, step != nil { advancedBeforeTour = advanced }
+            if step == .tuning { advanced = true }
+            if let step {
+                // Let disclosure/layout changes settle before resolving the target.
+                DispatchQueue.main.async {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { proxy.scrollTo(step, anchor: .center) }
+                }
+            } else { advanced = advancedBeforeTour }
+        }
+        .onAppear {
+            if let step = tour.step { proxy.scrollTo(step, anchor: .center) }
+        }
+        }
         .background(Color(nsColor:.windowBackgroundColor))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: tour.isActive)
         .frame(minWidth:740,idealWidth:800,minHeight:660,idealHeight:850)
         .onAppear { model.refreshPermission() }
     }

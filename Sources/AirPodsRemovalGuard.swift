@@ -1,7 +1,8 @@
 import Foundation
 
-/// The caller supplies explicit headphone disconnection or validated per-bud
-/// loss. Sample gaps, source handoffs, and calibration changes are not removals.
+/// The caller supplies validated per-bud loss. The historical disconnected
+/// labels describe the removal-policy state, not the transport. Audio handoff,
+/// disconnect callbacks, sample gaps, and calibration changes are not removals.
 struct AirPodsRemovalGuard {
     private(set) var armed = false
     private(set) var deadline: TimeInterval?
@@ -31,7 +32,10 @@ struct AirPodsRemovalGuard {
             return false
         }
         guard disconnected else {
-            reset(disconnectCount: disconnectCount)
+            // Transport may disappear before its final ear-state observation.
+            // Unknown never triggers an action, but retain prior worn evidence
+            // so a later confirmed removal can still receive its full delay.
+            deadline = nil
             return false
         }
         if newDisconnect && (armed || deadline != nil) {

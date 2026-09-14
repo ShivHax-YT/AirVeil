@@ -26,6 +26,7 @@ import CoreMedia
     private var layoutKey = ""
     private var automaticRecoveryAllowed = true
     private var lastAttemptEpoch: UInt64?
+    private var observedRemovalEvent: UInt64 = 0
     private var burstTicket: UInt64 = 0
     private var phase: Phase?
     private var burstStarted = false
@@ -81,7 +82,10 @@ import CoreMedia
             guard self.isEnabled else { return }
             guard let sample else {
                 self.engine.invalidate(); self.isAligned = false
-                if self.hadLiveAlignment { self.lastAttemptEpoch = nil; self.hadLiveAlignment = false }
+                if self.hadLiveAlignment {
+                    self.hadLiveAlignment = false
+                    self.status = "Tracking interrupted. Use Refresh direction when you are ready."
+                }
                 if self.coach.phase == .success { self.present(NotchCoachSnapshot()) }
                 return
             }
@@ -135,6 +139,14 @@ import CoreMedia
     func update(layoutKey: String) {
         self.layoutKey = layoutKey
         guard isEnabled, sessionActive else { return }
+        // A sensor epoch is not a wear event: idle audio and Continuity can
+        // change it repeatedly. Rearm only after a confirmed removal returns.
+        if motion.removalEventCount != observedRemovalEvent,
+           motion.removalConnectionState == .connected, motion.isFresh {
+            observedRemovalEvent = motion.removalEventCount
+            automaticRecoveryAllowed = !trackingValid
+            lastAttemptEpoch = nil
+        }
         if let phase {
             guard burstLayoutKey == layoutKey else {
                 cancelBurst(); engine.invalidate(); isAligned = false
@@ -145,8 +157,8 @@ import CoreMedia
             guard motion.fusionEpoch == burstEpoch, motion.isFresh else {
                 let wasRecovery = phase == .recovery
                 cancelBurst(); engine.invalidate(); isAligned = false
-                if wasRecovery { lastAttemptEpoch = nil }
-                status = wasRecovery ? "Waiting for AirPods before checking direction." : "AirPods changed during setup. Face the display and use Set center again."
+                if wasRecovery { automaticRecoveryAllowed = false }
+                status = wasRecovery ? "Tracking interrupted. Use Refresh direction when you are ready." : "AirPods changed during setup. Face the display and use Set center again."
                 if !wasRecovery { fail("AirPods changed", detail: "Wear your AirPods and set center again.", issue: .motion, retryAction: .setCenter) }
                 return
             }
@@ -173,10 +185,11 @@ import CoreMedia
             return
         }
         let aligned = trackingValid
-        // One new recovery is allowed when a previously live alignment is
-        // lost, including within an epoch. A failed attempt is not itself a
-        // new loss and therefore cannot produce an endless check loop.
-        if hadLiveAlignment && !aligned { lastAttemptEpoch = nil; hadLiveAlignment = false }
+        // Losing alignment pauses blur without spending another camera check.
+        if hadLiveAlignment && !aligned {
+            hadLiveAlignment = false
+            status = "Tracking interrupted. Use Refresh direction when you are ready."
+        }
         if aligned { hadLiveAlignment = true }
         if isAligned != aligned { isAligned = aligned }
         if !aligned, coach.phase == .success { present(NotchCoachSnapshot()) }
@@ -235,8 +248,8 @@ import CoreMedia
     /// and never restarts a valid alignment or an already-running check.
     func resumeTracking() {
         guard isEnabled, sessionActive, hasCenter else { return }
-        automaticRecoveryAllowed = true
         guard !trackingValid, phase == nil else { return }
+        automaticRecoveryAllowed = true
         lastAttemptEpoch = nil
         guard stored?.layoutKey == layoutKey else {
             status = "The display setup changed. Face your reference display and Set center again."
@@ -257,6 +270,7 @@ import CoreMedia
         cancelBurst(clearCoach: false)
         guard sessionActive, motion.isFresh else { return }
         phase = next; burstEpoch = motion.fusionEpoch; lastAttemptEpoch = motion.fusionEpoch
+        automaticRecoveryAllowed = false
         let feedbackReference = next == .recovery && stored?.layoutKey == layoutKey ? stored?.center : nil
         notchMotion.begin(reference: feedbackReference, sample: motion.fusionSample)
         burstLayoutKey = layoutKey
