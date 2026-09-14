@@ -52,6 +52,11 @@ enum CameraAnchorError: LocalizedError {
                onPreview: @escaping @MainActor (CGImage) -> Void,
                onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration
     func stop()
+    func waitUntilStopped() async
+}
+
+extension CameraAnchorCapturing {
+    func waitUntilStopped() async {}
 }
 
 /// Camera acquisition only: no center changes, reference persistence, images
@@ -148,11 +153,17 @@ enum CameraAnchorError: LocalizedError {
         capture.stop()
         status = "Camera is off."
     }
+
+    /// Camera ownership can pass to presence detection only after capture has
+    /// actually stopped on its acquisition queue.
+    func waitUntilStopped() async { await capture.waitUntilStopped() }
 }
 
 @MainActor private final class SystemCameraAnchorCapture: CameraAnchorCapturing {
     private var worker: CameraAnchorWorker?
     private var previewMailbox: CameraPreviewMailbox?
+    private var pendingStop: Task<Void, Never>?
+    private var captureGeneration: UInt64 = 0
     var authorization: CameraAuthorization {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: return .authorized
@@ -170,6 +181,9 @@ enum CameraAnchorError: LocalizedError {
                onPreview: @escaping @MainActor (CGImage) -> Void,
                onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration {
         stop()
+        let ticket = captureGeneration
+        await waitUntilStopped()
+        guard ticket == captureGeneration else { throw CameraAnchorError.cancelled }
         let previewMailbox = CameraPreviewMailbox()
         self.previewMailbox = previewMailbox
         let worker = CameraAnchorWorker(onFrame: { frame in
@@ -189,9 +203,19 @@ enum CameraAnchorError: LocalizedError {
     func stop() {
         // Stop and publication share the main actor, so a drained image cannot
         // be delivered after this cancellation or into the next capture run.
+        captureGeneration &+= 1
         previewMailbox?.cancel(); previewMailbox = nil
-        worker?.stop(); worker = nil
+        if let worker {
+            worker.stop()
+            let earlierStop = pendingStop
+            pendingStop = Task {
+                await earlierStop?.value
+                await worker.waitUntilStopped()
+            }
+        }
+        worker = nil
     }
+    func waitUntilStopped() async { await pendingStop?.value }
 }
 
 /// A capture run owns one mailbox. The producer replaces a superseded image
@@ -326,6 +350,11 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
     func stop() {
         lock.lock(); cancelled = true; lock.unlock()
         queue.async { self.cleanup() }
+    }
+    func waitUntilStopped() async {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
     }
     private func cleanup() {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }

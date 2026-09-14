@@ -8,6 +8,9 @@ import CoreVideo
     var starts = 0
     var stops = 0
     var holdStart = false
+    var holdStop = false
+    var stopWaits = 0
+    var stopContinuations: [CheckedContinuation<Void, Never>] = []
     var continuation: CheckedContinuation<CameraAnchorConfiguration, Error>?
     var frameHandlers: [@MainActor (CameraAnchorFrame) -> Void] = []
     var previewHandlers: [@MainActor (CGImage) -> Void] = []
@@ -26,6 +29,15 @@ import CoreVideo
     }
     func releaseStart() { continuation?.resume(returning: configuration); continuation = nil }
     func stop() { stops += 1 }
+    func waitUntilStopped() async {
+        stopWaits += 1
+        if holdStop { await withCheckedContinuation { stopContinuations.append($0) } }
+    }
+    func releaseStop() {
+        holdStop = false
+        let waiting = stopContinuations; stopContinuations.removeAll()
+        for continuation in waiting { continuation.resume() }
+    }
 }
 
 @main struct CameraAnchorServiceTests {
@@ -147,6 +159,42 @@ import CoreVideo
             do { try await task.value; fatalError("Stopped startup completed successfully") }
             catch CameraAnchorError.cancelled {}
             check(!service.isRunning && service.configuration == nil, "Post-await guard prevents cancelled startup publication")
+        }
+        do {
+            let capture = FakeCameraCapture()
+            let service = CameraAnchorService(capture: capture)
+            var frames = 0
+            try await service.startBurst { _ in frames += 1 }
+            capture.holdStop = true
+            service.stop()
+            var firstFinished = false, secondFinished = false
+            let first = Task { await service.waitUntilStopped(); firstFinished = true }
+            let second = Task { await service.waitUntilStopped(); secondFinished = true }
+            await settle()
+            check(!service.isRunning && capture.stopWaits == 2 && !firstFinished && !secondFinished,
+                  "Camera-off publication does not bypass the capture implementation's physical-stop barrier")
+            capture.frameHandlers[0](frame); capture.previewHandlers[0](thumbnail)
+            check(frames == 0 && service.previewImage == nil,
+                  "Old camera frames and previews stay cancelled while physical teardown is still pending")
+            capture.releaseStop(); await first.value; await second.value
+            check(firstFinished && secondFinished,
+                  "All ownership-handoff waiters resume after the capture queue reports actual release")
+            await service.waitUntilStopped()
+            check(capture.stopWaits == 3, "An already released capture still fulfills the explicit handoff contract")
+        }
+        do {
+            let capture = FakeCameraCapture(); capture.holdStart = true
+            let service = CameraAnchorService(capture: capture)
+            let startup = Task { try await service.startBurst { _ in fatalError("Cancelled start delivered a frame") } }
+            await settle(); capture.holdStop = true; service.stop()
+            var released = false
+            let handoff = Task { await service.waitUntilStopped(); released = true }
+            await settle(); capture.releaseStart()
+            do { try await startup.value; fatalError("Cancelled startup became active") } catch CameraAnchorError.cancelled {}
+            check(!released && !service.isRunning,
+                  "Late startup cancellation does not falsely complete the independent camera-release barrier")
+            capture.releaseStop(); await handoff.value
+            check(released, "Startup-cancelled capture hands ownership over only after physical stop completion")
         }
         do {
             let capture = FakeCameraCapture(); capture.holdStart = true

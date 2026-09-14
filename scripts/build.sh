@@ -18,7 +18,7 @@ swiftc -sdk "$TASK_SDK" -target "$TASK_ARCH-apple-macos14.0" -swift-version 5 -O
   -framework AppKit -framework SwiftUI -framework Combine -framework CoreMotion \
   -framework ScreenCaptureKit -framework Metal -framework MetalKit \
   -framework MetalPerformanceShaders -framework CoreVideo -framework QuartzCore -framework Carbon \
-  -framework AVFoundation -framework Vision -framework CoreMedia -framework ImageIO
+  -framework AVFoundation -framework Vision -framework CoreMedia -framework ImageIO -framework IOKit
 cp "$TASK_ROOT/Resources/Info.plist" "$TASK_APP/Contents/Info.plist"
 cp "$TASK_ROOT/Resources/Veil.metal" "$TASK_APP/Contents/Resources/Veil.metal"
 TASK_ICONSET="$TASK_ROOT/build/AirVeil.iconset"

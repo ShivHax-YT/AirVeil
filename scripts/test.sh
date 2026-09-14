@@ -38,9 +38,27 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
 "$TASK_ROOT/build/tests/notch-motion-feedback"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/TrackingPresentation.swift" \
+  "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Sources/RemovalPresenceCoordinator.swift" \
   "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
   "$TASK_ROOT/Tests/AppModelLifecycleTests.swift" -o "$TASK_ROOT/build/tests/appmodel-lifecycle"
 "$TASK_ROOT/build/tests/appmodel-lifecycle"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Tests/PresenceTrackerTests.swift" \
+  -o "$TASK_ROOT/build/tests/presence-tracker"
+"$TASK_ROOT/build/tests/presence-tracker"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Sources/PresenceCaptureService.swift" \
+  "$TASK_ROOT/Tests/PresenceServiceTests.swift" -o "$TASK_ROOT/build/tests/presence-capture"
+"$TASK_ROOT/build/tests/presence-capture"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/DisplayDimmingService.swift" "$TASK_ROOT/Tests/DisplayDimmingServiceTests.swift" \
+  -o "$TASK_ROOT/build/tests/display-dimming"
+"$TASK_ROOT/build/tests/display-dimming"
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
+  "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Sources/PresenceCaptureService.swift" \
+  "$TASK_ROOT/Sources/DisplayDimmingService.swift" "$TASK_ROOT/Sources/RemovalPresenceCoordinator.swift" \
+  "$TASK_ROOT/Tests/RemovalPresenceCoordinatorTests.swift" -o "$TASK_ROOT/build/tests/removal-presence"
+"$TASK_ROOT/build/tests/removal-presence"
 swiftc -sdk "$TASK_SDK" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
   "$TASK_ROOT/Tests/AirPodsRemovalGuardTests.swift" -o "$TASK_ROOT/build/tests/removal-policy"
 "$TASK_ROOT/build/tests/removal-policy"

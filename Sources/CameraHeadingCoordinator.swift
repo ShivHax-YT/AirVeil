@@ -13,6 +13,9 @@ import CoreMedia
     @Published private(set) var coach = NotchCoachSnapshot()
     let notchMotion: NotchMotionFeedback
     let camera: CameraAnchorService
+    /// Anonymous geometry from a successfully accepted wearer check; no image
+    /// or facial template is retained. Consumers may define the foreground seat.
+    var onAcceptedFace: ((String, String, CGRect, Double) -> Void)?
     private let motion: MotionService
     private let defaults: UserDefaults
     private let now: () -> Double
@@ -27,6 +30,7 @@ import CoreMedia
     private var phase: Phase?
     private var burstStarted = false
     private var pending: [HeadingCameraSample] = []
+    private var pendingFaceBounds: [Double: CGRect] = [:]
     private var burstEpoch: UInt64?
     private var burstConfiguration = ""
     private var burstLayoutKey = ""
@@ -240,6 +244,7 @@ import CoreMedia
         notchMotion.stop()
         phase = nil; burstStarted = false; burstEpoch = nil
         pending.removeAll()
+        pendingFaceBounds.removeAll()
         burstConfiguration = ""; isBusy = false
         holdEvidence.removeAll(); lastFrameReceipt = nil; lowLightFrames = 0
         if clearCoach { present(NotchCoachSnapshot()) }
@@ -296,7 +301,9 @@ import CoreMedia
         }
         syncMeasurementStatus()
         pending.append(sample)
+        pendingFaceBounds[capture] = bounds
         if pending.count > 6 { pending.removeFirst(pending.count - 6) }
+        pendingFaceBounds = pendingFaceBounds.filter { now() - $0.key <= 1.2 }
     }
     private func processPendingFrames() {
         let time = now()
@@ -336,6 +343,9 @@ import CoreMedia
                     cameraSign: 0, sensorSign: 1, revision: centerRevision + 1, mode: .facingCamera)
             }
             if engine.addCenteredCamera(sample, reference: reference, now: time) {
+                if let bounds = pendingFaceBounds[sample.captureHostTime] {
+                    onAcceptedFace?(sample.cameraID, burstConfiguration, bounds, sample.captureHostTime)
+                }
                 if phase == .center {
                     let sign = visualCameraSign(cameraID: sample.cameraID, configurationID: burstConfiguration)
                     let value = StoredCenter(center: reference, layoutKey: layoutKey,
@@ -354,7 +364,7 @@ import CoreMedia
         }
     }
     private func clearEvidence() {
-        pending.removeAll(); holdEvidence.removeAll(); engine.discardCameraEvidence()
+        pending.removeAll(); pendingFaceBounds.removeAll(); holdEvidence.removeAll(); engine.discardCameraEvidence()
     }
     private func presentRejectedFrame(_ guidance: NotchCoachSnapshot) {
         let snapshot = guidance.issue != nil ? guidance : NotchCoachSnapshot(phase: .seeking,

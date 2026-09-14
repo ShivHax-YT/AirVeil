@@ -193,10 +193,29 @@ struct SettingsView: View {
 
                 VStack(alignment:.leading,spacing:12) {
                     Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
-                    Toggle("Turn off displays when AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
+                    Toggle("Automatically manage displays when AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
                         .toggleStyle(.switch).controlSize(.small)
                     Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
-                    Text("Keep Automatic Ear Detection on. Removing both earbuds or disconnecting AirPods turns off all displays after a brief delay. A short tracking interruption will only pause the blur.")
+                    if model.sleepDisplaysOnRemoval {
+                        Toggle("Dim while I am still seated", isOn: $model.dimWhilePresent)
+                            .toggleStyle(.switch).controlSize(.small)
+                        if model.dimWhilePresent {
+                            HStack {
+                                Text("Dimmed brightness")
+                                Slider(value: $model.removalBrightness, in: 0.05...0.50, step: 0.01)
+                                    .accessibilityLabel("Dimmed brightness")
+                                Text("\(Int((model.removalBrightness * 100).rounded()))%")
+                                    .monospacedDigit().frame(width: 38, alignment: .trailing)
+                            }
+                            Text(model.cameraHeading.isEnabled
+                                ? (model.presenceReady ? "Your seat is ready. Turning away is fine. Put AirPods back in to restore your brightness." : "Use Set center once to remember your seat before removing AirPods.")
+                                : "Enable camera assistance and use Set center to check your seat.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("The built-in camera stays on while AirPods are removed. Foreground position and size help exclude background or side occupants. No identity recognition or recordings. If you leave, or the view cannot be confirmed, displays turn off. Only the built-in display is dimmed.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("Keep Automatic Ear Detection on. Removing both earbuds or disconnecting AirPods starts the check after a brief delay. A short tracking interruption only pauses the blur.")
                         .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment:.top) {
                         Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")

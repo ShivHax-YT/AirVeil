@@ -147,6 +147,48 @@ private struct StoredCameraProbe: Codable {
             check(f.defaults.data(forKey: "cameraScreenCenterV1") == saved && f.coordinator.centerRevision == 1, "Recovery preserves the durable facing-center reference")
             f.end()
         }
+        for operation in ["center", "recovery"] {
+            let f = CoordinatorFixture(stored: operation == "recovery")
+            var accepted: [(camera: String, configuration: String, bounds: CGRect, captured: Double)] = []
+            f.coordinator.onAcceptedFace = { camera, configuration, bounds, captured in
+                accepted.append((camera, configuration, bounds, captured))
+            }
+            f.advance(0.8, yaw: 20)
+            if operation == "center" { f.coordinator.setCenter(layoutKey: f.layout) }
+            await settle(); f.advance(0.8, yaw: 20)
+            for rejection in ["off-axis", "missing", "stale"] {
+                f.frames(2, cameraYaw: 0, motionYaw: 20)
+                if rejection == "off-axis" { f.frame(yaw: 15) }
+                else if rejection == "missing" { f.frame(yaw: nil, faces: 0) }
+                else {
+                    f.capture.handlers.last?(CameraAnchorFrame(cameraID: f.capture.cameraID,
+                        configurationID: f.capture.configurationID, faceCount: 1, yawDegrees: 0,
+                        pitchDegrees: 0, rollDegrees: 0, detectionConfidence: 0.95,
+                        faceBounds: CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.5),
+                        captureHostTime: f.time - 2, receiptHostTime: f.time - 1.9, processedHostTime: f.time))
+                }
+                f.advance(0.34, yaw: 20)
+                check(accepted.isEmpty && !f.coordinator.trackingValid,
+                      "A partial \(operation) followed by a \(rejection) frame cannot publish accepted seat geometry")
+            }
+            f.frames(2, cameraYaw: 0, motionYaw: 20)
+            let acceptedBounds = CGRect(x: 0.31, y: 0.29, width: 0.27, height: 0.38)
+            let acceptedTime = f.time
+            f.frame(yaw: 0, bounds: acceptedBounds)
+            f.advance(0.1, yaw: 20)
+            // A newer unpaired frame must not replace the geometry belonging
+            // to the earlier sample that actually completes the accepted batch.
+            f.frame(yaw: 0, bounds: CGRect(x: 0.4, y: 0.35, width: 0.22, height: 0.3))
+            f.advance(0.13, yaw: 20)
+            check(accepted.count == 1 && f.coordinator.trackingValid && !f.camera.isRunning,
+                  "Successful \(operation) publishes one accepted-face callback only")
+            check(accepted[0].camera == f.capture.cameraID && accepted[0].configuration == f.capture.configurationID &&
+                  accepted[0].bounds == acceptedBounds && accepted[0].captured == acceptedTime,
+                  "Accepted \(operation) geometry uses the exact committed sample's camera, framing, bounds, and capture timestamp")
+            f.frame(yaw: 0); f.advance(0.4, yaw: 20)
+            check(accepted.count == 1, "Queued frames cannot publish more seat references after \(operation) completes")
+            f.end()
+        }
         do {
             let f = CoordinatorFixture()
             f.advance(0.8, yaw: 20); f.coordinator.setCenter(layoutKey: f.layout); await settle()

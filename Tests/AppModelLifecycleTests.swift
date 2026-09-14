@@ -8,6 +8,8 @@ import Foundation
 // access, starts Core Motion, displays overlays, or accesses desktop frames.
 // AppModel's defaults dependency is also replaced, so selection and policy
 // persistence tests cannot alter the user's real preferences, even on failure.
+// RemovalPresenceCoordinator/PresenceTracker remain real. Only their physical
+// camera, brightness, idle assertion, and screen sleep boundaries are replaced.
 final class UserDefaults {
     static let standard = UserDefaults()
     private var values: [String: Any] = [:]
@@ -27,9 +29,86 @@ struct VeilDisplayInfo {
     var backingScale = 2.0
 }
 
+@MainActor final class TestHeadingCamera {
+    var holdStop = false
+    private(set) var stopWaits = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+    func waitUntilStopped() async {
+        stopWaits += 1
+        if holdStop { await withCheckedContinuation { continuation = $0 } }
+    }
+    func releaseStop() { holdStop = false; continuation?.resume(); continuation = nil }
+}
+
+@MainActor final class PresenceService: ObservableObject {
+    @Published var state = PresenceState.unknown
+    @Published var status = "Injected presence"
+    private(set) var startReferences: [PresenceSeatReference] = []
+    private(set) var stopCalls = 0
+    private(set) var isRunning = false
+    var holdStop = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func start(reference: PresenceSeatReference) async throws {
+        startReferences.append(reference); isRunning = true; state = .unknown
+    }
+    func stop() async {
+        stopCalls += 1
+        if holdStop { await withCheckedContinuation { continuation = $0 } }
+        isRunning = false
+    }
+    func releaseStop() { holdStop = false; continuation?.resume(); continuation = nil }
+    func refresh() {}
+}
+
+@MainActor final class DisplayDimmingService: ObservableObject {
+    @Published var isDimmed = false
+    @Published var isBusy = false
+    @Published var hasPendingRestore = false
+    @Published var status = "Injected brightness"
+    private(set) var isSuspended = false
+    private(set) var dimTargets: [Double] = []
+    private(set) var restoreCalls = 0
+    private(set) var suspendCalls = 0
+    private(set) var brightnessWrites = 0
+    private(set) var keepsDisplayAwake = false
+    var holdRestore = false
+    var failRestore = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    func setDimmed(_ dimmed: Bool, targetBrightness: Double = 0.08,
+                   keepDisplayAwake: Bool = true) async -> Bool {
+        if !dimmed { return await restore() }
+        guard !isSuspended else { return false }
+        dimTargets.append(targetBrightness); brightnessWrites += 1
+        isDimmed = true; hasPendingRestore = true; keepsDisplayAwake = keepDisplayAwake
+        return true
+    }
+    func restore() async -> Bool {
+        restoreCalls += 1; isSuspended = false; keepsDisplayAwake = false
+        isBusy = true
+        if holdRestore { await withCheckedContinuation { continuations.append($0) } }
+        isBusy = false
+        guard !isSuspended, !failRestore else { return false }
+        if hasPendingRestore { brightnessWrites += 1 }
+        hasPendingRestore = false; isDimmed = false
+        return true
+    }
+    func releaseRestore() {
+        holdRestore = false
+        let waiting = continuations; continuations.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+    func recoverIfNeeded() async -> Bool { await restore() }
+    func suspendUntilActive() async -> Bool {
+        suspendCalls += 1; isSuspended = true; keepsDisplayAwake = false
+        return true
+    }
+}
+
 /// Device/persistence boundary only. The real AppModel remains responsible for
 /// selecting headings, scheduling capture, recovery intent, and session gates.
 @MainActor final class CameraHeadingCoordinator: ObservableObject {
+    let camera = TestHeadingCamera()
+    var onAcceptedFace: ((String, String, CGRect, Double) -> Void)?
     @Published var isEnabled = false
     @Published var status = "Test camera assistance off"
     @Published var isBusy = false
@@ -215,6 +294,25 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         model.cameraHeading.hasCenter = true
         model.cameraHeading.yawDegrees = yaw
         model.cameraHeading.trackingValid = true
+    }
+
+    private static func acceptSeat(_ model: AppModel, now: Double) {
+        model.cameraHeading.onAcceptedFace?("builtin-camera", "640x480-upright",
+            CGRect(x: 0.4, y: 0.5, width: 0.2, height: 0.25), now)
+    }
+
+    /// Use real removal debounce and coordinator policy, injecting only the
+    /// accepted face geometry and the physical acquisition results.
+    private static func beginPresence(_ model: AppModel, now: Double,
+                                      rememberSeat: Bool = true) async {
+        model.sleepDisplaysOnRemoval = true
+        useCamera(model)
+        if rememberSeat { acceptSeat(model, now: now) }
+        model.checkAirPodsRemoval(now: now)
+        removeAirPods(model)
+        model.checkAirPodsRemoval(now: now + 1)
+        model.checkAirPodsRemoval(now: now + 3)
+        await drainTasks()
     }
 
     static func main() async {
@@ -660,6 +758,7 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.overlay.startCalls == (phase == "before-task" ? 1 : 2),
                   "\(phase): superseded capture cannot restart after cancellation")
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            await drainTasks()
             returnLookingAway(model)
             recoveryTicks(model)
             await drainTasks()
@@ -697,6 +796,7 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             await drainTasks()
             check(!model.enabled, "Screen wake cannot resume effect while login session is inactive")
             model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            await drainTasks()
             returnLookingAway(model)
             recoveryTicks(model)
             model.checkAirPodsRemoval(now: now + 10)
@@ -965,6 +1065,7 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.overlay.updateCalls == 0 && !model.enabled,
                   "\(inactive.rawValue): keepalive motion cannot render desktop capture")
             model.handleWorkspaceEvent(active)
+            await drainTasks()
             renderFrame(model)
             check(model.presentation.snapshot.angle == 37 && previewDraws > 0,
                   "\(active.rawValue): returning session explicitly refreshes latest telemetry and preview")
@@ -998,6 +1099,281 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                   "Observed tracking controls reflect busy camera recovery")
             model.shutdown()
         }
-        print("PASS: \(checks) real AppModel lifecycle assertions; camera, motion, capture, display sleep, permissions, and preferences stubbed")
+        do {
+            let model = makeModel()
+            check(model.dimWhilePresent && model.removalBrightness == 0.08 && !model.sleepDisplaysOnRemoval,
+                  "Presence defaults to 8 percent within an opt-in removal master switch")
+            check(!model.presenceReady && model.presence.startReferences.isEmpty && model.dimming.brightnessWrites == 0,
+                  "Cold initialization neither invents a seat nor starts presence or brightness")
+            model.dimWhilePresent = false; model.removalBrightness = 0.12
+            let restored = AppModel()
+            check(!restored.dimWhilePresent && restored.removalBrightness == 0.12,
+                  "Presence preference and chosen brightness persist")
+            restored.resetDefaults()
+            check(restored.dimWhilePresent && restored.removalBrightness == 0.08 && !restored.sleepDisplaysOnRemoval,
+                  "Reset restores presence defaults and disables the removal master switch")
+            model.shutdown(); restored.shutdown()
+        }
+        for (stored, expected) in [(0.01, 0.05), (0.99, 0.5), (Double.nan, 0.08)] {
+            UserDefaults.standard.clear()
+            UserDefaults.standard.set(stored, forKey: "removalBrightness")
+            let model = AppModel()
+            check(model.removalBrightness == expected, "Saved brightness is finite and clamped to the supported control range")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model)
+            check(!model.presenceReady, "Camera tracking availability alone does not create foreground geometry")
+            acceptSeat(model, now: now)
+            check(model.presenceReady, "Only accepted camera-check geometry makes the foreground seat ready")
+            var displays = model.overlay.availableDisplays
+            displays[0].frame.origin.x += 20
+            model.overlay.availableDisplays = displays
+            check(!model.presenceReady, "Changed display geometry prevents reusing the previous seat layout")
+            acceptSeat(model, now: now)
+            check(model.presenceReady, "A new accepted check anchors the updated layout")
+            model.disableCameraAssistance()
+            check(!model.presenceReady, "Disabling camera assistance discards the in-memory seat reference")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            model.cameraHeading.camera.holdStop = true
+            await beginPresence(model, now: now)
+            check(model.cameraHeading.camera.stopWaits == 1 && !model.cameraHeading.sessionActive,
+                  "Removal disables heading and awaits actual camera-stop completion")
+            check(model.presence.startReferences.isEmpty && !model.removalPresence.canResumeHeading,
+                  "Presence capture cannot begin before heading capture has fully stopped")
+            model.cameraHeading.camera.releaseStop()
+            await drainTasks()
+            check(model.presence.startReferences.count == 1 && model.presence.isRunning,
+                  "Presence capture starts once after the heading-stop barrier")
+            let seat = model.presence.startReferences[0]
+            check(seat.cameraID == "builtin-camera" && seat.configurationID == "640x480-upright" && seat.captureHostTime == now,
+                  "Accepted camera identity, framing, and capture timestamp reach the presence provider")
+            let centerCalls = model.cameraHeading.centerCalls, refreshCalls = model.cameraHeading.refreshCalls
+            freshWear(model)
+            model.calibrate(); model.refreshCameraDirection(); model.enable(); model.checkReferenceRecovery()
+            check(model.cameraHeading.centerCalls == centerCalls && model.cameraHeading.refreshCalls == refreshCalls,
+                  "Presence ownership blocks explicit and automatic heading checks")
+            check(!model.enabled && !model.starting && model.overlay.startCalls == 0,
+                  "Presence ownership blocks desktop capture even when AirPods data becomes fresh")
+            model.presence.state = .present
+            model.motion.connectionState = .disconnected
+            model.checkAirPodsRemoval(now: now + 3.2)
+            await drainTasks()
+            check(model.dimming.dimTargets == [0.08] && model.dimming.keepsDisplayAwake,
+                  "Confirmed seated presence requests the chosen real-brightness boundary and idle assertion")
+            check(model.displaySleep.requests == 0, "Seated presence does not request display sleep")
+            model.removalBrightness = 0.1
+            await drainTasks()
+            check(model.dimming.dimTargets == [0.08, 0.1], "Slider changes reach the active dim episode")
+            model.dimWhilePresent = false
+            await drainTasks()
+            check(!model.presence.isRunning && !model.dimming.hasPendingRestore && !model.dimming.keepsDisplayAwake,
+                  "Turning presence dimming off stops capture, restores brightness, and releases the assertion")
+            check(model.removalPresence.canResumeHeading && model.displaySleep.requests == 0,
+                  "Disabling presence cancels the consumed event without an unexpected sleep request")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model); model.enable(); await drainTasks()
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2)
+            await drainTasks()
+            model.presence.holdStop = true; model.dimming.holdRestore = true
+            freshWear(model); model.checkAirPodsRemoval(now: now + 4)
+            await drainTasks()
+            check(!model.removalPresence.canResumeHeading && !model.cameraHeading.sessionActive,
+                  "Rewear keeps heading blocked while camera release and brightness restoration are pending")
+            model.enable(); model.calibrate(); recoveryTicks(model)
+            check(model.overlay.startCalls == 1 && model.cameraHeading.centerCalls == 0 && model.motion.calibrateCalls == 0,
+                  "Fresh rewear cannot restart capture or choose a center through incomplete cleanup")
+            model.dimming.releaseRestore(); await drainTasks()
+            check(!model.removalPresence.canResumeHeading && !model.cameraHeading.sessionActive,
+                  "Brightness restoration alone cannot bypass the presence-camera stop barrier")
+            model.presence.releaseStop(); await drainTasks()
+            check(model.removalPresence.canResumeHeading && model.cameraHeading.sessionActive && !model.dimming.hasPendingRestore,
+                  "Both completed barriers permit heading recovery after rewear")
+            returnLookingAway(model); recoveryTicks(model); await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 2 && model.effectiveYaw == 45 && model.motion.calibrateCalls == 0,
+                  "Post-removal camera alignment restores prior capture at the actual heading without recentering")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            model.dimming.failRestore = true
+            freshWear(model); model.checkAirPodsRemoval(now: now + 4); await drainTasks()
+            check(!model.removalPresence.canResumeHeading && model.dimming.hasPendingRestore && !model.cameraHeading.sessionActive,
+                  "Failed rewear restoration retains ownership and blocks heading instead of claiming completion")
+            model.dimming.failRestore = false
+            let attempts = model.dimming.restoreCalls
+            model.checkAirPodsRemoval(now: now + 4.2); await drainTasks()
+            check(model.dimming.restoreCalls == attempts && !model.removalPresence.canResumeHeading,
+                  "Failed rewear restoration observes a bounded retry delay instead of hammering the driver")
+            model.checkAirPodsRemoval(now: now + 6.1); await drainTasks()
+            check(model.removalPresence.canResumeHeading && !model.dimming.hasPendingRestore,
+                  "A later rewear tick retries failed restoration successfully")
+            model.shutdown()
+        }
+        for inactivity in ["screen", "system", "session", "lock"] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            let writes = model.dimming.brightnessWrites, restoreCalls = model.dimming.restoreCalls
+            switch inactivity {
+            case "screen": model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification)
+            case "system": model.handleWorkspaceEvent(NSWorkspace.willSleepNotification)
+            case "session": model.handleWorkspaceEvent(NSWorkspace.sessionDidResignActiveNotification)
+            default: model.handleScreenLock(true)
+            }
+            await drainTasks()
+            check(model.dimming.isSuspended && !model.dimming.keepsDisplayAwake && model.dimming.hasPendingRestore,
+                  "\(inactivity): inactive session releases idle protection and retains pending brightness restoration")
+            model.removalBrightness = 0.2; model.refreshCameraDirection(); model.calibrate(); model.enable()
+            model.checkAirPodsRemoval(now: now + 5); recoveryTicks(model); await drainTasks()
+            check(model.dimming.brightnessWrites == writes && model.dimming.restoreCalls == restoreCalls,
+                  "\(inactivity): no brightness write or active restoration starts while inactive")
+            check(!model.presence.isRunning && !model.cameraHeading.sessionActive && model.displaySleep.requests == 0,
+                  "\(inactivity): presence, heading, and removal action remain stopped")
+            switch inactivity {
+            case "screen": model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification)
+            case "system": model.handleWorkspaceEvent(NSWorkspace.didWakeNotification)
+            case "session": model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            default: model.handleScreenLock(false)
+            }
+            await drainTasks()
+            check(!model.dimming.hasPendingRestore && model.presence.startReferences.count == 2,
+                  "\(inactivity): active recovery restores owned brightness then resumes the same removal episode")
+            model.presence.state = .absent
+            model.checkAirPodsRemoval(now: now + 6); await drainTasks()
+            check(model.displaySleep.requests == 0,
+                  "\(inactivity): manual wake cannot immediately replay removal sleep before fresh seated presence")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.handleScreenLock(true); await drainTasks()
+            model.sessionLockState = { true }
+            model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification); await drainTasks()
+            check(model.dimming.isSuspended && !model.cameraHeading.sessionActive && model.presence.startReferences.count == 1,
+                  "Display wake while independently locked cannot resume camera or brightness")
+            model.sessionLockState = { false }
+            freshWear(model)
+            model.handleScreenLock(false); await drainTasks()
+            check(model.presence.startReferences.count == 1 && model.removalPresence.canResumeHeading,
+                  "AirPods rewear during lock restores normally without replaying the suspended removal event")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.handleScreenLock(true); await drainTasks()
+            model.motion.disconnectEventCount += 1
+            model.handleScreenLock(false); await drainTasks()
+            check(model.presence.startReferences.count == 1 && model.displaySleep.requests == 0,
+                  "A different disconnect epoch cannot inherit the previously suspended removal action")
+            model.shutdown()
+        }
+        for asleep in [false, true] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            if asleep { model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification); await drainTasks() }
+            let writes = model.dimming.brightnessWrites
+            await model.prepareForTermination(); await drainTasks()
+            check(!model.presence.isRunning && !model.dimming.keepsDisplayAwake,
+                  "Termination stops presence and releases idle protection")
+            check(asleep ? model.dimming.hasPendingRestore && model.dimming.brightnessWrites == writes
+                  : !model.dimming.hasPendingRestore && model.dimming.brightnessWrites == writes + 1,
+                  "Termination restores only while active and leaves sleeping brightness recovery pending")
+            model.shutdown()
+        }
+        for failureOrigin in ["startup", "cancellation"] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            if failureOrigin == "cancellation" {
+                await beginPresence(model, now: now)
+                model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            } else { model.dimming.hasPendingRestore = true }
+            model.dimming.failRestore = true
+            if failureOrigin == "startup" { model.prepareAfterLaunch() }
+            else { model.dimWhilePresent = false }
+            await drainTasks()
+            check(model.removalPresence.phase == .failed && !model.removalPresence.canResumeHeading,
+                  "\(failureOrigin): failed cleanup does not advertise a ready heading camera")
+            // Model the brightness worker's late completion after a reported
+            // timeout. Physical ownership may settle without a new wear event.
+            model.dimming.isBusy = true
+            let attempts = model.dimming.restoreCalls
+            model.checkAirPodsRemoval(now: now + 5); await drainTasks()
+            check(model.dimming.restoreCalls == attempts,
+                  "\(failureOrigin): recovery waits for the previous physical driver operation")
+            model.dimming.isBusy = false; model.dimming.failRestore = false
+            model.dimming.hasPendingRestore = false; model.dimming.isDimmed = false
+            model.checkAirPodsRemoval(now: now + 7); await drainTasks()
+            check(model.removalPresence.canResumeHeading && model.dimming.restoreCalls == attempts + 1,
+                  "\(failureOrigin): normal ticks reconcile late settled ownership without requiring another rewear or workspace event")
+            check(model.displaySleep.requests == 0, "\(failureOrigin): cleanup retry cannot invent a removal sleep")
+            model.shutdown()
+        }
+        for freshRewear in [true, false] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            model.presence.holdStop = true; model.dimming.holdRestore = true
+            freshWear(model); model.motion.isFresh = freshRewear
+            model.checkAirPodsRemoval(now: now + 4); await drainTasks()
+            removeAirPods(model)
+            model.checkAirPodsRemoval(now: now + 4.2); await drainTasks()
+            check(model.presence.startReferences.count == 1 && model.displaySleep.requests == 0,
+                  "A new disconnect while old cleanup is held cannot open a competing camera or sleep early")
+            model.dimming.releaseRestore(); model.presence.releaseStop(); await drainTasks()
+            let afterCleanup = ProcessInfo.processInfo.systemUptime
+            model.checkAirPodsRemoval(now: afterCleanup); await drainTasks()
+            check(model.presence.startReferences.count == 1,
+                  "Rapid re-removal still observes its independent disconnect debounce")
+            model.checkAirPodsRemoval(now: afterCleanup + 2); await drainTasks()
+            check(model.presence.startReferences.count == (freshRewear ? 2 : 1),
+                  "Only a genuinely fresh intervening rewear arms a new removal episode after old cleanup")
+            check(model.displaySleep.requests == 0, "Rapid episode handoff waits for new presence instead of replaying old sleep")
+            await model.prepareForTermination(); model.shutdown()
+        }
+        for inactiveDuringQuit in ["lock", "sleep"] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            model.dimming.holdRestore = true
+            let quitting = Task { await model.prepareForTermination() }
+            await drainTasks()
+            let writes = model.dimming.brightnessWrites
+            if inactiveDuringQuit == "lock" { model.handleScreenLock(true) }
+            else { model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification) }
+            await drainTasks()
+            check(model.dimming.isSuspended && !model.dimming.keepsDisplayAwake,
+                  "\(inactiveDuringQuit) during asynchronous quit supersedes brightness restoration and releases idle protection")
+            model.dimming.releaseRestore(); await quitting.value; await drainTasks()
+            check(model.dimming.hasPendingRestore && model.dimming.brightnessWrites == writes,
+                  "\(inactiveDuringQuit) during quit prevents a delayed restore from writing while inactive")
+            check(!model.presence.isRunning && !model.cameraHeading.sessionActive,
+                  "An inactive quitting app cannot reopen presence or heading acquisition")
+            model.shutdown()
+        }
+        print("PASS: \(checks) real AppModel and removal-coordinator lifecycle assertions; camera, motion, brightness, capture, display sleep, permissions, and preferences stubbed")
     }
 }

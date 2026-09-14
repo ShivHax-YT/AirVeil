@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var hotKey: EventHotKeyRef?
     private var hotHandler: EventHandlerRef?
     private var diagnosticTimer: Timer?
+    private var lockObservers: [NSObjectProtocol] = []
+    private var terminationPending = false
     private var globalPauseActivations = 0
     private var lastIconName: String?
     private var notch: NotchOverlayController?
@@ -18,6 +20,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var diagnosticCaptureExclusion = "Not checked"
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = AppModel()
+        model.sessionLockState = Self.isScreenLocked
+        let lockCenter = DistributedNotificationCenter.default()
+        for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
+            lockObservers.append(lockCenter.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    // A lock notification can only pause. An unlock hint must
+                    // also agree with the current WindowServer session state.
+                    let locked = notification.name.rawValue == "com.apple.screenIsLocked" || Self.isScreenLocked()
+                    self?.model.handleScreenLock(locked)
+                }
+            })
+        }
+        model.prepareAfterLaunch()
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
         window = NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)),
                           styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
@@ -119,7 +134,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func previewNotch() { notch?.previewAnimation() }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool { showSettings(); return true }
+    private static func isScreenLocked() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
+        guard session[kCGSessionOnConsoleKey as String] as? Bool == true,
+              session[kCGSessionLoginDoneKey as String] as? Bool == true else { return true }
+        return session["CGSSessionScreenIsLocked"] as? Bool ?? false
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        Task {
+            await model.prepareForTermination()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification:Notification) {
+        for observer in lockObservers { DistributedNotificationCenter.default().removeObserver(observer) }
+        lockObservers.removeAll()
         diagnosticTimer?.invalidate(); notch?.shutdown(); model.shutdown()
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let hotHandler { RemoveEventHandler(hotHandler) }
@@ -151,6 +183,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "blockedPointerEventCount":model.overlay.blockedPointerEventCount,
             "blockInput":model.blockInput,"blocksEntireDisplay":model.blocksEntireDisplay,
             "sleepDisplaysOnRemoval":model.sleepDisplaysOnRemoval,"removalStatus":model.removalStatus,
+            "dimWhilePresent":model.dimWhilePresent,"removalBrightness":model.removalBrightness,
+            "presenceReady":model.presenceReady,"presencePhase":model.removalPresence.phase.rawValue,
+            "presenceState":model.presence.state.rawValue,"presenceCameraRunning":model.presence.isRunning,
+            "presenceStatus":model.presence.status,"displayDimmed":model.dimming.isDimmed,
+            "brightnessRestorePending":model.dimming.hasPendingRestore,"brightnessStatus":model.dimming.status,
+            "displayIdleSleepPrevented":model.dimming.keepsDisplayAwake,
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
             "displaySleepRequestCount":model.displaySleepRequestCount,
             "referenceState":model.motion.referenceState.rawValue,"hasSavedCenter":model.motion.hasSavedCenter,
