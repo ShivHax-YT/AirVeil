@@ -41,7 +41,7 @@ import CoreGraphics
         panel = window
         window.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
+            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.25
             window.animator().alphaValue = 1
         }
         isOn = true
@@ -54,19 +54,44 @@ import CoreGraphics
     override var canBecomeMain: Bool { false }
 }
 
-@MainActor private final class FaceLightBorder: NSView {
+/// A concentric rounded rectangle gives the broad, even light frame shown in
+/// the reference, with a transparent center and no changes to panel brightness.
+struct FaceLightGeometry {
+    let outer: CGRect
+    let inner: CGRect
+    let outerRadius: CGFloat
+    let innerRadius: CGFloat
+    init(bounds: CGRect) {
+        let side = min(bounds.width, bounds.height)
+        let margin = max(8, side * 0.012)
+        let thickness = min(52, max(24, side * 0.045))
+        outer = bounds.insetBy(dx: margin, dy: margin)
+        inner = outer.insetBy(dx: thickness, dy: thickness)
+        outerRadius = min(120, max(48, side * 0.14))
+        innerRadius = max(8, outerRadius - thickness)
+    }
+    var path: NSBezierPath {
+        let ring = NSBezierPath(roundedRect: outer, xRadius: outerRadius, yRadius: outerRadius)
+        ring.append(NSBezierPath(roundedRect: inner, xRadius: innerRadius, yRadius: innerRadius))
+        ring.windingRule = .evenOdd
+        return ring
+    }
+}
+
+@MainActor final class FaceLightBorder: NSView {
     override var isOpaque: Bool { false }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.setFill()
         dirtyRect.fill(using: .copy)
-        // The transparent middle leaves the check and desktop readable. The
-        // broad warm-white border provides actual light from display pixels.
-        let outer = bounds.insetBy(dx: 5, dy: 5)
-        let inner = bounds.insetBy(dx: 42, dy: 42)
-        let ring = NSBezierPath(roundedRect: outer, xRadius: 28, yRadius: 28)
-        ring.append(NSBezierPath(roundedRect: inner, xRadius: 22, yRadius: 22))
-        ring.windingRule = .evenOdd
-        NSColor(calibratedRed: 1, green: 0.98, blue: 0.94, alpha: 0.98).setFill()
+        let ring = FaceLightGeometry(bounds: bounds).path
+        NSGraphicsContext.saveGraphicsState()
+        let glow = NSShadow()
+        glow.shadowColor = NSColor.white.withAlphaComponent(0.5)
+        glow.shadowBlurRadius = 16
+        glow.shadowOffset = .zero
+        glow.set()
+        NSColor(calibratedRed: 1, green: 0.99, blue: 0.97, alpha: 1).setFill()
         ring.fill()
+        NSGraphicsContext.restoreGraphicsState()
     }
 }

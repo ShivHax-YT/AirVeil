@@ -185,7 +185,7 @@ struct SettingsView: View {
                             Spacer()
                             Button("Turn camera assistance off") { model.disableCameraAssistance() }
                         }
-                        Text("Face straight ahead, within 5° of center, and hold briefly. Each check finishes in one pass. If your face needs more light, the notch offers Face light. It starts off and switches off after the check.")
+                        Text("Face straight ahead, within 5° of center, and hold briefly. Each check finishes in one pass. If repeated camera frames show your face needs more light, a rounded edge light turns on. Turn it off in the notch controls; it switches off after the check.")
                             .font(.caption2).foregroundStyle(.secondary)
                     } else {
                         Button(model.cameraHeading.isBusy ? "Waiting for camera permission…" : "Enable camera assistance") { model.enableCameraAssistance() }

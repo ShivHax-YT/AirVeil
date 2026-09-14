@@ -40,17 +40,26 @@ import SwiftUI
         try render("controls", p, camera, destination)
         p.topInset = 0; p.controls = false; p.snapshot = states[1].1
         try render("external-display", p, camera, destination)
+        p.topInset = 32; p.demo = false
+        for step in NotchTutorialStep.allCases {
+            p.tutorialStep = step
+            try render("tutorial-\(step.rawValue)", p, camera, destination)
+        }
+        p.topInset = 0
+        try render("tutorial-unnotched", p, camera, destination)
+        p.tutorialStep = nil
         precondition(!camera.isRunning && camera.previewImage == nil, "Rendering must not activate camera")
         let lightCamera = CameraAnchorService(capture: RenderCamera(), showVideoEffects: { fatalError("Rendering cannot open system UI") })
         try await lightCamera.startBurst { _ in }
         p.topInset = 32; p.demo = false; p.snapshot = states[2].1
         try render("edge-light-controls", p, lightCamera, destination)
         lightCamera.stop()
-        print("Rendered \(states.count + 15) notch states at 2x without camera capture")
+        print("Rendered \(states.count + 20) notch states at 2x without camera capture")
     }
     @MainActor static func render(_ name: String, _ p: NotchOverlayPresentation, _ camera: CameraAnchorService, _ destination: URL) throws {
         let renderer = ImageRenderer(content: NotchCoachView(presentation: p, camera: camera, headMotion: NotchMotionFeedback())
-            .background(Color(white: 0.20)))
+            .background(Color(white: 0.20))
+            .transaction { $0.animation = nil; $0.disablesAnimations = true })
         renderer.scale = 2
         guard let cg = renderer.cgImage,
               let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else {

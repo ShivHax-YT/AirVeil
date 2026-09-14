@@ -1,11 +1,33 @@
 import AppKit
 import SwiftUI
 
+enum NotchTutorialStep: Int, CaseIterable {
+    case tracking, center, light, controls
+    var title: String {
+        switch self {
+        case .tracking: return "Your head guides the screen"
+        case .center: return "Find your center"
+        case .light: return "A little light, when needed"
+        case .controls: return "You're always in control"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .tracking: return "AirPods track your head's turn, not your eyes. After centering, turning left covers the right side; turning right covers the left. Invert direction swaps the sides."
+        case .center: return "Look straight at the built-in camera, within 5°, and hold briefly. The rail helps you line up. A green smile confirms the check; AirPods then follow your turns."
+        case .light: return "When a visible face is too dark to read, a soft, rounded frame lights the display edges. It turns off when the check ends. You can turn Face light off in the notch controls."
+        case .controls: return "Hover here for Set center, Enable blur, and Pause. If tracking stops, blur clears; use Refresh direction to retry. Clicking elsewhere keeps this tour open. Only End tutorial finishes it."
+        }
+    }
+}
+
 @MainActor final class NotchOverlayPresentation: ObservableObject {
     @Published var snapshot = NotchCoachSnapshot()
     @Published var expanded = false
     @Published var controls = false
     @Published var demo = false
+    @Published var tutorialStep: NotchTutorialStep?
+    var endTutorial: () -> Void = {}
     @Published var topInset: CGFloat = 32
     @Published var hardwareWidth: CGFloat = 180
     @Published var canCenter = false
@@ -22,8 +44,9 @@ import SwiftUI
     var toggleEffect: () -> Void = {}
     var toggleAssistLight: () -> Void = {}
     var contentHeightChanged: (CGFloat) -> Void = { _ in }
-    var contentWidth: CGFloat { controls ? 360 : min(248, max(212, hardwareWidth + 32)) }
+    var contentWidth: CGFloat { tutorialStep != nil || controls ? 360 : min(248, max(212, hardwareWidth + 32)) }
     var contentHeight: CGFloat {
+        if tutorialStep != nil { return 360 }
         if controls { return 118 }
         switch snapshot.phase {
         case .success: return 154
@@ -107,15 +130,16 @@ struct NotchCanopy: Shape {
         VStack(spacing: 0) {
             Color.clear.frame(height: presentation.topInset)
             ZStack {
-                if presentation.controls { controls.transition(.opacity) }
+                if let step = presentation.tutorialStep { tutorial(step).transition(.opacity) }
+                else if presentation.controls { controls.transition(.opacity) }
                 else if success { successContent.transition(.opacity) }
                 else if snapshot.phase == .lighting { lightingContent.transition(.opacity) }
                 else { coachContent.transition(.opacity) }
             }
             .frame(width: presentation.contentWidth, height: presentation.contentHeight, alignment: .top)
             .overlay(alignment: .topTrailing) {
-                if !presentation.controls, !success {
-                    actions.opacity(presentation.hovering ? 1 : 0)
+                if presentation.tutorialStep == nil, !presentation.controls, !success {
+                    actions.opacity(presentation.hovering || snapshot.isAssistLightOn ? 1 : 0)
                         .animation(.easeInOut(duration: 0.16), value: presentation.hovering)
                         .padding(.trailing, 9).padding(.top, 5)
                 }
@@ -125,7 +149,7 @@ struct NotchCanopy: Shape {
             .animation(expansion.delay(presentation.expanded && !reduceMotion ? 0.06 : 0), value: presentation.expanded)
             Spacer(minLength: 0)
         }
-        .frame(width: 360, height: presentation.topInset + 260, alignment: .top)
+        .frame(width: 360, height: presentation.topInset + 380, alignment: .top)
         .background { shape.fill(.black) }
         .clipShape(shape)
         .opacity(reduceMotion && !presentation.expanded ? 0 : 1)
@@ -140,6 +164,57 @@ struct NotchCanopy: Shape {
         .onChange(of: success) { _, accepted in if accepted { successStarted = Date() } }
         .accessibilityAction(named: Text("Cancel check"), presentation.cancel)
         .accessibilityAction(named: Text("Open settings"), presentation.settings)
+    }
+    private func tutorial(_ step: NotchTutorialStep) -> some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("NOTCH TOUR · \(step.rawValue + 1) OF 4")
+                    .font(.system(size: 10, weight: .semibold)).tracking(1)
+                    .foregroundStyle(.white.opacity(0.65))
+                Spacer()
+                Image(systemName: "sparkle").foregroundStyle(.blue)
+            }
+            ZStack {
+                if step == .light {
+                    RoundedRectangle(cornerRadius: 23)
+                        .stroke(.white.opacity(0.32), lineWidth: 12).blur(radius: 8)
+                    RoundedRectangle(cornerRadius: 23)
+                        .stroke(.white, lineWidth: 7)
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 34, weight: .ultraLight))
+                        .foregroundStyle(.white.opacity(0.65))
+                } else if step == .center {
+                    NotchSuccessGlyph(elapsed: 1).padding(10)
+                } else {
+                    Image(systemName: step == .tracking ? "airpodspro" : "hand.raised")
+                        .font(.system(size: 46, weight: .light))
+                        .foregroundStyle(Color(red: 0.45, green: 0.7, blue: 1))
+                }
+            }.frame(width: 130, height: 74).padding(.top, 2).accessibilityHidden(true)
+            Text(step.title).font(.system(size: 18, weight: .semibold))
+                .accessibilityAddTraits(.isHeader)
+            Text(step.detail).font(.system(size: 12)).lineSpacing(3)
+                .foregroundStyle(.white.opacity(0.82))
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Text(camera.isRunning ? "Camera check running · tour stays open" : "Illustration · camera stays off for this tour")
+                .font(.system(size: 9)).foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 8) {
+                Button("Back") {
+                    presentation.tutorialStep = NotchTutorialStep(rawValue: step.rawValue - 1)
+                }.disabled(step == .tracking).frame(minWidth: 48, minHeight: 44)
+                Button("Next") {
+                    presentation.tutorialStep = NotchTutorialStep(rawValue: step.rawValue + 1)
+                }.disabled(step == .controls).frame(minWidth: 48, minHeight: 44)
+                Spacer(minLength: 0)
+                Button("End tutorial", action: presentation.endTutorial)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(minWidth: 112, minHeight: 44)
+                    .background(Color.blue, in: Capsule())
+            }.buttonStyle(.plain)
+        }.padding(.horizontal, 22).padding(.top, 20).padding(.bottom, 14)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Notch tutorial, step \(step.rawValue + 1) of 4")
     }
     private var coachContent: some View {
         VStack(spacing: 10) {

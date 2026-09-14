@@ -360,12 +360,11 @@ private struct StoredCameraProbe: Codable {
             check(f.coordinator.coach.phase == .seeking && !f.coordinator.coach.needsLightHelp,
                   "One underexposed frame cannot flash a light card")
             f.advance(0.34, yaw: 20); f.frame(yaw: nil, luminance: 0.05)
-            check(f.coordinator.coach.phase == .lighting && f.coordinator.coach.needsLightHelp && !f.light.isOn,
-                  "Repeated close-face low-light pose failures show a truthful default-off card")
+            check(f.coordinator.coach.phase == .seeking && f.light.isOn,
+                  "Two distinct close-face low-light failures automatically illuminate the screen edge")
             let starts = f.capture.starts, saved = f.defaults.data(forKey: "cameraScreenCenterV1")
-            f.coordinator.toggleAssistLight()
             check(f.light.isOn && f.coordinator.coach.isAssistLightOn && f.coordinator.coach.phase == .seeking,
-                  "Explicit light-on immediately returns to face detection")
+                  "Automatic light keeps the same camera check in face detection")
             check(f.capture.starts == starts && !f.coordinator.trackingValid && f.coordinator.coach.progress == 0,
                   "Light-on neither starts a second check nor grants calibration")
             f.advance(0.34, yaw: 20); f.frame(yaw: nil, luminance: 0.05)
@@ -379,11 +378,27 @@ private struct StoredCameraProbe: Codable {
                   "Illumination leaves the saved center and one-check count intact")
             f.end()
         }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8); await settle(); f.advance(0.8)
+            f.frame(yaw: nil, luminance: 0.05)
+            f.frame(yaw: nil, luminance: 0.05)
+            check(!f.light.isOn, "Repeating one captured frame cannot activate illumination")
+            f.advance(0.34); f.frame(yaw: nil, luminance: 0.05)
+            check(f.light.isOn, "Distinct low-light evidence activates the light")
+            f.coordinator.toggleAssistLight()
+            for _ in 0..<5 { f.advance(0.34); f.frame(yaw: nil, luminance: 0.05) }
+            check(!f.light.isOn, "Manual Off survives continuing darkness for this entire check")
+            f.coordinator.refreshDirection(); await settle(); f.advance(0.8)
+            f.frame(yaw: nil, luminance: 0.05); f.advance(0.34); f.frame(yaw: nil, luminance: 0.05)
+            check(f.light.isOn, "A new explicit camera check may evaluate its own light need")
+            f.end()
+        }
         for cancellation in ["manual", "sleep", "disable", "face-left", "stale", "failure"] {
             let f = CoordinatorFixture(stored: true)
             f.advance(0.8, yaw: 8); await settle(); f.advance(0.8, yaw: 8)
             f.frame(yaw: nil, luminance: 0.05); f.advance(0.34, yaw: 8); f.frame(yaw: nil, luminance: 0.05)
-            f.coordinator.toggleAssistLight(); check(f.light.isOn, "Fixture begins with explicit face light")
+            check(f.light.isOn, "Fixture begins with camera-triggered face light")
             switch cancellation {
             case "manual": f.coordinator.cancelPendingRecovery()
             case "sleep": f.coordinator.setSessionActive(false)

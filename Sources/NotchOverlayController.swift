@@ -12,6 +12,8 @@ private final class NotchPanel: NSPanel {
 @MainActor final class NotchOverlayController {
     let presentation = NotchOverlayPresentation()
     private let model: AppModel
+    private let defaults: UserDefaults
+    static let tutorialCompletionKey = "notchTutorialCompletedV1"
     private var panel: NotchPanel?
     private var geometry: NotchGeometry?
     private var subscriptions = Set<AnyCancellable>()
@@ -25,8 +27,10 @@ private final class NotchPanel: NSPanel {
     private var pointerInside = false
     private var contentHeight: CGFloat = 190
 
-    init(model: AppModel) {
+    init(model: AppModel, defaults: UserDefaults = .standard) {
         self.model = model
+        self.defaults = defaults
+        presentation.endTutorial = { [weak self] in self?.endTutorial() }
         presentation.center = { [weak self] in self?.setCenter() }
         presentation.refresh = { [weak self] in self?.retry() }
         presentation.cancel = { [weak self] in self?.cancel() }
@@ -63,7 +67,11 @@ private final class NotchPanel: NSPanel {
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 // AppModel gates actual camera work on all three session states.
-                MainActor.assumeIsolated { self?.active = true }
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.active = true
+                    if self.presentation.tutorialStep != nil { self.show() }
+                }
             })
         }
         globalMouse = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
@@ -105,7 +113,17 @@ private final class NotchPanel: NSPanel {
         else if model.cameraHeading.hasCenter { model.refreshCameraDirection() }
         else { model.calibrate() }
     }
+    private func endTutorial() {
+        guard presentation.tutorialStep != nil else { return }
+        defaults.set(true, forKey: Self.tutorialCompletionKey)
+        presentation.tutorialStep = nil
+        demoTask?.cancel(); presentation.demo = false
+        if model.cameraHeading.coach.phase != .idle { receive(model.cameraHeading.coach) }
+        else { updateControls(); presentation.controls = true; show() }
+    }
     private func cancel() {
+        // Stopping a camera check never dismisses the teaching surface.
+        if presentation.tutorialStep != nil { model.pause(); return }
         if presentation.demo { demoTask?.cancel(); presentation.demo = false; hide(); return }
         model.pause()
         hide()
@@ -132,7 +150,7 @@ private final class NotchPanel: NSPanel {
         self.geometry = geometry
         presentation.topInset = geometry.topInset
         presentation.hardwareWidth = geometry.hardwareWidth
-        let frame = geometry.panelFrame(width: 360, contentHeight: 260)
+        let frame = geometry.panelFrame(width: 360, contentHeight: 380)
         let window = NotchPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.isFloatingPanel = true; window.hidesOnDeactivate = false
@@ -149,6 +167,9 @@ private final class NotchPanel: NSPanel {
         if presentation.expanded && active { window.orderFrontRegardless() }
     }
     private func show() {
+        if presentation.tutorialStep == nil, !defaults.bool(forKey: Self.tutorialCompletionKey) {
+            presentation.tutorialStep = .tracking
+        }
         closeWork?.cancel(); closeWork = nil
         panel?.orderFrontRegardless()
         // The panel stays at one size; only the native view animates.
@@ -156,6 +177,9 @@ private final class NotchPanel: NSPanel {
         updateHitTesting()
     }
     private func hide(immediately: Bool = false) {
+        // Only End tutorial records completion. Sleep hides it temporarily;
+        // idle callbacks, pointer exit, and delayed closes cannot dismiss it.
+        if presentation.tutorialStep != nil, !immediately { return }
         hoverWork?.cancel(); hoverWork = nil; pointerInside = false
         closeWork?.cancel()
         presentation.expanded = false
@@ -167,7 +191,7 @@ private final class NotchPanel: NSPanel {
             return
         }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.presentation.expanded else { return }
+            guard let self, !self.presentation.expanded, self.presentation.tutorialStep == nil else { return }
             self.panel?.orderOut(nil)
             self.clearDismissedSnapshot()
         }
@@ -197,11 +221,11 @@ private final class NotchPanel: NSPanel {
         return NotchCanopy(hardwareWidth: geometry.hardwareWidth, topInset: geometry.topInset,
                            bodyWidth: presentation.contentWidth, bodyHeight: contentHeight).path(in: bounds).contains(local)
     }
-    private func pointerMoved() {
+    private func pointerMoved() { updatePointerPosition(NSEvent.mouseLocation) }
+    func updatePointerPosition(_ point: CGPoint) {
         guard active, let geometry else { return }
         updateHitTesting()
-        guard model.cameraHeading.coach.phase == .idle, !presentation.demo else { return }
-        let point = NSEvent.mouseLocation
+        guard presentation.tutorialStep == nil, model.cameraHeading.coach.phase == .idle, !presentation.demo else { return }
         let inside = geometry.hoverRect.contains(point) || (presentation.expanded && contentContains(point))
         guard inside != pointerInside else { return }
         pointerInside = inside
@@ -240,10 +264,12 @@ private final class NotchPanel: NSPanel {
         demoTask?.cancel(); hoverWork?.cancel(); closeWork?.cancel()
         if let globalMouse { NSEvent.removeMonitor(globalMouse) }
         if let localMouse { NSEvent.removeMonitor(localMouse) }
+        globalMouse = nil; localMouse = nil
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         subscriptions.removeAll(); panel?.orderOut(nil); panel?.close(); panel = nil
+        observers.removeAll()
     }
 }

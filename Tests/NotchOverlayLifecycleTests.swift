@@ -35,7 +35,11 @@ import SwiftUI
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let model = AppModel()
-        let controller = NotchOverlayController(model: model)
+        let suite = "AirVeil.NotchTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(true, forKey: NotchOverlayController.tutorialCompletionKey)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = NotchOverlayController(model: model, defaults: defaults)
         defer { controller.shutdown() }
         var checks = 0
         func check(_ result: Bool, _ message: String) {
@@ -130,6 +134,38 @@ import SwiftUI
         check(!panel.isVisible && controller.presentation.snapshot.phase == .idle,
               "Only the finished retraction clears the old visual snapshot")
         check(!model.cameraHeading.camera.isRunning && model.cameraHeading.camera.previewImage == nil, "Lifecycle tests never start the camera")
+        controller.shutdown()
+        defaults.removeObject(forKey: NotchOverlayController.tutorialCompletionKey)
+        let firstUse = NotchOverlayController(model: AppModel(), defaults: defaults)
+        firstUse.showControls()
+        check(firstUse.presentation.tutorialStep == .tracking && firstUse.presentation.expanded,
+              "The very first notch appearance opens the tutorial")
+        firstUse.updatePointerPosition(CGPoint(x: -20000, y: -20000))
+        firstUse.presentation.cancel()
+        await drain()
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        check(firstUse.presentation.expanded && firstUse.presentation.tutorialStep != nil,
+              "Pointer exit, cancel, idle delivery and delayed dismissal cannot end the tutorial")
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        check(!firstUse.presentation.expanded && firstUse.presentation.tutorialStep != nil,
+              "Sleep temporarily hides the tutorial without completing it")
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        check(firstUse.presentation.expanded, "The unfinished tutorial returns after wake")
+        firstUse.shutdown()
+        check(!defaults.bool(forKey: NotchOverlayController.tutorialCompletionKey), "Quit is not tutorial completion")
+        let resumed = NotchOverlayController(model: AppModel(), defaults: defaults)
+        resumed.showControls()
+        check(resumed.presentation.tutorialStep != nil, "Unfinished first-use tutorial returns on next launch")
+        resumed.presentation.tutorialStep = .controls
+        resumed.presentation.endTutorial()
+        check(resumed.presentation.tutorialStep == nil && defaults.bool(forKey: NotchOverlayController.tutorialCompletionKey),
+              "Only End tutorial records completion")
+        resumed.shutdown()
+        let finished = NotchOverlayController(model: AppModel(), defaults: defaults)
+        finished.showControls()
+        check(finished.presentation.tutorialStep == nil && finished.presentation.controls,
+              "Completed tutorial does not repeat on later notch appearances")
+        finished.shutdown()
         print("Passed \(checks) native notch controller lifecycle checks")
     }
 }

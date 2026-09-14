@@ -20,3 +20,8 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/NotchCoachView.swift" "$TASK_ROOT/Tests/NotchViewRender.swift" \
   -o "$TASK_ROOT/build/tests/notch-render"
 "$TASK_ROOT/build/tests/notch-render" "$TASK_ROOT/build/notch-previews"
+
+swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+  "$TASK_ROOT/Sources/FaceLightService.swift" "$TASK_ROOT/Tests/FaceLightBorderTests.swift" \
+  -o "$TASK_ROOT/build/tests/face-light-border"
+"$TASK_ROOT/build/tests/face-light-border" "$TASK_ROOT/build/notch-previews"

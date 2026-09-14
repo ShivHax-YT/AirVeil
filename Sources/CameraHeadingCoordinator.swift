@@ -39,6 +39,8 @@ import CoreMedia
     private var successDismissal: Task<Void, Never>?
     private var lastFrameReceipt: Double?
     private var lowLightFrames = 0
+    private var automaticLightAttempted = false
+    private var lastLowLightCapture: Double?
     private var hadLiveAlignment = false
     private var lightMissingFaceFrames = 0
 
@@ -225,6 +227,7 @@ import CoreMedia
     /// Turning on the light continues this same check; it cannot set center.
     func toggleAssistLight() {
         if camera.isAssistLightOn {
+            automaticLightAttempted = true
             camera.setAssistLightEnabled(false)
             present(NotchCoachSnapshot(phase: phase == nil ? .idle : .seeking,
                 title: "Reading your direction", detail: "Face light is off."))
@@ -271,6 +274,7 @@ import CoreMedia
         guard sessionActive, motion.isFresh else { return }
         phase = next; burstEpoch = motion.fusionEpoch; lastAttemptEpoch = motion.fusionEpoch
         automaticRecoveryAllowed = false
+        automaticLightAttempted = false; lastLowLightCapture = nil
         let feedbackReference = next == .recovery && stored?.layoutKey == layoutKey ? stored?.center : nil
         notchMotion.begin(reference: feedbackReference, sample: motion.fusionSample)
         burstLayoutKey = layoutKey
@@ -321,7 +325,21 @@ import CoreMedia
             guidance.phase = .seeking; guidance.issue = .camera; guidance.needsLightHelp = false
             guidance.title = "Waiting for a clear frame"; guidance.detail = "Keep facing the camera."
         }
-        lowLightFrames = guidance.issue == .lowLight ? min(2, lowLightFrames + 1) : 0
+        if guidance.issue == .lowLight, fresh, let capture = frame.captureHostTime {
+            if lastLowLightCapture.map({ capture > $0 }) ?? true {
+                lowLightFrames = min(2, lowLightFrames + 1)
+                lastLowLightCapture = capture
+            }
+        } else { lowLightFrames = 0; lastLowLightCapture = nil }
+        // One automatic light attempt per camera burst. A repeated dark frame,
+        // missing face, or manual Off cannot produce an illumination loop.
+        if lowLightFrames >= 2, !automaticLightAttempted, !camera.isAssistLightOn,
+           phase != nil, sessionActive, camera.isRunning {
+            automaticLightAttempted = true
+            if camera.setAssistLightEnabled(true) {
+                clearEvidence(); lightMissingFaceFrames = 0
+            }
+        }
         if guidance.issue == .lowLight && (lowLightFrames < 2 || camera.isAssistLightOn) {
             guidance.phase = .seeking
             guidance.title = "Reading your direction"
