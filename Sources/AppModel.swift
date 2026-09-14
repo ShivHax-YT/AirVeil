@@ -398,7 +398,7 @@ final class AppModel: NSObject, ObservableObject {
         if cameraHeading.isEnabled {
             cameraHeading.setCenter(layoutKey: cameraLayoutKey)
             simulate = false
-            message = "The camera measures the screen direction once; a short head turn finishes first-time setup."
+            message = "Face straight ahead within 5° and hold briefly. One check sets your center and aligns the AirPods."
             return
         }
         calibrationTicket += 1

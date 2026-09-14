@@ -20,27 +20,22 @@ import Foundation
         let cropped = NotchCoachGuidance.observation(frame(bounds: CGRect(x: 0.4, y: 0.3, width: 0.3, height: 0.4)), requiresFrontalPose: true)
         check(abs(cropped.horizontalError + 0.1 * 4 / 3) < 0.0001,
               "Horizontal offset follows the square aspect-fill crop of the VGA preview")
-        let outside = NotchCoachGuidance.observation(frame(bounds: CGRect(x: 0.505, y: 0.3, width: 0.3, height: 0.4)), requiresFrontalPose: true)
-        let borderlineFrame = frame(bounds: CGRect(x: 0.475, y: 0.3, width: 0.3, height: 0.4))
-        check(NotchCoachGuidance.observation(borderlineFrame, requiresFrontalPose: true).phase == .holding &&
-              NotchCoachGuidance.observation(borderlineFrame, requiresFrontalPose: true, previous: outside).phase == .offCenter,
-              "A correction has an inner release boundary to avoid guide flicker")
-        for (bounds, direction, axis, sign) in [
-            (CGRect(x: 0.05, y: 0.3, width: 0.2, height: 0.4), NotchCoachDirection.left, "x", 1.0),
-            (CGRect(x: 0.75, y: 0.3, width: 0.2, height: 0.4), NotchCoachDirection.right, "x", -1.0),
-            (CGRect(x: 0.35, y: 0.02, width: 0.3, height: 0.2), NotchCoachDirection.up, "y", 1.0),
-            (CGRect(x: 0.35, y: 0.78, width: 0.3, height: 0.2), NotchCoachDirection.down, "y", -1.0)
-        ] {
-            let state = NotchCoachGuidance.observation(frame(bounds: bounds), requiresFrontalPose: true)
-            check(state.phase == .offCenter && state.direction == direction,
-                  "Preview correction points toward the middle on \(axis) axis")
-            check((axis == "x" ? state.horizontalError : state.verticalError) * sign > 0,
-                  "Guide errors follow the mirrored, top-origin thumbnail coordinates")
+        for requiresSetup in [true, false] {
+            for yaw in [-15.0, -13.0, -5.01, 5.01, 13.0, 15.0] {
+                let state = NotchCoachGuidance.observation(frame(yaw: yaw), requiresFrontalPose: requiresSetup)
+                check(state.phase == .offCenter && state.issue == .pose && state.progress == 0,
+                      "Both setup and recovery reject yaw beyond the absolute five-degree center gate")
+                check(state.detail.contains("5°"), "The correction states the actual center buffer")
+            }
+            for yaw in [-5.0, 0, 5] {
+                let state = NotchCoachGuidance.observation(frame(yaw: yaw), requiresFrontalPose: requiresSetup)
+                check(state.phase == .holding && state.progress == 0,
+                      "Within-buffer pose requests one hold but cannot grant calibration")
+            }
         }
-        check(NotchCoachGuidance.observation(frame(yaw: 30), requiresFrontalPose: true).issue == .pose,
-              "Explicit screen center cannot accept a substantial head turn")
-        check(NotchCoachGuidance.observation(frame(yaw: 30), requiresFrontalPose: false).phase == .holding,
-              "Recovery accepts the current modest turn without redefining screen center")
+        let side = NotchCoachGuidance.observation(frame(bounds: CGRect(x: 0.7, y: 0.3, width: 0.2, height: 0.4)), requiresFrontalPose: true)
+        check(side.phase == .holding && side.horizontalError < 0 && side.direction == nil,
+              "Thumbnail position retains mirrored coordinates without becoming a head-angle gate")
         check(NotchCoachGuidance.observation(frame(pitch: 25), requiresFrontalPose: false).phase == .offCenter,
               "Excessive pitch asks for a level head before recovery")
         check(NotchCoachGuidance.observation(frame(luminance: 0.05), requiresFrontalPose: true).issue == nil,

@@ -12,6 +12,7 @@ struct CameraAnchorConfiguration: Sendable, Equatable {
     let cameraName: String
     let configurationID: String
     let captureFramesPerSecond: Double
+    var supportsEdgeLight = false
 }
 
 /// Angles retain Vision's image-space sign. Physical-left conversion belongs
@@ -63,17 +64,31 @@ enum CameraAnchorError: LocalizedError {
     /// Unmirrored ephemeral thumbnail; the notch mirrors it for the wearer.
     @Published private(set) var previewImage: CGImage?
     var deviceID: String? { configuration?.cameraID }
+    var canOpenEdgeLightControls: Bool {
+        isRunning && captureReady && configuration?.supportsEdgeLight == true
+    }
     private let capture: any CameraAnchorCapturing
+    private let showVideoEffects: () -> Void
+    private var captureReady = false
     private var generation: UInt64 = 0
     private var timeout: Task<Void, Never>?
 
     convenience init() { self.init(capture: SystemCameraAnchorCapture()) }
-    init(capture: any CameraAnchorCapturing) {
+    init(capture: any CameraAnchorCapturing,
+         showVideoEffects: @escaping () -> Void = { AVCaptureDevice.showSystemUserInterface(.videoEffects) }) {
         self.capture = capture
+        self.showVideoEffects = showVideoEffects
         authorization = capture.authorization
     }
 
     func refreshAuthorization() { authorization = capture.authorization }
+
+    /// Opens Apple's controls for the active capture. Edge Light has no public
+    /// setter; the wearer chooses it in the system's Video Effects interface.
+    func openEdgeLightControls() {
+        guard canOpenEdgeLightControls else { return }
+        showVideoEffects()
+    }
 
     /// Call only from an explicit permission/setup action. This never starts capture.
     func requestPermission() async -> Bool {
@@ -116,6 +131,7 @@ enum CameraAnchorError: LocalizedError {
             })
             guard generation == run, isRunning, !Task.isCancelled else { throw CameraAnchorError.cancelled }
             configuration = result
+            captureReady = true
             status = "Brief camera check active. Images are processed locally and discarded."
         } catch {
             if generation == run { stop(); status = error.localizedDescription }
@@ -127,6 +143,7 @@ enum CameraAnchorError: LocalizedError {
         generation &+= 1
         timeout?.cancel(); timeout = nil
         isRunning = false
+        captureReady = false
         previewImage = nil
         capture.stop()
         status = "Camera is off."
@@ -289,8 +306,9 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
         device.activeVideoMinFrameDuration = duration
         device.activeVideoMaxFrameDuration = duration
         device.unlockForConfiguration()
-        let result = CameraAnchorConfiguration(cameraID: device.uniqueID, cameraName: device.localizedName,
+        var result = CameraAnchorConfiguration(cameraID: device.uniqueID, cameraName: device.localizedName,
             configurationID: "vision3-up-unmirrored-vga-centerStage:\(device.isCenterStageActive)", captureFramesPerSecond: fps)
+        if #available(macOS 26.2, *) { result.supportsEdgeLight = device.activeFormat.isEdgeLightSupported }
         configuration = result
         for notification in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: notification, object: session, queue: nil) { [weak self] _ in

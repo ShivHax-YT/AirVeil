@@ -69,7 +69,7 @@ private struct HeadTrackingControls: View {
             Label(presentation.snapshot.hasSavedCenter ? "Screen direction saved" : "Set your screen direction",
                   systemImage:presentation.snapshot.hasSavedCenter ? "scope" : "viewfinder")
                 .font(.caption.weight(.medium))
-            Text(model.cameraHeading.isEnabled ? "Set center records the screen direction. Camera checks can restore that direction after reinsertion." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
+            Text(model.cameraHeading.isEnabled ? "Face straight ahead within 5°. A brief camera and AirPods check establishes center after setup or reinsertion." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
                 .font(.caption2).foregroundStyle(.secondary)
             Button(presentation.snapshot.centerBusy ? "Checking direction…" : "Set center") { model.calibrate() }
                 .disabled(!presentation.snapshot.canSetCenter).controlSize(.large)
@@ -158,7 +158,7 @@ struct SettingsView: View {
                             Spacer()
                             Button("Turn camera assistance off") { model.disableCameraAssistance() }
                         }
-                        Text("First setup: face the display and Set center, then make a short left or right turn and hold briefly. Later checks measure your current angle; they do not make it the new center. Keep the camera and display in the same position.")
+                        Text("Face straight ahead, within 5° of center, and hold briefly. Setup and later checks each finish in one pass. Keep the Mac camera and display in the same position.")
                             .font(.caption2).foregroundStyle(.secondary)
                     } else {
                         Button(model.cameraHeading.isBusy ? "Waiting for camera permission…" : "Enable camera assistance") { model.enableCameraAssistance() }

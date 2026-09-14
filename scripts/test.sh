@@ -28,7 +28,7 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   -o "$TASK_ROOT/build/tests/camera-coordinator"
 "$TASK_ROOT/build/tests/camera-coordinator"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
-  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/NotchCoachState.swift" \
+  "$TASK_ROOT/Sources/CameraAnchorService.swift" "$TASK_ROOT/Sources/HeadingFusionEngine.swift" "$TASK_ROOT/Sources/NotchCoachState.swift" \
   "$TASK_ROOT/Tests/NotchCoachStateTests.swift" -o "$TASK_ROOT/build/tests/notch-coach-state"
 "$TASK_ROOT/build/tests/notch-coach-state"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \

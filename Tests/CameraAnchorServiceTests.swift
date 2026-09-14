@@ -12,7 +12,7 @@ import CoreVideo
     var frameHandlers: [@MainActor (CameraAnchorFrame) -> Void] = []
     var previewHandlers: [@MainActor (CGImage) -> Void] = []
     var failureHandlers: [@MainActor (String) -> Void] = []
-    let configuration = CameraAnchorConfiguration(cameraID: "fake-camera", cameraName: "Fake",
+    var configuration = CameraAnchorConfiguration(cameraID: "fake-camera", cameraName: "Fake",
         configurationID: "vision3-up-unmirrored", captureFramesPerSecond: 3)
     func requestPermission() async -> Bool {
         permissionRequests += 1; authorization = .authorized; return true
@@ -64,6 +64,37 @@ import CoreVideo
             check(nextRun.offer(newerThumbnail) && nextRun.take()?.width == 3,
                   "A new capture run owns independent preview delivery state")
             check(mailbox.take() == nil, "An obsolete callback cannot consume the new run's image")
+        }
+        do {
+            let capture = FakeCameraCapture()
+            var effectsOpened = 0
+            let service = CameraAnchorService(capture: capture, showVideoEffects: { effectsOpened += 1 })
+            service.openEdgeLightControls()
+            check(!service.canOpenEdgeLightControls && effectsOpened == 0, "Camera-off state cannot open system effects")
+            try await service.startBurst { _ in }
+            service.openEdgeLightControls()
+            check(!service.canOpenEdgeLightControls && effectsOpened == 0, "Unsupported camera format cannot open Edge Light controls")
+            service.stop()
+            capture.configuration.supportsEdgeLight = true
+            try await service.startBurst { _ in }
+            check(service.canOpenEdgeLightControls, "Supported active camera exposes Apple's Edge Light controls")
+            service.openEdgeLightControls()
+            check(effectsOpened == 1 && capture.starts == 2, "Explicit action opens system effects without starting another capture")
+            service.stop()
+            service.openEdgeLightControls()
+            check(!service.canOpenEdgeLightControls && effectsOpened == 1, "Retained configuration cannot open effects after camera stop")
+            capture.holdStart = true
+            let starting = Task { try await service.startBurst { _ in } }
+            await settle()
+            service.openEdgeLightControls()
+            check(service.isRunning && !service.canOpenEdgeLightControls && effectsOpened == 1,
+                  "A previous supported format does not expose effects during pending startup")
+            capture.releaseStart()
+            try await starting.value
+            check(service.canOpenEdgeLightControls, "Current startup must complete before its effects action becomes available")
+            capture.failureHandlers.last?("interrupted")
+            service.openEdgeLightControls()
+            check(!service.canOpenEdgeLightControls && effectsOpened == 1, "Interrupted capture cannot open system effects")
         }
         do {
             let capture = FakeCameraCapture(); capture.authorization = .notDetermined

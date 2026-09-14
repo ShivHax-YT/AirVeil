@@ -136,8 +136,13 @@ struct NotchCanopy: Shape {
                 if snapshot.phase == .failure {
                     Button("Cancel", action: presentation.cancel).buttonStyle(NotchTextButton())
                 }
+                if camera.canOpenEdgeLightControls, !presentation.demo {
+                    Button("Open Edge Light", action: camera.openEdgeLightControls)
+                        .buttonStyle(NotchTextButton())
+                        .help("Choose Edge Light in Apple's Video Effects controls.")
+                }
                 Spacer()
-                Text(presentation.demo ? "Camera is off" : "On-device camera check")
+                Text(presentation.demo ? "Camera is off" : (camera.canOpenEdgeLightControls ? "" : "On-device camera check"))
                     .font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
                 Spacer()
                 Button(action: presentation.settings) {
@@ -242,24 +247,28 @@ private struct NotchTextButton: ButtonStyle {
     private var label: String {
         if isDemo { return "Head movement preview" }
         switch pose.source {
-        case .waiting: return "Waiting for head motion"
-        case .airPods: return pose.isScreenRelative ? "AirPods · camera reference held" : "AirPods · head movement"
-        case .cameraAndAirPods: return "Camera + AirPods"
+        case .waiting: return "Finding your direction"
+        case .airPods: return "AirPods · waiting for camera"
+        case .camera: return "Camera · aim within 5°"
+        case .cameraAndAirPods: return "Camera + AirPods · aim within 5°"
         }
     }
     private var value: String {
         guard !isDemo, let angle = pose.yawDegrees else { return "—" }
         let magnitude = Int(abs(angle).rounded())
-        if magnitude == 0 { return pose.isScreenRelative ? "Facing center" : "0° movement" }
+        if !pose.directionKnown { return "\(magnitude)° from center" }
+        if magnitude == 0 { return "Facing center" }
         return "\(magnitude)° \(angle > 0 ? "left" : "right")"
     }
     private var tint: Color {
         guard !isDemo, pose.isScreenRelative, let angle = pose.yawDegrees else { return accent }
-        return abs(angle) <= 8 ? Color(red: 0.42, green: 0.91, blue: 0.64) : Color(red: 1, green: 0.43, blue: 0.43)
+        guard pose.source != .airPods else { return accent }
+        return abs(angle) <= HeadingFusionEngine.centerYawToleranceDegrees ? Color(red: 0.42, green: 0.91, blue: 0.64) : Color(red: 1, green: 0.43, blue: 0.43)
     }
     var body: some View {
         VStack(spacing: 3) {
-            AlignmentRail(error: isDemo ? demoError : pose.normalizedYaw, accent: tint)
+            AlignmentRail(error: isDemo ? demoError : pose.normalizedYaw,
+                          symmetric: !isDemo && !pose.directionKnown, accent: tint)
                 .frame(height: 24)
             HStack {
                 Text(label)
@@ -275,6 +284,7 @@ private struct NotchTextButton: ButtonStyle {
 
 private struct AlignmentRail: View {
     var error: Double?
+    var symmetric = false
     var accent: Color
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
@@ -283,7 +293,7 @@ private struct AlignmentRail: View {
             let selected = error.map { Int((min(1, max(-1, $0)) * 15).rounded()) }
             ZStack {
                 ForEach(-15...15, id: \.self) { index in
-                    let highlighted = selected.map { abs(index - $0) <= 1 } ?? false
+                    let highlighted = selected.map { abs(index - $0) <= 1 || (symmetric && abs(index + $0) <= 1) } ?? false
                     Capsule().fill(highlighted ? accent : .white.opacity(index == 0 ? 0.50 : 0.20))
                         .frame(width: index == 0 ? 2 : 1.5, height: highlighted ? 12 : (index == 0 ? 10 : 5))
                         .position(x: geo.size.width / 2 + CGFloat(index) * width / 30,
@@ -292,6 +302,10 @@ private struct AlignmentRail: View {
                 if let error {
                     Circle().fill(accent).frame(width: 3, height: 3)
                         .position(x: geo.size.width / 2 + min(1, max(-1, error)) * width / 2, y: 22)
+                    if symmetric {
+                        Circle().fill(accent).frame(width: 3, height: 3)
+                            .position(x: geo.size.width / 2 - min(1, max(-1, error)) * width / 2, y: 22)
+                    }
                 }
             }
         }

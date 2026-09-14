@@ -2,35 +2,39 @@ import Foundation
 import Combine
 import CoreMedia
 
-enum NotchPoseSource: String, Equatable, Sendable { case waiting, airPods, cameraAndAirPods }
+enum NotchPoseSource: String, Equatable, Sendable { case waiting, airPods, camera, cameraAndAirPods }
 
 struct NotchPoseSnapshot: Equatable, Sendable {
-    /// Positive is physical left, matching the existing AirVeil motion convention.
+    /// Physical-left yaw when direction is known; unsigned camera deviation otherwise.
     var yawDegrees: Double?
     var source: NotchPoseSource = .waiting
     var isScreenRelative = false
+    var directionKnown = false
     var normalizedYaw: Double? { yawDegrees.map { min(1, max(-1, -$0 / 45)) } }
 }
 
-/// Display feedback only. This never accepts calibration, changes a saved
-/// center, or supplies a heading to the desktop effect. Camera estimates set
-/// the visual reference; fresh same-epoch AirPods deltas move it between scans.
+/// Display only. Vision's absolute forward-facing pose anchors this feedback,
+/// never the arbitrary angle at which a check began. A previously observed
+/// camera sign permits fresh AirPods deltas between scans. Without that sign,
+/// show unsigned camera deviation; a centered hold cannot learn handedness.
 struct NotchPoseEstimator {
     private var active = false
-    private var reference: HeadingCameraCenter?
+    private var fallbackReference: HeadingCameraCenter?
     private var epoch: UInt64?
-    private var origin: Double?
     private var history: [HeadingMotionSample] = []
     private var pendingCamera: CameraAnchorFrame?
+    private var cameraSign: Double?
+    private var cameraID: String?
+    private var configurationID: String?
     private var offset: Double?
     private var lastCameraTime: Double?
+    private var cameraYaw: Double?
     private var cameraVisible = false
     private(set) var snapshot = NotchPoseSnapshot()
 
     mutating func begin(reference: HeadingCameraCenter?, sample: HeadingMotionSample?, now: Double) {
-        self = Self()
-        active = true
-        self.reference = reference
+        self = Self(); active = true
+        fallbackReference = reference
         if let sample { updateMotion(sample, now: now) }
     }
     mutating func stop() { self = Self() }
@@ -42,38 +46,29 @@ struct NotchPoseEstimator {
               sample.yawRadians.isFinite, sample.angularSpeed.isFinite,
               sample.angularSpeed >= 0, sample.receiptHostTime >= 0,
               now >= sample.receiptHostTime, now - sample.receiptHostTime <= 0.65 else {
-            // A missing pose is not a centered pose.
             stop(); return
         }
         if let epoch, epoch != sample.epoch { stop(); return }
         if let last = history.last {
             if sample == last { publish(now: now); return }
             guard sample.sourceTimestamp > last.sourceTimestamp,
-                  sample.receiptHostTime > last.receiptHostTime else {
-                stop(); return
-            }
+                  sample.receiptHostTime > last.receiptHostTime else { stop(); return }
             if sample.receiptHostTime - last.receiptHostTime > 0.3 {
-                // A UI delivery gap must not freeze the rail for the rest of
-                // a live check. Drop its camera anchor and re-pair; preserve
-                // the relative movement origin within this same sensor epoch.
                 history.removeAll(); pendingCamera = nil; offset = nil
-                lastCameraTime = nil; cameraVisible = false
             }
         }
         epoch = sample.epoch
-        if origin == nil { origin = sample.yawRadians }
         history.append(sample)
         history.removeAll { sample.receiptHostTime - $0.receiptHostTime > 1.5 }
         if history.count > 160 { history.removeFirst(history.count - 160) }
-        pairCamera(now: now)
-        publish(now: now)
+        pairCamera(now: now); publish(now: now)
     }
 
-    mutating func updateCamera(_ frame: CameraAnchorFrame, now: Double) {
+    mutating func updateCamera(_ frame: CameraAnchorFrame, visualCameraSign: Double? = nil, now: Double) {
         guard active else { return }
         guard frame.faceCount == 1, frame.detectionConfidence >= 0.7,
               frame.detectionConfidence <= 1, let yaw = frame.yawDegrees, yaw.isFinite,
-              abs(yaw) <= 45, let pitch = frame.pitchDegrees, pitch.isFinite, abs(pitch) <= 20,
+              abs(yaw) <= 90, let pitch = frame.pitchDegrees, pitch.isFinite, abs(pitch) <= 20,
               let roll = frame.rollDegrees, roll.isFinite, abs(roll) <= 15,
               let bounds = frame.faceBounds, bounds.width >= 0.12, bounds.height >= 0.12,
               bounds.width <= 1, bounds.height <= 1,
@@ -84,27 +79,24 @@ struct NotchPoseEstimator {
             pendingCamera = nil; cameraVisible = false
             publish(now: now); return
         }
-        // Until the camera sign is learned, show relative headphone movement
-        // explicitly. Face-box translation is never substituted for head yaw.
-        guard let reference, frame.cameraID == reference.cameraID,
-              reference.neutralYawRadians.isFinite,
-              abs(reference.cameraSign) == 1, abs(reference.sensorSign) == 1 else {
-            pendingCamera = nil; cameraVisible = false
-            publish(now: now); return
-        }
-        cameraVisible = true
-        if let lastCameraTime, capture <= lastCameraTime { return }
-        pendingCamera = frame
-        pairCamera(now: now)
-        publish(now: now)
+        if let cameraID, cameraID != frame.cameraID { stop(); return }
+        if let configurationID, configurationID != frame.configurationID { stop(); return }
+        if let lastCameraTime, capture <= lastCameraTime { publish(now: now); return }
+        cameraID = frame.cameraID; configurationID = frame.configurationID
+        let inherited = fallbackReference.flatMap { $0.cameraID == frame.cameraID && abs($0.cameraSign) == 1 ? $0.cameraSign : nil }
+        let sign = visualCameraSign.flatMap { abs($0) == 1 ? $0 : nil } ?? inherited
+        if sign != cameraSign { offset = nil }
+        cameraSign = sign
+        cameraVisible = true; lastCameraTime = capture
+        cameraYaw = sign.map { $0 * yaw } ?? abs(yaw)
+        pendingCamera = sign != nil ? frame : nil
+        pairCamera(now: now); publish(now: now)
     }
 
     private mutating func pairCamera(now: Double) {
         guard let frame = pendingCamera, let capture = frame.captureHostTime,
-              let cameraYaw = frame.yawDegrees, let reference else { return }
+              let yaw = frame.yawDegrees, let cameraSign else { return }
         guard now - capture <= 0.8 else { pendingCamera = nil; return }
-        // Pair at capture time, not the later Vision/UI receipt. This remains
-        // visual interpolation; the fusion engine retains its stationary gates.
         guard let before = history.last(where: { $0.receiptHostTime <= capture }),
               let after = history.first(where: { $0.receiptHostTime >= capture }),
               capture - before.receiptHostTime <= 0.15,
@@ -112,32 +104,35 @@ struct NotchPoseEstimator {
         let duration = after.receiptHostTime - before.receiptHostTime
         let fraction = duration > 0 ? (capture - before.receiptHostTime) / duration : 0
         let sensorYaw = before.yawRadians + Self.wrap(after.yawRadians - before.yawRadians) * fraction
-        let candidate = Self.wrap(reference.cameraSign * cameraYaw * .pi / 180 - reference.neutralYawRadians - reference.sensorSign * sensorYaw)
-        if let previous = offset {
-            // Correct slow visual drift without snapping at the 3 Hz scan cadence.
-            offset = Self.wrap(previous + 0.25 * Self.wrap(candidate - previous))
-        } else { offset = candidate }
-        lastCameraTime = capture
+        // No learned arbitrary neutral subtraction: 13° remains 13° off center.
+        offset = Self.wrap(cameraSign * yaw * .pi / 180 - sensorYaw)
         pendingCamera = nil
     }
 
     private mutating func publish(now: Double) {
-        guard active, let latest = history.last, let origin,
+        guard active, let latest = history.last,
               now >= latest.receiptHostTime, now - latest.receiptHostTime <= 0.65 else {
             snapshot = NotchPoseSnapshot(); return
         }
-        let radians: Double
-        if let offset, let reference { radians = Self.wrap(reference.sensorSign * latest.yawRadians + offset) }
-        else { radians = Self.wrap(latest.yawRadians - origin) }
         let recentCamera = cameraVisible && lastCameraTime.map { now >= $0 && now - $0 <= 0.8 } == true
-        snapshot = NotchPoseSnapshot(yawDegrees: (radians * 180 / .pi * 4).rounded() / 4,
-            source: recentCamera ? .cameraAndAirPods : .airPods, isScreenRelative: offset != nil)
+        if let offset {
+            let yaw = Self.wrap(latest.yawRadians + offset) * 180 / .pi
+            snapshot = .init(yawDegrees: (yaw * 4).rounded() / 4,
+                source: recentCamera ? .cameraAndAirPods : .airPods,
+                isScreenRelative: true, directionKnown: true)
+        } else if recentCamera, let cameraYaw {
+            snapshot = .init(yawDegrees: (cameraYaw * 4).rounded() / 4, source: .camera,
+                isScreenRelative: true, directionKnown: cameraSign != nil)
+        } else {
+            // AirPods movement before the first camera frame cannot establish
+            // whether the wearer started this check facing straight ahead.
+            snapshot = NotchPoseSnapshot()
+        }
     }
     private static func wrap(_ x: Double) -> Double { atan2(sin(x), cos(x)) }
 }
 
-/// Observed only by the small rail view. 50 Hz motion never republishes the
-/// entire coordinator/settings hierarchy or restarts a shell transition.
+/// Only the small rail observes high-frequency motion updates.
 @MainActor final class NotchMotionFeedback: ObservableObject {
     @Published private(set) var snapshot = NotchPoseSnapshot()
     private var estimator = NotchPoseEstimator()
@@ -147,7 +142,9 @@ struct NotchPoseEstimator {
         estimator.begin(reference: reference, sample: sample, now: now()); publish()
     }
     func updateMotion(_ sample: HeadingMotionSample?) { estimator.updateMotion(sample, now: now()); publish() }
-    func updateCamera(_ frame: CameraAnchorFrame) { estimator.updateCamera(frame, now: now()); publish() }
+    func updateCamera(_ frame: CameraAnchorFrame, visualCameraSign: Double? = nil) {
+        estimator.updateCamera(frame, visualCameraSign: visualCameraSign, now: now()); publish()
+    }
     func stop() { estimator.stop(); publish() }
     private func publish() { if snapshot != estimator.snapshot { snapshot = estimator.snapshot } }
 }

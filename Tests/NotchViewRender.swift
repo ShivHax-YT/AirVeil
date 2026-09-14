@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main struct NotchViewRender {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         _ = NSApplication.shared
         let destination = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
@@ -12,10 +12,10 @@ import SwiftUI
         p.expanded = true; p.demo = true; p.canCenter = true; p.cameraEnabled = true
         let states: [(String, NotchCoachSnapshot)] = [
             ("seeking", .init(phase: .seeking, title: "Looking for your face", detail: "Face the camera and keep your face visible.", issue: .faceMissing)),
-            ("off-center", .init(phase: .offCenter, title: "A bit right", detail: "Bring your face toward the middle of the preview.", horizontalError: -0.55, direction: .right)),
+            ("off-center", .init(phase: .offCenter, title: "Look straight ahead", detail: "13° from center. Aim within 5°.", horizontalError: -0.3, issue: .pose)),
             ("low-light", .init(phase: .seeking, title: "A little more light", detail: "Light your face so the camera can see you.", issue: .lowLight)),
-            ("holding", .init(phase: .holding, title: "Hold your head still", detail: "Measuring camera and AirPods together.", progress: 0.65)),
-            ("turning", .init(phase: .turning, title: "Make one gentle head turn", detail: "Turn left or right, then hold briefly.")),
+            ("holding", .init(phase: .holding, title: "Hold at center", detail: "One quick camera and AirPods check.", progress: 0.65)),
+            ("near-center", .init(phase: .offCenter, title: "Look straight ahead", detail: "6° from center. Aim within 5°.", horizontalError: -0.13, issue: .pose)),
             ("success", .init(phase: .success, title: "Direction restored", detail: "You're ready. Camera is off.", progress: 1)),
             ("failure", .init(phase: .failure, title: "Try the direction check again", detail: "Keep your face visible and hold still briefly.", issue: .camera))
         ]
@@ -28,7 +28,12 @@ import SwiftUI
         p.topInset = 0; p.controls = false; p.snapshot = states[1].1
         try render("external-display", p, camera, destination)
         precondition(!camera.isRunning && camera.previewImage == nil, "Rendering must not activate camera")
-        print("Rendered \(states.count + 2) notch states at 2x without camera capture")
+        let lightCamera = CameraAnchorService(capture: RenderCamera(), showVideoEffects: { fatalError("Rendering cannot open system UI") })
+        try await lightCamera.startBurst { _ in }
+        p.topInset = 32; p.demo = false; p.snapshot = states[2].1
+        try render("edge-light-controls", p, lightCamera, destination)
+        lightCamera.stop()
+        print("Rendered \(states.count + 3) notch states at 2x without camera capture")
     }
     @MainActor static func render(_ name: String, _ p: NotchOverlayPresentation, _ camera: CameraAnchorService, _ destination: URL) throws {
         let renderer = ImageRenderer(content: NotchCoachView(presentation: p, camera: camera, headMotion: NotchMotionFeedback()))
@@ -39,4 +44,16 @@ import SwiftUI
         }
         try data.write(to: destination.appendingPathComponent("\(name).png"))
     }
+}
+
+@MainActor private final class RenderCamera: CameraAnchorCapturing {
+    var authorization: CameraAuthorization { .authorized }
+    func requestPermission() async -> Bool { fatalError("Rendering cannot request permission") }
+    func start(onFrame: @escaping @MainActor (CameraAnchorFrame) -> Void,
+               onPreview: @escaping @MainActor (CGImage) -> Void,
+               onFailure: @escaping @MainActor (String) -> Void) async throws -> CameraAnchorConfiguration {
+        .init(cameraID: "render-only", cameraName: "Render only", configurationID: "render-only",
+              captureFramesPerSecond: 15, supportsEdgeLight: true)
+    }
+    func stop() {}
 }

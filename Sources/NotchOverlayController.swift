@@ -207,9 +207,9 @@ private final class NotchPanel: NSPanel {
             guard let self else { return }
             let stages: [(NotchCoachSnapshot, UInt64)] = [
                 (.init(phase: .seeking, title: "Find your frame", detail: "A small camera preview lives here."), 1_200_000_000),
-                (.init(phase: .offCenter, title: "A bit right", detail: "Follow the guide toward the center.", horizontalError: -0.55, direction: .right), 1_600_000_000),
+                (.init(phase: .offCenter, title: "Look straight ahead", detail: "13° from center. Aim within 5°.", horizontalError: -0.3, issue: .pose), 1_600_000_000),
                 (.init(phase: .seeking, title: "More light needed", detail: "Light your face from the front.", issue: .lowLight), 1_500_000_000),
-                (.init(phase: .holding, title: "Hold here", detail: "Measuring your screen direction.", progress: 0.65), 1_300_000_000),
+                (.init(phase: .holding, title: "Hold at center", detail: "One quick camera and AirPods check.", progress: 0.65), 1_300_000_000),
                 (.init(phase: .success, title: "Ready", detail: "", progress: 1), 1_100_000_000)
             ]
             for (snapshot, duration) in stages {

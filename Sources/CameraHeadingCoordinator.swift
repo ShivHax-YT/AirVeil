@@ -27,8 +27,6 @@ import CoreMedia
     private var phase: Phase?
     private var burstStarted = false
     private var pending: [HeadingCameraSample] = []
-    private var setupPairs: [(camera: HeadingCameraSample, motionYaw: Double)] = []
-    private var setupNeutral: (cameraYaw: Double, motionYaw: Double, cameraID: String, configurationID: String)?
     private var burstEpoch: UInt64?
     private var burstConfiguration = ""
     private var burstLayoutKey = ""
@@ -37,13 +35,20 @@ import CoreMedia
     private var lastFrameReceipt: Double?
     private var lowLightFrames = 0
 
-    private enum Phase { case center, direction, recovery }
+    private enum Phase { case center, recovery }
     private struct StoredCenter: Codable {
         let center: HeadingCameraCenter
         let layoutKey: String
         let configurationID: String
+        var visualCameraSign: Double? = nil
     }
-    var hasCenter: Bool { stored != nil }
+    var hasCenter: Bool { stored?.center.mode == .facingCamera }
+    func visualCameraSign(cameraID: String, configurationID: String) -> Double? {
+        guard let stored, stored.center.cameraID == cameraID, stored.configurationID == configurationID else { return nil }
+        let sign = stored.center.mode == nil ? stored.center.cameraSign : stored.visualCameraSign
+        guard let sign, abs(sign) == 1 else { return nil }
+        return sign
+    }
     var alignmentRevision: Int { engine.alignmentRevision }
     var trackingValid: Bool { isEnabled && sessionActive && motion.isFresh && motion.fusionSample != nil && engine.heading(now: now()) != nil }
     var yawDegrees: Double { (engine.heading(now: now()) ?? 0) * 180 / .pi }
@@ -57,9 +62,11 @@ import CoreMedia
         if let data = defaults.data(forKey: "cameraScreenCenterV1"),
            let value = try? JSONDecoder().decode(StoredCenter.self, from: data),
            value.center.neutralYawRadians.isFinite,
-           abs(value.center.cameraSign) == 1, abs(value.center.sensorSign) == 1 {
+           abs(value.center.sensorSign) == 1,
+           ((value.center.mode == nil && abs(value.center.cameraSign) == 1) ||
+            (value.center.mode == .facingCamera && value.center.neutralYawRadians == 0 && value.center.cameraSign == 0)) {
             stored = value; centerRevision = value.center.revision
-            engine.configure(center: value.center)
+            engine.configure(center: value.center.mode == .facingCamera ? value.center : nil)
         }
         if isEnabled { status = hasCenter ? "Your screen direction is saved. Waiting for AirPods." : "Face the display and use Set center to set up camera assistance." }
         motion.$fusionSample.sink { [weak self] sample in
@@ -94,8 +101,8 @@ import CoreMedia
             }
             isEnabled = true; defaults.set(true, forKey: "cameraAssistance")
             automaticRecoveryAllowed = true; lastAttemptEpoch = nil
-            engine.configure(center: stored?.center)
-            status = hasCenter ? "Camera assistance is on. Your saved screen direction will be checked when needed." : "Face the display and click Set center. Then make one short head turn to finish setup."
+            engine.configure(center: hasCenter ? stored?.center : nil)
+            status = hasCenter ? "Camera assistance is on. Your saved screen direction will be checked when needed." : "Face the camera straight on and click Set center. Hold still briefly to finish setup."
             present(NotchCoachSnapshot())
         }
     }
@@ -161,6 +168,11 @@ import CoreMedia
         if isAligned != aligned { isAligned = aligned }
         if !aligned, coach.phase == .success { present(NotchCoachSnapshot()) }
         guard let stored else { return }
+        guard stored.center.mode == .facingCamera else {
+            let message = "Face the camera straight on and use Set center to replace the previous direction setup."
+            if status != message { status = message }
+            return
+        }
         guard stored.layoutKey == layoutKey else {
             engine.invalidate()
             if isAligned { isAligned = false }
@@ -199,7 +211,7 @@ import CoreMedia
         notchMotion.begin(reference: feedbackReference, sample: motion.fusionSample)
         burstLayoutKey = layoutKey
         isBusy = true
-        status = next == .center ? "Face the screen and hold still while its direction is measured…" : "Hold your head briefly at its current angle while the camera restores direction…"
+        status = next == .center ? "Face the screen and hold still while its direction is measured…" : "Face the camera straight on and hold still while direction is checked…"
         present(NotchCoachSnapshot(phase: .starting, title: next == .center ? "Finding your center" : "Restoring direction",
             detail: "Starting a brief camera check."))
         let ticket = burstTicket
@@ -227,13 +239,13 @@ import CoreMedia
         camera.stop()
         notchMotion.stop()
         phase = nil; burstStarted = false; burstEpoch = nil
-        pending.removeAll(); setupPairs.removeAll(); setupNeutral = nil
+        pending.removeAll()
         burstConfiguration = ""; isBusy = false
         holdEvidence.removeAll(); lastFrameReceipt = nil; lowLightFrames = 0
         if clearCoach { present(NotchCoachSnapshot()) }
     }
     private func receive(_ frame: CameraAnchorFrame, generation: UInt64) {
-        notchMotion.updateCamera(frame)
+        notchMotion.updateCamera(frame, visualCameraSign: visualCameraSign(cameraID: frame.cameraID, configurationID: frame.configurationID))
         lastFrameReceipt = frame.receiptHostTime
         var guidance = NotchCoachGuidance.observation(frame, requiresFrontalPose: phase == .center, previous: coach)
         lowLightFrames = guidance.issue == .lowLight ? min(2, lowLightFrames + 1) : 0
@@ -242,15 +254,6 @@ import CoreMedia
             guidance.detail = "Face the camera and keep your face visible."
             guidance.issue = .faceMissing
         }
-        if phase == .direction, guidance.issue == .pose {
-            guidance.title = "Turn a little less"
-            guidance.detail = "Keep your face visible, then hold at the turned angle."
-        }
-        // The notch's framing and pose hints are presentation, not additional
-        // calibration gates. Explicit Set center measures the wearer's chosen
-        // screen-facing pose; it does not require zero Vision yaw or a face at
-        // the center of a cropped thumbnail. Keep the proven camera/motion
-        // acceptance rules below as the only source of alignment evidence.
         guard let capture = frame.captureHostTime, let yaw = frame.yawDegrees,
               let pitch = frame.pitchDegrees, let roll = frame.rollDegrees,
               let bounds = frame.faceBounds, bounds.width >= 0.12, bounds.height >= 0.12 else {
@@ -276,29 +279,19 @@ import CoreMedia
             captureHostTime: capture, receiptHostTime: frame.receiptHostTime,
             yawRadians: yaw * .pi / 180, pitchRadians: pitch * .pi / 180,
             rollRadians: roll * .pi / 180, confidence: Double(frame.detectionConfidence), faceCount: frame.faceCount)
-        guard HeadingFusionEngine.isCameraSampleUsable(sample, now: now()) else {
+        guard HeadingFusionEngine.isCenteredCameraSampleUsable(sample, now: now()) else {
             clearEvidence()
             presentRejectedFrame(guidance)
             return
         }
-        // An accepted frame must not flash a red correction for a thumbnail
-        // crop or a nonzero explicit neutral pose, then turn green when the
-        // same frame is paired with motion. Publish the actual operation.
         if !holdEvidence.isEmpty {
             var updated = coach
             updated.horizontalError = guidance.horizontalError
             updated.verticalError = guidance.verticalError
             present(updated)
-        } else if phase == .direction {
-            var updated = coach.phase == .turning ? coach : NotchCoachSnapshot(phase: .turning,
-                title: "Make one gentle head turn", detail: "Turn left or right, then hold briefly.")
-            updated.horizontalError = guidance.horizontalError
-            updated.verticalError = guidance.verticalError
-            present(updated)
         } else {
-            present(NotchCoachSnapshot(phase: .holding,
-                title: phase == .center ? "Hold your head still" : "Restoring direction",
-                detail: phase == .center ? "Measuring your screen direction." : "Hold briefly. Your saved center stays the same.",
+            present(NotchCoachSnapshot(phase: .holding, title: "Hold at center",
+                detail: "Keep facing the camera straight on.",
                 horizontalError: guidance.horizontalError, verticalError: guidance.verticalError))
         }
         syncMeasurementStatus()
@@ -325,74 +318,43 @@ import CoreMedia
         }
         for sample in ready {
             guard let phase else { return }
-            guard HeadingFusionEngine.isCameraSampleUsable(sample, now: time),
-                  let sensorYaw = engine.stableMotionYaw(atCameraCaptureTime: sample.captureHostTime, now: time) else {
-                // Skip this unpaired frame, as acquisition did before the
-                // notch coach. The fusion engine still checks the complete
-                // stationary window; setup still bounds its own paired span.
-                // A presentation reset must not retire earlier valid pairs.
-                holdEvidence.removeAll()
-                present(NotchCoachSnapshot(phase: phase == .direction ? .turning : .holding,
-                    title: phase == .direction ? "Turn, then hold briefly" : "Hold your head still",
+            guard HeadingFusionEngine.isCenteredCameraSampleUsable(sample, now: time),
+                  engine.stableMotionYaw(atCameraCaptureTime: sample.captureHostTime, now: time) != nil else {
+                holdEvidence.removeAll(); engine.discardCameraEvidence()
+                present(NotchCoachSnapshot(phase: .holding, title: "Hold at center",
                     detail: "Waiting for steady AirPods motion.", issue: .motion))
                 syncMeasurementStatus()
                 continue
             }
-            addHoldEvidence(sample, sensorYaw: sensorYaw, phase: phase)
+            addHoldEvidence(sample)
+            let reference: HeadingCameraCenter
             if phase == .recovery {
-                engine.addCamera(sample, now: time)
-                if engine.heading(now: time) != nil {
-                    cancelBurst(clearCoach: false); isAligned = true
-                    status = "Original screen direction restored. Camera is off."
-                    showSuccess()
-                    return
-                }
-                continue
+                guard let saved = stored?.center, saved.mode == .facingCamera else { return }
+                reference = saved
+            } else {
+                reference = HeadingCameraCenter(cameraID: sample.cameraID, neutralYawRadians: 0,
+                    cameraSign: 0, sensorSign: 1, revision: centerRevision + 1, mode: .facingCamera)
             }
-            setupPairs.append((sample, sensorYaw))
-            if setupPairs.count > 3 { setupPairs.removeFirst() }
-            guard setupPairs.count == 3, let first = setupPairs.first, let last = setupPairs.last,
-                  last.camera.captureHostTime - first.camera.captureHostTime >= 0.5,
-                  last.camera.captureHostTime - first.camera.captureHostTime <= 1.2,
-                  setupPairs.allSatisfy({ abs(Self.wrap($0.camera.yawRadians - first.camera.yawRadians)) < 3 * .pi / 180 && abs(Self.wrap($0.motionYaw - first.motionYaw)) < 3 * .pi / 180 }) else { continue }
-            let cameraYaw = Self.mean(setupPairs.map { $0.camera.yawRadians })
-            let motionYaw = Self.mean(setupPairs.map { $0.motionYaw })
-            if phase == .center {
-                // Camera/sensor handedness belongs to the camera pipeline,
-                // not the set of connected displays. Explicit Set center has
-                // just measured a new neutral for this layout, so reuse a
-                // previously learned sign when that pipeline is unchanged.
-                if let old = stored, old.center.cameraID == sample.cameraID, old.configurationID == burstConfiguration {
-                    finishCenter(cameraID: sample.cameraID, neutral: cameraYaw, sign: old.center.cameraSign, sample: sample, time: time)
-                    return
+            if engine.addCenteredCamera(sample, reference: reference, now: time) {
+                if phase == .center {
+                    let sign = visualCameraSign(cameraID: sample.cameraID, configurationID: burstConfiguration)
+                    let value = StoredCenter(center: reference, layoutKey: layoutKey,
+                        configurationID: burstConfiguration, visualCameraSign: sign)
+                    stored = value; centerRevision = reference.revision
+                    if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: "cameraScreenCenterV1") }
                 }
-                setupNeutral = (cameraYaw, motionYaw, sample.cameraID, burstConfiguration)
-                self.phase = .direction; setupPairs.removeAll()
-                holdEvidence.removeAll()
-                status = "Screen direction measured. Turn your head left or right, then hold briefly to finish setup."
-                present(NotchCoachSnapshot(phase: .turning, title: "Make one gentle head turn", detail: "Turn left or right, then hold briefly."))
-            } else if let neutral = setupNeutral,
-                      let sign = HeadingFusionEngine.learnedCameraSign(cameraDelta: Self.wrap(cameraYaw - neutral.cameraYaw), sensorDelta: Self.wrap(motionYaw - neutral.motionYaw)) {
-                finishCenter(cameraID: neutral.cameraID, neutral: neutral.cameraYaw, sign: sign, sample: sample, time: time)
+                // The same verified batch installs the center and sensor offset.
+                // Keep its motion history and alignment; never configure again
+                // or start a second capture after completing this check.
+                cancelBurst(clearCoach: false); isAligned = true
+                status = "Facing-center check complete. Camera is off."
+                showSuccess()
                 return
             }
         }
     }
-    private func finishCenter(cameraID: String, neutral: Double, sign: Double, sample: HeadingCameraSample, time: Double) {
-        let center = HeadingCameraCenter(cameraID: cameraID, neutralYawRadians: Self.wrap(sign * neutral),
-            cameraSign: sign, sensorSign: 1, revision: centerRevision + 1)
-        let value = StoredCenter(center: center, layoutKey: layoutKey, configurationID: burstConfiguration)
-        stored = value; centerRevision = center.revision
-        if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: "cameraScreenCenterV1") }
-        engine.configure(center: center)
-        // A new reference needs a fresh stable burst; configuring never assumes
-        // the setup-ending turned pose is zero or restores a retired alignment.
-        cancelBurst(clearCoach: false); lastAttemptEpoch = nil; automaticRecoveryAllowed = true
-        status = "Screen direction saved. Hold briefly to align the AirPods at your current angle."
-        present(NotchCoachSnapshot(phase: .starting, title: "Restoring direction", detail: "Screen center saved. Hold briefly to align your AirPods."))
-    }
     private func clearEvidence() {
-        pending.removeAll(); setupPairs.removeAll(); holdEvidence.removeAll(); engine.discardCameraEvidence()
+        pending.removeAll(); holdEvidence.removeAll(); engine.discardCameraEvidence()
     }
     private func presentRejectedFrame(_ guidance: NotchCoachSnapshot) {
         let snapshot = guidance.issue != nil ? guidance : NotchCoachSnapshot(phase: .seeking,
@@ -400,24 +362,7 @@ import CoreMedia
         present(snapshot)
         syncMeasurementStatus()
     }
-    private func addHoldEvidence(_ sample: HeadingCameraSample, sensorYaw: Double, phase: Phase) {
-        if phase == .direction, let neutral = setupNeutral,
-           HeadingFusionEngine.learnedCameraSign(cameraDelta: Self.wrap(sample.yawRadians - neutral.cameraYaw),
-               sensorDelta: Self.wrap(sensorYaw - neutral.motionYaw)) == nil {
-            // Three steady frames at the original pose are not progress on
-            // learning a turn. Let the wearer see motion on the independent
-            // pose rail while explaining what evidence is still missing.
-            holdEvidence.removeAll()
-            var snapshot = coach
-            snapshot.phase = .turning
-            snapshot.title = "Turn a little farther"
-            snapshot.detail = "Turn about 20° left or right, then hold briefly."
-            snapshot.progress = 0
-            snapshot.issue = nil; snapshot.direction = nil
-            present(snapshot)
-            syncMeasurementStatus()
-            return
-        }
+    private func addHoldEvidence(_ sample: HeadingCameraSample) {
         if let first = holdEvidence.first, let last = holdEvidence.last,
            sample.captureHostTime - last.captureHostTime > 0.5 ||
            sample.captureHostTime <= last.captureHostTime ||
@@ -425,12 +370,13 @@ import CoreMedia
             holdEvidence.removeAll()
         }
         holdEvidence.append(sample)
-        if holdEvidence.count > 3 { holdEvidence.removeFirst() }
+        holdEvidence.removeAll { sample.captureHostTime - $0.captureHostTime > 1.1 }
+        let span = sample.captureHostTime - (holdEvidence.first?.captureHostTime ?? sample.captureHostTime)
         var snapshot = coach
-        snapshot.phase = phase == .direction ? .turning : .holding
-        snapshot.title = phase == .center ? "Hold your head still" : (phase == .direction ? "Hold at this angle" : "Restoring direction")
-        snapshot.detail = phase == .recovery ? "Your saved screen center stays the same." : "Measuring camera and AirPods together."
-        snapshot.progress = min(0.9, Double(holdEvidence.count) / 3)
+        snapshot.phase = .holding
+        snapshot.title = "Hold at center"
+        snapshot.detail = "Measuring camera and AirPods together."
+        snapshot.progress = min(0.9, span / HeadingFusionEngine.holdDurationSeconds)
         snapshot.issue = nil; snapshot.direction = nil
         present(snapshot)
         syncMeasurementStatus()
@@ -451,7 +397,7 @@ import CoreMedia
         present(NotchCoachSnapshot(phase: .failure, title: title, detail: detail, issue: issue, retryAction: retryAction))
     }
     private func showSuccess() {
-        present(NotchCoachSnapshot(phase: .success, title: "Direction restored", detail: "You're ready. Camera is off.", progress: 1))
+        present(NotchCoachSnapshot(phase: .success, title: "Center confirmed", detail: "You're ready. Camera is off.", progress: 1))
         let ticket = burstTicket
         successDismissal = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 1_100_000_000) } catch { return }

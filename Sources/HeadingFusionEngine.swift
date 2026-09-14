@@ -22,12 +22,17 @@ struct HeadingCameraSample: Equatable, Sendable {
 
 /// The geometric center is changed only by explicit setup. Sensor alignments
 /// below are disposable and must never be persisted as this center.
+enum HeadingCameraCenterMode: String, Codable, Sendable { case facingCamera }
+
 struct HeadingCameraCenter: Equatable, Codable, Sendable {
     let cameraID: String
     let neutralYawRadians: Double
     let cameraSign: Double
     let sensorSign: Double
     let revision: Int
+    /// Missing means the older arbitrary camera-neutral model. In facingCamera
+    /// mode neutral is always zero and cameraSign is zero (unused, not learned).
+    var mode: HeadingCameraCenterMode? = nil
 }
 
 /// Local, planar-yaw prototype. Camera times are actual capture PTS converted
@@ -35,13 +40,18 @@ struct HeadingCameraCenter: Equatable, Codable, Sendable {
 /// AirPods source-to-host clock identity is unverified. The extended stationary
 /// overlap is an explicit bounded-latency approximation, NOT clock sync. Its
 /// 200 ms guard requires a consented device latency test before reliability is
-/// claimed. Stillness admits an off-axis measurement; it never means zero.
+/// claimed. The production facing-camera route admits zero only after an
+/// absolute camera-center gate. The legacy off-axis route remains separate.
 struct HeadingFusionEngine {
+    static let centerYawToleranceDegrees = 5.0
+    static let holdDurationSeconds = 0.6
     private(set) var alignmentRevision = 0
     private(set) var status = "Set your screen center"
     private var center: HeadingCameraCenter?
     private var motion: [HeadingMotionSample] = []
     private var camera: [HeadingCameraSample] = []
+    private var centeredCamera: [HeadingCameraSample] = []
+    private var centeredReference: HeadingCameraCenter?
     private var offset: Double?
     private var epoch: UInt64?
     private var cameraGeneration: UInt64?
@@ -51,8 +61,7 @@ struct HeadingFusionEngine {
     mutating func configure(center: HeadingCameraCenter?) {
         self.center = center
         invalidate()
-        if let center, (!center.neutralYawRadians.isFinite ||
-            abs(center.cameraSign) != 1 || abs(center.sensorSign) != 1 || center.cameraID.isEmpty) {
+        if let center, !Self.isReferenceUsable(center) {
             self.center = nil
         }
         status = self.center == nil ? "Set your screen center" : "Checking your head direction"
@@ -61,6 +70,8 @@ struct HeadingFusionEngine {
     mutating func invalidate() {
         motion.removeAll(keepingCapacity: true)
         camera.removeAll(keepingCapacity: true)
+        centeredCamera.removeAll(keepingCapacity: true)
+        centeredReference = nil
         offset = nil
         epoch = nil
         cameraGeneration = nil
@@ -70,6 +81,67 @@ struct HeadingFusionEngine {
     mutating func discardCameraEvidence() {
         camera.removeAll(keepingCapacity: true)
         cameraGeneration = nil
+        centeredCamera.removeAll(keepingCapacity: true)
+        centeredReference = nil
+    }
+
+    private static func isReferenceUsable(_ center: HeadingCameraCenter) -> Bool {
+        guard !center.cameraID.isEmpty, center.neutralYawRadians.isFinite,
+              abs(center.sensorSign) == 1 else { return false }
+        if center.mode == .facingCamera {
+            return center.neutralYawRadians == 0 && center.cameraSign == 0
+        }
+        return abs(center.cameraSign) == 1
+    }
+
+    static func isCenteredCameraSampleUsable(_ sample: HeadingCameraSample, now: Double) -> Bool {
+        isCameraSampleUsable(sample, now: now) &&
+            abs(sample.yawRadians) <= centerYawToleranceDegrees * .pi / 180
+    }
+
+    /// One camera stream verifies actual front-facing pose and a stationary
+    /// AirPods interval. The accepted sensor mean becomes zero in this same
+    /// operation; no camera handedness or off-axis neutral is inferred.
+    mutating func addCenteredCamera(_ sample: HeadingCameraSample,
+                                    reference: HeadingCameraCenter, now: Double) -> Bool {
+        guard reference.mode == .facingCamera, Self.isReferenceUsable(reference),
+              sample.cameraID == reference.cameraID,
+              Self.isCenteredCameraSampleUsable(sample, now: now) else {
+            discardCameraEvidence()
+            return false
+        }
+        if centeredReference != reference || centeredCamera.last?.generation != sample.generation {
+            centeredCamera.removeAll(keepingCapacity: true)
+            centeredReference = reference
+        }
+        if let last = centeredCamera.last, sample.captureHostTime <= last.captureHostTime { return false }
+        centeredCamera.append(sample)
+        centeredCamera.removeAll { sample.captureHostTime - $0.captureHostTime > 1.1 }
+        guard centeredCamera.count >= 3, let first = centeredCamera.first, let last = centeredCamera.last,
+              last.captureHostTime - first.captureHostTime >= Self.holdDurationSeconds,
+              let latest = motion.last, now >= latest.receiptHostTime,
+              now - latest.receiptHostTime <= 0.2,
+              let before = motion.last(where: { $0.receiptHostTime <= first.captureHostTime - 0.6 }),
+              let after = motion.first(where: { $0.receiptHostTime >= last.captureHostTime + guardTime }),
+              first.captureHostTime - 0.6 - before.receiptHostTime <= 0.15,
+              after.receiptHostTime - last.captureHostTime - guardTime <= 0.15 else { return false }
+        let overlap = motion.filter { $0.receiptHostTime >= before.receiptHostTime &&
+            $0.receiptHostTime <= after.receiptHostTime }
+        guard overlap.count >= 8,
+              overlap.allSatisfy({ $0.epoch == epoch && $0.angularSpeed <= .pi/36 }),
+              let sensorMean = Self.mean(overlap.map { reference.sensorSign * $0.yawRadians }),
+              let cameraMean = Self.mean(centeredCamera.map(\.yawRadians)),
+              overlap.allSatisfy({ abs(Self.wrap(reference.sensorSign * $0.yawRadians - sensorMean)) <= .pi/90 }),
+              centeredCamera.allSatisfy({ abs(Self.wrap($0.yawRadians - cameraMean)) <= .pi/90 }) else {
+            status = "Face the camera and hold still briefly"
+            return false
+        }
+        center = reference
+        offset = Self.wrap(-sensorMean)
+        alignmentRevision += 1
+        discardCameraEvidence()
+        status = "Ready"
+        return true
     }
 
     mutating func addMotion(_ sample: HeadingMotionSample) {
@@ -101,6 +173,10 @@ struct HeadingFusionEngine {
 
     mutating func addCamera(_ sample: HeadingCameraSample, now: Double) {
         guard let center else { status = "Set your screen center"; return }
+        guard center.mode == nil else {
+            status = "Use the facing-center camera check"
+            return
+        }
         guard Self.isCameraSampleUsable(sample, now: now),
               sample.cameraID == center.cameraID else {
             camera.removeAll(keepingCapacity: true)
@@ -179,7 +255,7 @@ struct HeadingFusionEngine {
     }
 
     private mutating func attemptAnchor(now: Double) {
-        guard let center, camera.count >= 3,
+        guard let center, center.mode == nil, camera.count >= 3,
               let first = camera.first, let last = camera.last,
               last.captureHostTime - first.captureHostTime >= 0.5,
               now - last.captureHostTime <= 0.8 else { return }

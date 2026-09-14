@@ -53,26 +53,17 @@ enum NotchCoachGuidance {
         guard let bounds, bounds.width >= 0.12, bounds.height >= 0.12 else {
             return snapshot(.offCenter, "Come a little closer", "Keep your face inside the camera view.", .framing)
         }
-        // Once shown, a correction remains until the face passes the inner
-        // boundary. Small fluctuations at the outer boundary do not flicker.
-        let previousHorizontal = previous?.direction == .left || previous?.direction == .right
-        let previousVertical = previous?.direction == .up || previous?.direction == .down
-        let horizontalLimit = previousHorizontal ? 0.30 : 0.36
-        let verticalLimit = previousVertical ? 0.36 : 0.42
-        if abs(x) > horizontalLimit || abs(y) > verticalLimit {
-            let direction: NotchCoachDirection = abs(x) / horizontalLimit >= abs(y) / verticalLimit
-                ? (x > 0 ? .left : .right) : (y > 0 ? .up : .down)
-            return snapshot(.offCenter, "Move slightly \(direction.rawValue)", "Bring your face toward the middle of the preview.", .framing, direction)
-        }
+        // Image position is not head direction. A centered check uses the
+        // same absolute yaw limit in setup and recovery, independent of crop.
         let yaw = abs(frame.yawDegrees!), pitch = abs(frame.pitchDegrees!), roll = abs(frame.rollDegrees!)
-        let poseOK = requiresFrontalPose ? (yaw <= 12 && pitch <= 12 && roll <= 10) : (yaw <= 45 && pitch <= 20 && roll <= 15)
-        if !poseOK {
-            // Vision yaw's physical sign is learned later. Do not guess a
-            // left/right head-turn instruction before that calibration exists.
-            return snapshot(.offCenter, "Face the display", "Look straight at the screen with your head level.", .pose)
+        if yaw > HeadingFusionEngine.centerYawToleranceDegrees {
+            return snapshot(.offCenter, "Look straight ahead",
+                "\(Int(yaw.rounded()))° from center. Aim within 5°.", .pose)
         }
-        return snapshot(.holding, requiresFrontalPose ? "Hold your head still" : "Restoring direction",
-            requiresFrontalPose ? "Measuring your screen direction." : "Hold briefly. Your saved center stays the same.")
+        if pitch > 20 || roll > 15 {
+            return snapshot(.offCenter, "Keep your head level", "Face straight ahead, then hold briefly.", .pose)
+        }
+        return snapshot(.holding, "Hold at center", "One quick camera and AirPods check.")
     }
     private static func clamp(_ value: Double) -> Double { value.isFinite ? min(1, max(-1, value)) : 0 }
 }

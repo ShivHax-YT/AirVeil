@@ -164,6 +164,49 @@ import Foundation
         discontinuous.addMotion(motion(162, yaw: 0))
         check(discontinuous.heading(now: 162) == nil,
               "More than300ms motion receipt gap invalidates fusion despite fresh lastsample")
+        let facingReference = HeadingCameraCenter(cameraID: "fixed", neutralYawRadians: 0,
+            cameraSign: 0, sensorSign: 1, revision: 8, mode: .facingCamera)
+        var noLegacyBypass = HeadingFusionEngine()
+        noLegacyBypass.configure(center: facingReference)
+        burst(&noLegacyBypass, start: 170, sensor: 25, camera: 15)
+        check(noLegacyBypass.heading(now: 171.5) == nil && noLegacyBypass.alignmentRevision == 0,
+              "The legacy off-axis entry point cannot align a facing-camera reference")
+        func facingBurst(_ engine: inout HeadingFusionEngine, start: Double,
+                         sensor: Double, cameraYaw: Double, speed: Double = 0) -> Int {
+            var commits = 0
+            for i in 0...80 {
+                let t = start + Double(i) * 0.02
+                engine.addMotion(motion(t, yaw: sensor, speed: speed))
+                // Each camera frame is submitted only after the actual later
+                // motion sample covers the 200ms pairing guard.
+                if [45, 62, 79].contains(i) {
+                    if engine.addCenteredCamera(pose(t - 0.21, yaw: cameraYaw), reference: facingReference, now: t) { commits += 1 }
+                }
+            }
+            return commits
+        }
+        for yaw in [-15.0, -13.0, -5.1, 5.1, 13.0, 15.0] {
+            var facing = HeadingFusionEngine()
+            check(facingBurst(&facing, start: 180, sensor: 25, cameraYaw: yaw) == 0 && facing.heading(now: 181.6) == nil,
+                  "Centered route rejects every camera sample outside five degrees without adopting its neutral")
+        }
+        for yaw in [-5.0, 0.0, 5.0] {
+            var facing = HeadingFusionEngine()
+            check(facingBurst(&facing, start: 190, sensor: 25, cameraYaw: yaw) == 1,
+                  "One centered stationary batch atomically installs the reference and alignment without a restart")
+            check(near(facing.heading(now: 191.6), 0), "Only a verified facing-center pose sets the sensor zero")
+            facing.addMotion(motion(191.7, yaw: 40))
+            check(near(facing.heading(now: 191.7), 15), "Following AirPods motion keeps the real turn instead of rebasing it")
+        }
+        var facingMoving = HeadingFusionEngine()
+        check(facingBurst(&facingMoving, start: 200, sensor: 25, cameraYaw: 0, speed: 30) == 0,
+              "Camera-centered pose alone cannot satisfy moving AirPods")
+        var explicitReplacement = configure(1, neutral: 15)
+        check(facingBurst(&explicitReplacement, start: 210, sensor: 25, cameraYaw: 0) == 1 && near(explicitReplacement.heading(now: 211.6), 0),
+              "A facing-center batch replaces a legacy reference only by the explicit new route")
+        let encoded = try! JSONEncoder().encode(facingReference)
+        let decoded = try! JSONDecoder().decode(HeadingCameraCenter.self, from: encoded)
+        check(decoded.mode == .facingCamera && decoded.cameraSign == 0, "Stored mode distinguishes a facing check from a learned camera sign")
         print("PASS: \(checks) heading fusion assertions; synthetic inputs only, no camera or sensor access")
     }
 }
