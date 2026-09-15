@@ -1,5 +1,31 @@
 # AirPods removal and return repair — 14 September 2026
 
+## Current revision: both-AirPods removal
+
+The user subsequently narrowed this feature to removing both AirPods. This revision supersedes the per-ear implementation and the seated-no-dim connection fallback described below. The earlier observations remain useful diagnostic evidence.
+
+- Runtime detection now uses public Core Motion only. The private IOBluetooth reader and its runtime dependency were removed; AirVeil does not request Bluetooth access. Head Tracking uses Motion permission, local presence uses Camera permission, and the desktop effect uses Screen Recording permission.
+- Advancing fresh motion must span at least 0.75 seconds before detection arms. Freshness expires after 0.65 seconds; a further 0.35-second loss grace produces one removal episode. The application then applies its existing 1.5-second cancellation window before taking an action. A public disconnect starts loss timing immediately, while a silent stopped stream is also detected.
+- Continuous motion from one AirPod, including a source handoff, produces no removal episode. This does not inspect or claim to identify individual ears. A sustained connection failure or device handoff can resemble both-AirPods removal; the public API supplies no reason code. Automatic Ear Detection must stay on for normal both-out behavior.
+- With camera assistance, seated dimming, and a saved seat enabled, a removal episode starts one local seat check. Confirmed seated presence dims the built-in display to the saved target (default 0%). Confirmed absence requests display sleep. Missing seat geometry or camera uncertainty does not request sleep.
+- Presence monitoring continues while seated and dimmed. Two fresh dark frames permit one on-screen light attempt of at most 2.5 seconds. The light stops on a result, failure, cancellation, or deadline. A screen light cannot illuminate a face while hardware brightness is at zero; if presence stays unknown for 8 seconds, AirVeil ends the check and restores its saved brightness instead of treating darkness as absence.
+- Fresh returned headphone motion restores saved brightness and stops presence capture before direction recovery. This return can be from one bud; it does not prove both are inserted. The old screen center remains retained and unverified until a fresh camera measurement or explicit Set center. A source switch or raw connection callback alone does not launch a camera check.
+- Permission onboarding gates automatic motion and all normal camera/capture entry points. Skipping Head Tracking leaves motion stopped; an explicit tutorial start opens Permissions instead of silently prompting. Lock, sleep, Pause, shutdown, and permission failures preserve existing cancellation and restoration barriers.
+
+Targeted automated validation for this revision: 15 pure wear-policy checks, 51 production motion-reference lifecycle checks, 62 motion-delivery checks, 124 camera-coordinator checks, 278 AppModel/removal integration assertions, 47 removal-presence coordinator checks, and 28 presence capture/light lifecycle checks. Physical providers were injected; these tests did not open the camera or change real brightness, lock state, or device settings.
+
+### Installed physical test: AirVeil 0.15.0, build 20
+
+The user performed the both-AirPods removal/return test and explicitly confirmed that the display dimmed while seated without locking. Anonymous evidence is in `build/validation/both-airpods-0.15.0/live-test.jsonl`; the later snapshot is `build/permission-dimming-live.json`.
+
+- Two separate removal episodes were detected. Each camera seat check reached `present` and dimmed the built-in display to the user's existing **2%** target. The display-sleep request count stayed **0**.
+- The first return is recorded with fresh motion, original brightness restored, no pending restore, presence capture stopped, and the automatic direction camera running. The live operator observed restoration before both return checks. The later snapshot confirms two automatic return checks, restored brightness, no idle-sleep assertion, and both cameras off.
+- The first direction recovery was interrupted by the second removal while it was still seeking a centered, steady view. The final `Tracking interrupted` status is a motion/reference invalidation message, not the camera timeout message. The later snapshot also contains one rejected 35.4° attitude discontinuity against a 20.1° limit over 20 ms. That is consistent with the deliberate reference-safety cancellation; the appended final snapshot confirms the second restore and return count, but the intervening second-return sequence was not recorded, so the exact jump timing is unknown. A completed second direction alignment is therefore **not** claimed from these records alone. Fresh motion remains available, and an explicit Refresh direction can retry the saved center.
+
+This verifies physical seated dimming and brightness restoration with this setup at 2%. Departed-seat sleep/lock, a physical 0% brightness run, extended darkness recovery, and sustained connection/device-handoff behavior remain untested. Individual-ear identification is outside the selected scope.
+
+## Earlier diagnostic revision (superseded behavior)
+
 ## Live read-only findings
 
 - The user confirmed both AirPods were worn. The running app reported approximately 50 motion samples/second from the right AirPod, camera assistance on, removal behavior on, and a remembered seat. Individual-ear metadata remained unavailable.

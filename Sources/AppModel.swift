@@ -55,7 +55,6 @@ final class AppModel: NSObject, ObservableObject {
     private var isMacSessionActive: Bool { systemAwake && screensAwake && sessionActive && !screenLocked }
     @Published var sleepDisplaysOnRemoval = false {
         didSet {
-            motion.monitorsIndividualAirPods = sleepDisplaysOnRemoval || cameraHeading.isEnabled
             cancelRemovalAction()
             persist()
         }
@@ -63,17 +62,11 @@ final class AppModel: NSObject, ObservableObject {
     @Published private(set) var removalStatus = "Automatic display off is off."
     private(set) var displaySleepRequestCount = 0
     private var removalGuard = AirPodsRemovalGuard()
-    private var connectionPresenceGuard = AirPodsRemovalGuard()
-    private var pendingTransportDisconnectCount: UInt64?
-    private(set) var connectionPresenceCheckCount = 0
     private var pendingRemovalEventIsCurrent: Bool {
-        if let event = pendingTransportDisconnectCount { return event == motion.disconnectEventCount }
-        return pendingDisconnectCount == motion.removalEventCount
+        pendingDisconnectCount == motion.removalEventCount
     }
     private var removalReturnObserved: Bool {
-        pendingTransportDisconnectCount != nil
-            ? motion.connectionState == .connected && motion.isFresh
-            : motion.removalConnectionState == .connected
+        motion.removalConnectionState == .connected && motion.isFresh
     }
     private var removalTimer: Timer?
     private var removalTicket = 0
@@ -154,9 +147,9 @@ final class AppModel: NSObject, ObservableObject {
             "\($0.stableID):\($0.frame.origin.x),\($0.frame.origin.y),\($0.frame.width),\($0.frame.height):\($0.backingScale)"
         }.joined(separator: "|")
     }
-    func enableCameraAssistance() { pause(); cameraHeading.requestEnable() }
+    func enableCameraAssistance() { guard !permissionSetupActive else { return }; pause(); cameraHeading.requestEnable() }
     func disableCameraAssistance() { pause(); seatReference = nil; seatLayout = nil; cameraHeading.disable() }
-    func refreshCameraDirection() { guard removalPresence.canResumeHeading else { return }; cameraHeading.refreshDirection() }
+    func refreshCameraDirection() { guard !permissionSetupActive, removalPresence.canResumeHeading else { return }; cameraHeading.refreshDirection() }
     var shielded: Bool { enabled && (!trackingValid || !overlay.isRunning || overlay.failureReason != nil) }
     var headline: String {
         if starting { return "Starting desktop effect…" }
@@ -198,16 +191,11 @@ final class AppModel: NSObject, ObservableObject {
         removalBrightness = Self.read(d, "removalBrightnessV2", 0, 0...0.5)
         selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
         lastDisplayLayout = cameraLayoutKey
-        motion.monitorsIndividualAirPods = sleepDisplaysOnRemoval || cameraHeading.isEnabled
         loading = false
         refreshPermission()
         motion.$fusionSample.receive(on: DispatchQueue.main).sink { [weak self] _ in
             self?.checkTrackingSafety()
             self?.wakeAnimation()
-        }.store(in: &subscriptions)
-        cameraHeading.$isEnabled.removeDuplicates().sink { [weak self] enabled in
-            guard let self else { return }
-            self.motion.monitorsIndividualAirPods = self.sleepDisplaysOnRemoval || enabled
         }.store(in: &subscriptions)
         cameraHeading.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
@@ -357,59 +345,36 @@ final class AppModel: NSObject, ObservableObject {
             message = "Effect paused and screen cleared. " + reason
         }
     }
-    /// Separate from tracking safety: a reference jump clears the blur but
-    /// cannot turn off displays. A connection-only event may check an already
-    /// configured seat, but only confirmed absence permits its display action.
+    /// The public motion service emits one sustained stream-loss event after
+    /// a stable wearing session. Source switches and brief gaps do not count.
+    /// A seat check decides seated dimming versus confirmed-absence sleep.
     func checkAirPodsRemoval(now: TimeInterval = CMClockGetHostTimeClock().time.seconds) {
-        guard !isShuttingDown, isMacSessionActive else {
+        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive else {
             if removalActionPending { cancelRemovalAction() }
             removalGuard.reset(disconnectCount: motion.removalEventCount)
-            connectionPresenceGuard.reset(disconnectCount: motion.disconnectEventCount)
             return
         }
-        // Keep a due event pending while another camera/brightness operation
-        // owns the hardware. Consuming it before that barrier would silently
-        // lose the only disconnect notification.
-        let connectionNeedsPresence = !removalActionPending && removalPresence.canResumeHeading && !restoringRemoval && connectionPresenceGuard.update(
-            enabled: sleepDisplaysOnRemoval && usesRemovalPresence && presenceReady && !motion.hasIndividualWearState,
-            running: motion.isRunning, connected: motion.connectionState == .connected,
-            disconnected: motion.connectionState == .disconnected, freshMotion: motion.isFresh,
-            disconnectCount: motion.disconnectEventCount, now: now)
         if removalActionPending && (!sleepDisplaysOnRemoval || !motion.isRunning ||
-            !pendingRemovalEventIsCurrent) {
+            !pendingRemovalEventIsCurrent || motion.removalConnectionState == .unknown) {
             // A genuinely observed fresh rewear may be followed by another
             // removal while the previous camera/brightness cleanup is pending.
             let nextEpisode = removalGuard
             let preserveRewear = sleepDisplaysOnRemoval && motion.isRunning &&
                 pendingDisconnectCount != motion.removalEventCount && nextEpisode.armed
-            let nextConnectionEpisode = connectionPresenceGuard
-            let preserveConnectionRewear = sleepDisplaysOnRemoval && motion.isRunning && usesRemovalPresence &&
-                presenceReady && !motion.hasIndividualWearState && nextConnectionEpisode.armed &&
-                pendingTransportDisconnectCount.map { $0 != motion.disconnectEventCount } == true
             cancelRemovalAction()
             if preserveRewear { removalGuard = nextEpisode }
-            if preserveConnectionRewear { connectionPresenceGuard = nextConnectionEpisode }
         }
         if removalActionPending {
             if removalReturnObserved {
                 _ = removalGuard.update(enabled: sleepDisplaysOnRemoval, running: motion.isRunning,
                     connected: true, disconnected: false, freshMotion: motion.isFresh,
                     disconnectCount: motion.removalEventCount, now: now)
-                if pendingTransportDisconnectCount != nil {
-                    _ = connectionPresenceGuard.update(enabled: sleepDisplaysOnRemoval && usesRemovalPresence,
-                        running: motion.isRunning, connected: true, disconnected: false,
-                        freshMotion: motion.isFresh, disconnectCount: motion.disconnectEventCount, now: now)
-                }
                 finishRemovalForRewear(now: now)
             } else if removalPresence.isActive {
                 removalPresence.update(now: now)
                 setRemovalStatus(removalPresence.status)
-            } else if pendingTransportDisconnectCount != nil, removalPresence.canResumeHeading {
-                // A seated/unknown connection check is bounded. It neither
-                // holds the camera until reconnection nor retries this event.
-                removalActionPending = false; pendingDisconnectCount = nil
-                pendingTransportDisconnectCount = nil
-                cameraHeading.setSessionActive(isMacSessionActive)
+            } else {
+                setRemovalStatus(removalPresence.status)
             }
             return
         }
@@ -426,7 +391,7 @@ final class AppModel: NSObject, ObservableObject {
             running: motion.isRunning, connected: motion.removalConnectionState == .connected,
             disconnected: motion.removalConnectionState == .disconnected, freshMotion: motion.isFresh,
             disconnectCount: motion.removalEventCount, now: now)
-        if shouldSleep || connectionNeedsPresence {
+        if shouldSleep {
             let restoreEffect = enabled || starting || resumeWhenReferenceReturns
             pause(cancelRemoval: false)
             resumeWhenReferenceReturns = restoreEffect
@@ -435,16 +400,14 @@ final class AppModel: NSObject, ObservableObject {
             let ticket = removalTicket
             let event = motion.removalEventCount
             pendingDisconnectCount = event
-            pendingTransportDisconnectCount = !shouldSleep ? motion.disconnectEventCount : nil
             if usesRemovalPresence {
-                if !shouldSleep { connectionPresenceCheckCount += 1 }
                 removalPresence.begin(reference: presenceReady ? seatReference : nil,
                     targetBrightness: removalBrightness, now: now,
-                    allowDimming: shouldSleep, allowUncertainSleep: shouldSleep)
+                    allowDimming: true, allowUncertainSleep: false)
                 setRemovalStatus(removalPresence.status)
                 return
             }
-            setRemovalStatus("AirPod removal confirmed. Turning off displays…")
+            setRemovalStatus("AirPods motion stopped after removal. Turning off displays…")
             Task {
                 guard removalTicket == ticket, sleepDisplaysOnRemoval, motion.isRunning,
                       motion.removalConnectionState == .disconnected, motion.removalEventCount == event else {
@@ -464,16 +427,12 @@ final class AppModel: NSObject, ObservableObject {
             }
         } else if !sleepDisplaysOnRemoval {
             setRemovalStatus("Automatic display off is off.")
-        } else if !motion.hasIndividualWearState && motion.removalConnectionState != .disconnected {
-            setRemovalStatus(usesRemovalPresence && presenceReady
-                ? "Individual AirPods are not reported by macOS. A disconnect can check your seat; seated dimming needs confirmed removal."
-                : "Individual AirPods are not reported by macOS. Enable camera assistance and set center for seat checks after a disconnect.")
         } else if removalGuard.deadline != nil {
-            setRemovalStatus("AirPod removal detected. Waiting briefly for reinsertion…")
+            setRemovalStatus("AirPods motion stopped. Waiting briefly for them to return…")
         } else if removalGuard.armed {
             setRemovalStatus(usesRemovalPresence
-                ? (presenceReady ? "Ready. Stay seated to dim; leave the seat to turn off displays." : "Use Set center once to remember your seat. Until then, removal turns off displays.")
-                : "Ready. Displays turn off after confirmed AirPod removal.")
+                ? (presenceReady ? "Ready. Remove both AirPods to check your seat and dim the display." : "Use Set center once to remember your seat before removal checks.")
+                : "Ready. Displays turn off after both AirPods stop sending motion.")
         } else if motion.removalConnectionState != .disconnected {
             setRemovalStatus("Wear your AirPods to arm automatic display off.")
         }
@@ -490,7 +449,7 @@ final class AppModel: NSObject, ObservableObject {
             guard ticket == removalTicket, !isShuttingDown else { return }
             restoringRemoval = false
             guard restored else { setRemovalStatus(removalPresence.status); return }
-            removalActionPending = false; pendingDisconnectCount = nil; pendingTransportDisconnectCount = nil; resumePresenceEvent = nil
+            removalActionPending = false; pendingDisconnectCount = nil; resumePresenceEvent = nil
             cameraHeading.setSessionActive(isMacSessionActive)
             setRemovalStatus("AirPods are back. Your previous brightness is restored.")
         }
@@ -505,9 +464,7 @@ final class AppModel: NSObject, ObservableObject {
         }
         removalActionPending = false
         pendingDisconnectCount = nil
-        pendingTransportDisconnectCount = nil
         removalGuard.reset(disconnectCount: motion.removalEventCount)
-        connectionPresenceGuard.reset(disconnectCount: motion.disconnectEventCount)
         displaySleep.cancel()
         setRemovalStatus(sleepDisplaysOnRemoval ? "Wear your AirPods to arm automatic display off." : "Automatic display off is off.")
     }
@@ -520,15 +477,23 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     var startupTourActive = false
+    var permissionSetupActive = false
+    var motionAccessAllowedByOnboarding = false
+    var showPermissionSetup: (() -> Void)?
 
     func startTrackingFromTour() {
-        guard !isShuttingDown, isMacSessionActive else { return }
+        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive else { return }
+        guard motionAccessAllowedByOnboarding else {
+            message = "Allow Head Tracking in Permissions before starting AirPods motion."
+            showPermissionSetup?()
+            return
+        }
         startupTourActive = false
         startMotionAutomatically()
     }
 
     func startMotionAutomatically() {
-        guard !startupTourActive, !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
+        guard motionAccessAllowedByOnboarding, !permissionSetupActive, !startupTourActive, !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
         motion.start()
         message = "AirPods are detected automatically. Face the display and use Set center once."
     }
@@ -536,7 +501,7 @@ final class AppModel: NSObject, ObservableObject {
     /// Camera recovery measures against the saved screen anchor. Manual mode
     /// requires explicit calibration after a gap; stillness never establishes zero.
     func checkReferenceRecovery() {
-        guard !startupTourActive, !isShuttingDown else { return }
+        guard !permissionSetupActive, !startupTourActive, !isShuttingDown else { return }
         guard removalPresence.canResumeHeading, !restoringRemoval else {
             cameraHeading.setSessionActive(false)
             checkTrackingSafety()
@@ -634,13 +599,14 @@ final class AppModel: NSObject, ObservableObject {
             guard ticket == removalTicket, !isShuttingDown, isMacSessionActive else { return }
             restoringRemoval = false
             guard restored else { setRemovalStatus(removalPresence.status); return }
+            guard !permissionSetupActive else { cameraHeading.setSessionActive(false); return }
             startMotionAutomatically()
             if let event = resumePresenceEvent, event == motion.removalEventCount,
                motion.removalConnectionState == .disconnected, sleepDisplaysOnRemoval, usesRemovalPresence {
                 removalActionPending = true; pendingDisconnectCount = event
                 removalPresence.begin(reference: presenceReady ? seatReference : nil,
                     targetBrightness: removalBrightness, now: CMClockGetHostTimeClock().time.seconds,
-                    allowSleepBeforePresence: false)
+                    allowSleepBeforePresence: false, allowUncertainSleep: false)
             } else {
                 resumePresenceEvent = nil
                 cameraHeading.setSessionActive(true)
@@ -649,7 +615,7 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     func calibrate() {
-        guard !isShuttingDown, isMacSessionActive, removalPresence.canResumeHeading, !restoringRemoval, motion.isFresh else { message = "Wait for an active Mac session and fresh AirPods motion before setting center."; return }
+        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive, removalPresence.canResumeHeading, !restoringRemoval, motion.isFresh else { message = "Finish Permissions and wait for fresh AirPods motion before setting center."; return }
         if cameraHeading.isEnabled {
             cameraHeading.setCenter(layoutKey: cameraLayoutKey)
             simulate = false
@@ -700,7 +666,7 @@ final class AppModel: NSObject, ObservableObject {
         permissionGranted = overlay.isReady || verifiedScreenAccess || CGPreflightScreenCaptureAccess()
     }
     func requestScreenPermission() {
-        guard !checkingAccess else { return }
+        guard !permissionSetupActive, !checkingAccess else { return }
         accessTicket += 1
         let ticket = accessTicket
         checkingAccess = true
@@ -729,11 +695,11 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     var canRequestEnable: Bool {
-        selectedDisplayCount > 0 && isMacSessionActive && removalPresence.canResumeHeading && !restoringRemoval &&
+        !permissionSetupActive && selectedDisplayCount > 0 && isMacSessionActive && removalPresence.canResumeHeading && !restoringRemoval &&
         (trackingValid || (cameraHeading.isEnabled && cameraHeading.hasCenter && motion.isFresh && !centerBusy))
     }
     func enable() {
-        guard !isShuttingDown, isMacSessionActive, removalPresence.canResumeHeading, !restoringRemoval, !enabled && !starting else { return }
+        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive, removalPresence.canResumeHeading, !restoringRemoval, !enabled && !starting else { return }
         guard selectedDisplayCount > 0 else { message = "Select at least one display to blur."; return }
         guard trackingValid else {
             if cameraHeading.isEnabled, cameraHeading.hasCenter, motion.isFresh {
@@ -799,7 +765,7 @@ final class AppModel: NSObject, ObservableObject {
     }
     private func suspend() {
         let restoreEffect = enabled || starting || resumeWhenReferenceReturns
-        let resumeEvent = removalActionPending && pendingTransportDisconnectCount == nil && usesRemovalPresence && motion.removalConnectionState == .disconnected
+        let resumeEvent = removalActionPending && usesRemovalPresence && motion.removalConnectionState == .disconnected
             ? pendingDisconnectCount : resumePresenceEvent
         pause(cancelRemoval: false)
         cancelRemovalAction()

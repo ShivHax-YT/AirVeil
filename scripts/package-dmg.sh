@@ -26,8 +26,8 @@ AirVeil for Apple silicon — prerelease
 1. Quit an older AirVeil version normally before replacing it.
 2. Drag AirVeil.app onto the Applications shortcut.
 3. Open AirVeil from Applications, then eject this disk image.
-4. Follow the first-launch Settings tour, or skip it and replay it later
-   using Take a tour at the top of Settings.
+4. Review the permission cards, then follow the interactive Settings tour.
+   Permissions and the tour can be revisited from Settings.
 
 Requires macOS 14 or later and compatible head-tracking AirPods.
 This is a development-signed build, not Apple-notarized. macOS may
@@ -39,9 +39,25 @@ and uses a separate permission. Screen Recording permission is only
 needed for live desktop blur; removal, brightness and display-off
 features work without it. Images and screen frames stay on the Mac.
 
-Hardware testing is pending, including removal of the non-tracking
-AirPod and brightness restoration. Per-ear status depends on private
-macOS compatibility interfaces. Treat this as a test build.
+Automatic display management uses a sustained loss of headphone motion
+for the both-AirPods workflow. A connection interruption can produce
+the same signal; individual earbuds are not identified. With camera
+assistance and seated dimming enabled, a seat check can dim the built-in
+display while you remain seated and request display sleep after confirmed
+absence. An uncertain or unavailable check does not request sleep.
+Returning motion restores owned brightness, even if only one bud is in.
+
+If automatic display management remains on while camera assistance or
+seated dimming is off, sustained motion loss requests display sleep
+directly, without a camera check. Disable automatic display management
+separately if you do not want this. Password-on-wake follows your macOS
+Lock Screen settings. Keep Automatic Ear Detection on and verify the
+behavior on your own hardware before relying on this prerelease.
+
+Terms of Use, Privacy Policy, and Cookies & Local Storage are available
+offline from the footer in AirVeil. There are no advertising or analytics
+SDKs and no browser cookies in the app. Developer animation-preview
+commands are excluded from this release build.
 
 Source and release notes: https://github.com/ShivHax-YT/AirVeil
 EOF

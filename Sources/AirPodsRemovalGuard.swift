@@ -1,8 +1,8 @@
 import Foundation
 
-/// The caller supplies validated per-bud loss. The historical disconnected
-/// labels describe the removal-policy state, not the transport. Audio handoff,
-/// disconnect callbacks, sample gaps, and calibration changes are not removals.
+/// The caller supplies a debounced complete-motion-loss episode after a stable
+/// wearing session. This second grace period cancels a quick return before the
+/// seat camera or the user's configured display action begins.
 struct AirPodsRemovalGuard {
     private(set) var armed = false
     private(set) var deadline: TimeInterval?

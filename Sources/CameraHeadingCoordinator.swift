@@ -27,10 +27,6 @@ import CoreMedia
     private var automaticRecoveryAllowed = true
     private var lastAttemptEpoch: UInt64?
     private var observedRemovalEvent: UInt64 = 0
-    private var observedDisconnectEvent: UInt64 = 0
-    private var transportReturnPending = false
-    private var gapStarted: Double?
-    private var canCheckAfterGap = false
     private(set) var automaticReturnCheckCount = 0
     private var burstTicket: UInt64 = 0
     private var phase: Phase?
@@ -102,6 +98,10 @@ import CoreMedia
 
     /// The only permission request entry point; invoked by the user's button.
     func requestEnable() {
+        guard sessionActive else {
+            status = "Wake and unlock your Mac, then turn on Camera assistance again."
+            return
+        }
         burstTicket &+= 1
         let ticket = burstTicket
         isBusy = true
@@ -138,8 +138,6 @@ import CoreMedia
         if isEnabled { status = "Camera is off. Refresh direction when you want to resume." }
     }
     private func clearReturnRecoveryIntent() {
-        canCheckAfterGap = false; gapStarted = nil; transportReturnPending = false
-        observedDisconnectEvent = motion.disconnectEventCount
         observedRemovalEvent = motion.removalEventCount
     }
     func setSessionActive(_ active: Bool) {
@@ -153,33 +151,18 @@ import CoreMedia
     func update(layoutKey: String) {
         self.layoutKey = layoutKey
         guard isEnabled, sessionActive else { return }
-        if motion.disconnectEventCount != observedDisconnectEvent {
-            observedDisconnectEvent = motion.disconnectEventCount
-            transportReturnPending = hasCenter
-        }
-        // An actual sustained loss and return can occur without a delegate
-        // callback. Allow one recheck after a successful alignment; a failed
-        // retry cannot turn noisy epochs into a repeating camera loop.
-        if !motion.isFresh {
-            if gapStarted == nil { gapStarted = now() }
-        }
-        let returnedAfterGap = motion.isFresh && canCheckAfterGap &&
-            gapStarted.map { now() - $0 >= 1 } == true
-        if motion.isFresh { gapStarted = nil }
         if motion.removalConnectionState == .disconnected {
             if phase != nil { cancelBurst() }
             engine.invalidate(); isAligned = false; hadLiveAlignment = false
-            status = "AirPod removal confirmed. Waiting for reinsertion before checking direction."
+            status = "AirPods motion stopped. Waiting for them to return before checking direction."
             return
         }
         // A sensor epoch is not a wear event: idle audio and Continuity can
         // change it repeatedly. Rearm only after a confirmed removal returns.
         let confirmedReturn = motion.removalEventCount != observedRemovalEvent &&
             motion.removalConnectionState == .connected && motion.isFresh
-        let transportReturn = transportReturnPending && motion.connectionState == .connected && motion.isFresh
-        if confirmedReturn || transportReturn || returnedAfterGap {
+        if confirmedReturn {
             observedRemovalEvent = motion.removalEventCount
-            transportReturnPending = false; canCheckAfterGap = false
             cancelBurst(); engine.invalidate(); isAligned = false; hadLiveAlignment = false
             automaticRecoveryAllowed = true
             lastAttemptEpoch = nil
@@ -484,7 +467,6 @@ import CoreMedia
                 // Keep its motion history and alignment; never configure again
                 // or start a second capture after completing this check.
                 cancelBurst(clearCoach: false); isAligned = true; hadLiveAlignment = true
-                canCheckAfterGap = true; gapStarted = nil
                 status = "Facing-center check complete. Camera is off."
                 showSuccess()
                 return

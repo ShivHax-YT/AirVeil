@@ -83,10 +83,12 @@ private struct HeadTrackingControls: View {
                 .font(.caption.weight(.medium))
             Text(model.cameraHeading.isEnabled ? "Face straight ahead within 5°. A brief camera and AirPods check establishes center after setup or a supported return event." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
                 .font(.caption2).foregroundStyle(.secondary)
-            if model.startupTourActive {
-                Button("Start head tracking") { model.startTrackingFromTour() }
+            if model.startupTourActive || !model.motionAccessAllowedByOnboarding {
+                Button(model.motionAccessAllowedByOnboarding ? "Start head tracking" : "Review head-tracking access") { model.startTrackingFromTour() }
                     .controlSize(.large)
-                Text("Starts AirPods motion tracking so you can set your center during the tour.")
+                Text(model.motionAccessAllowedByOnboarding
+                     ? "Starts AirPods motion tracking so you can set your center during the tour."
+                     : "Review Motion & Fitness access before starting AirPods tracking.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Button(presentation.snapshot.centerBusy ? "Checking direction…" : "Set center") { model.calibrate() }
@@ -145,6 +147,7 @@ struct EnergySettingsView: View {
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var tour: SettingsTour
+    var showPermissions: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var advanced = false
     @State private var advancedBeforeTour = false
@@ -176,6 +179,9 @@ struct SettingsView: View {
                     }
                     Spacer()
                     if !tour.isActive {
+                        if let showPermissions {
+                            Button("Permissions", action: showPermissions).controlSize(.large)
+                        }
                         Button("Take a tour") { tour.replay() }.controlSize(.large)
                     }
                     Text(model.enabled ? "BLUR ON" : "BLUR PAUSED").font(.caption.weight(.bold))
@@ -292,7 +298,7 @@ struct SettingsView: View {
                 VStack(alignment:.leading,spacing:12) {
                     VStack(alignment:.leading,spacing:12) {
                     Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
-                    Toggle("Automatically manage displays when AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
+                    Toggle("Automatically manage displays when both AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
                         .toggleStyle(.switch).controlSize(.small)
                     Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
                     }.tourTarget(.removal)
@@ -313,15 +319,15 @@ struct SettingsView: View {
                             Text(!model.sleepDisplaysOnRemoval || !model.dimWhilePresent
                                 ? "Choose a brightness, then enable automatic display management and seated dimming to apply it."
                                 : model.cameraHeading.isEnabled
-                                ? (model.presenceReady ? "Your seat is ready. Turning away is fine. At 0%, the display goes black without locking. Put an AirPod back in to restore your brightness." : "Use Set center once to remember your seat before removing AirPods.")
+                                ? (model.presenceReady ? "Your seat is ready. Turning away is fine. At 0%, the display goes black without locking. Put your AirPods back in to restore brightness when motion resumes." : "Use Set center once to remember your seat before removing AirPods.")
                                 : "Enable camera assistance and use Set center to check your seat.")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("The built-in camera stays on while AirPods are removed. Face position and size help distinguish your seat from people in the background. Images are not recorded or used to identify you. If you leave, or your seat cannot be confirmed, displays turn off. Only the built-in display is dimmed.")
+                            Text("While your seat is confirmed and the display is dimmed, the built-in camera keeps checking. Images are not recorded or used to identify you. Confirmed absence turns displays off; an uncertain check ends and restores brightness. Only the built-in display is dimmed.")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                         }.tourTarget(.seated)
                     }
-                    Text("Keep Automatic Ear Detection on. Confirmed removal of either AirPod supports seated dimming. If in-ear status is unavailable, a connection change can check whether you left; it keeps seated brightness unchanged and turns displays off only after confirming absence. Tracking interruptions pause blur; use Refresh direction if an automatic check cannot restore it.")
+                    Text("Keep Automatic Ear Detection on. After tracking is established, removing both AirPods can trigger a check when motion stops for a sustained period or disconnects. AirVeil cannot identify individual earbuds. Tracking interruptions pause blur; use Refresh direction if an automatic check cannot restore it.")
                         .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment:.top) {
                         Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")
@@ -373,6 +379,7 @@ struct SettingsView: View {
                     Spacer()
                     Text(model.pauseHint).fixedSize()
                 }.font(.caption2).foregroundStyle(.secondary)
+                LegalFooter().padding(.top, 4).frame(maxWidth: .infinity)
             }.padding(28).frame(maxWidth:800)
         }
         .overlayPreferenceValue(TourAnchorKey.self) { anchors in

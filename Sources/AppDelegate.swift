@@ -6,7 +6,8 @@ import ScreenCaptureKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var model: AppModel!
-    private let tour = SettingsTour()
+    private let onboarding = PermissionOnboarding(provider: SystemPermissionOnboardingProvider())
+    private let tour = SettingsTour(startImmediately: false)
     private var window: AirVeilSettingsWindow!
     private var item: NSStatusItem!
     private var hotKey: EventHotKeyRef?
@@ -33,9 +34,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 }
             })
         }
-        model.startupTourActive = tour.isActive
+        if !onboarding.isActive { tour.beginIfNeeded() }
+        model.permissionSetupActive = onboarding.isActive
+        model.motionAccessAllowedByOnboarding = onboarding.headTrackingChoiceAllowsMotion
+        model.startupTourActive = onboarding.isActive || tour.isActive
+        onboarding.onBegin = { [weak self] in
+            guard let self else { return }
+            model.startupTourActive = true
+            model.permissionSetupActive = true
+            model.pause()
+            model.motion.stop()
+            model.cameraHeading.setSessionActive(false)
+            tour.suspendForPermissions()
+        }
+        onboarding.onFinish = { [weak self] in
+            guard let self else { return }
+            model.motionAccessAllowedByOnboarding = onboarding.headTrackingChoiceAllowsMotion
+            model.startupTourActive = true
+            model.permissionSetupActive = false
+            if onboarding.cameraChoiceAllowsAssistance {
+                if !model.cameraHeading.isEnabled {
+                    model.cameraHeading.setSessionActive(!Self.isScreenLocked())
+                    model.enableCameraAssistance()
+                }
+            } else {
+                model.disableCameraAssistance()
+            }
+            tour.replay()
+        }
+        model.showPermissionSetup = { [weak self] in
+            guard let self else { return }
+            onboarding.replay()
+            showSettings()
+        }
         tour.onFinish = { [weak self] in
-            guard let self, model.startupTourActive else { return }
+            guard let self, !onboarding.isActive, model.startupTourActive else { return }
             model.startupTourActive = false
             model.startMotionAutomatically()
         }
@@ -45,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
         window = AirVeilSettingsWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)))
         window.delegate = self
-        window.contentView = NSHostingView(rootView:SettingsView(model:model,tour:tour))
+        window.contentView = NSHostingView(rootView:AirVeilSetupView(model:model,tour:tour,onboarding:onboarding))
         window.center()
         model.overlay.registerSettingsWindow(window)
         model.showWindow = { [weak self] in self?.showSettings() }
@@ -55,15 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         notch = NotchOverlayController(model: model)
         refreshStatus(); configureAppMenu(); installHotKey()
         model.setPreviewVisible(false)
-        if tour.isActive || CommandLine.arguments.contains("--settings") { showSettings() }
+        if onboarding.isActive || tour.isActive || CommandLine.arguments.contains("--settings") { showSettings() }
         settingsVisibleAtLaunch = window.isVisible
-        if !tour.isActive { model.startMotionAutomatically() }
-        // Explicit read-only wear diagnostic hook. With removal disabled it
-        // observes the production reader in this app's permission context but
-        // cannot arm display sleep, brightness changes, or camera presence.
-        if CommandLine.arguments.contains("--diagnose-airpods-wear"), !model.sleepDisplaysOnRemoval {
-            model.motion.monitorsIndividualAirPods = true
-        }
+        if !onboarding.isActive && !tour.isActive { model.startMotionAutomatically() }
         if let index = CommandLine.arguments.firstIndex(of:"--diagnostics"),CommandLine.arguments.count > index+1 {
             let path = CommandLine.arguments[index+1]
             diagnosticTimer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
@@ -90,7 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         appMenu.addItem(withTitle:"AirVeil Settings…",action:#selector(showSettings),keyEquivalent:",").target = self
         appMenu.addItem(withTitle:"Pause & Clear Screen",action:#selector(pause),keyEquivalent:"p").target = self
         appMenu.addItem(withTitle:"Show Notch Controls",action:#selector(showNotch),keyEquivalent:"").target = self
+        #if AIRVEIL_DEVELOPMENT
         appMenu.addItem(withTitle:"Preview Notch Animation",action:#selector(previewNotch),keyEquivalent:"").target = self
+        #endif
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle:"Hide AirVeil",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h")
         let hideOthers = appMenu.addItem(withTitle:"Hide Others",action:#selector(NSApplication.hideOtherApplications(_:)),keyEquivalent:"h")
@@ -116,15 +145,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(withTitle:model.headTrackingStatus,action:nil,keyEquivalent:"").isEnabled = false
         menu.addItem(.separator())
         menu.addItem(withTitle:model.pauseShortcutAvailable ? "Pause & Clear Screen  ⌃⌥⌘P" : "Pause & Clear Screen",action:#selector(pause),keyEquivalent:"").target = self
-        let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled=model.motion.isFresh && !model.centerBusy
+        let center = menu.addItem(withTitle:"Set Center",action:#selector(calibrate),keyEquivalent:""); center.target=self; center.isEnabled = !onboarding.isActive && model.motion.isFresh && !model.centerBusy
         if !model.enabled {
             let enable = menu.addItem(withTitle:"Enable Desktop Blur",action:#selector(enable),keyEquivalent:"")
-            enable.target=self; enable.isEnabled=model.canRequestEnable && model.selectedDisplayCount > 0
+            enable.target=self; enable.isEnabled = !onboarding.isActive && model.canRequestEnable && model.selectedDisplayCount > 0
         }
         menu.addItem(withTitle:"Settings…",action:#selector(showSettings),keyEquivalent:",").target=self
         menu.addItem(withTitle:"Show Notch Controls",action:#selector(showNotch),keyEquivalent:"").target=self
+        #if AIRVEIL_DEVELOPMENT
         let preview = menu.addItem(withTitle:"Preview Notch Animation",action:#selector(previewNotch),keyEquivalent:"")
         preview.target=self; preview.isEnabled = !model.cameraHeading.isBusy
+        #endif
         menu.addItem(.separator())
         menu.addItem(withTitle:"Quit AirVeil",action:#selector(quit),keyEquivalent:"q").target=self
     }
@@ -143,22 +174,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func showSettings() {
         window.showSettings()
         model.overlay.settingsWindowDidBecomeVisible()
-        model.setPreviewVisible(true); model.refreshPermission()
+        model.setPreviewVisible(!onboarding.isActive); model.refreshPermission()
+        onboarding.refresh()
     }
-    func windowWillClose(_ notification: Notification) { tour.finish(); model.setPreviewVisible(false) }
+    func windowWillClose(_ notification: Notification) {
+        if onboarding.isActive { onboarding.cancelPendingRequest() }
+        else { tour.finish() }
+        model.setPreviewVisible(false)
+    }
     func windowDidMiniaturize(_ notification: Notification) { model.setPreviewVisible(false) }
     func windowDidDeminiaturize(_ notification: Notification) { updatePreviewVisibility() }
     func windowDidChangeOcclusionState(_ notification: Notification) { updatePreviewVisibility() }
     private func updatePreviewVisibility() {
-        let visible = window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+        let visible = !onboarding.isActive && window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
         if visible { model.overlay.settingsWindowDidBecomeVisible() }
         model.setPreviewVisible(visible)
     }
     @objc private func pause() { model.pause() }
-    @objc private func calibrate() { model.calibrate() }
-    @objc private func enable() { model.enable() }
+    @objc private func calibrate() { if !onboarding.isActive { model.calibrate() } }
+    @objc private func enable() { if !onboarding.isActive { model.enable() } }
     @objc private func showNotch() { notch?.showControls() }
+    #if AIRVEIL_DEVELOPMENT
     @objc private func previewNotch() { notch?.previewAnimation() }
+    #endif
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool { showSettings(); return true }
     private static func isScreenLocked() -> Bool {
@@ -170,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
+        onboarding.cancelPendingRequest()
         Task {
             await model.prepareForTermination()
             sender.reply(toApplicationShouldTerminate: true)
@@ -177,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return .terminateLater
     }
     func applicationWillTerminate(_ notification:Notification) {
+        onboarding.cancelPendingRequest()
         for observer in lockObservers { DistributedNotificationCenter.default().removeObserver(observer) }
         lockObservers.removeAll()
         diagnosticTimer?.invalidate(); notch?.shutdown(); model.shutdown()
@@ -203,6 +243,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     private func writeDiagnostics(_ path:String) {
         let snapshot:[String:Any] = ["timestamp":Date().timeIntervalSince1970,
+            "permissionSetupActive":onboarding.isActive,
+            "motionAllowedBySetup":model.motionAccessAllowedByOnboarding,
+            "tutorialActive":tour.isActive,
             "build":Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",
             "referenceJumpCount":model.motion.referenceJumpCount,"lastReferenceJump":model.motion.lastReferenceJump,
             "activeDisplayCount":model.overlay.activeDisplayCount,
@@ -218,9 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "displayIdleSleepPrevented":model.dimming.keepsDisplayAwake,
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
             "removalEventCount":model.motion.removalEventCount,"removalConnectionState":model.motion.removalConnectionState.rawValue,
-            "wearStatus":model.motion.wearStatus,"individualAirPodsMonitoring":model.motion.monitorsIndividualAirPods,
-            "hasIndividualWearState":model.motion.hasIndividualWearState,
-            "connectionPresenceCheckCount":model.connectionPresenceCheckCount,
+            "wearStatus":model.motion.wearStatus,
             "automaticReturnCheckCount":model.cameraHeading.automaticReturnCheckCount,
             "wearDiagnosticStatus":model.motion.wearDiagnosticStatus,"leftBlurOnset":model.leftOnset,"rightBlurOnset":model.rightOnset,
             "displaySleepRequestCount":model.displaySleepRequestCount,

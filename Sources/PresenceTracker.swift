@@ -24,6 +24,7 @@ struct PresenceObservation: Equatable, Sendable {
     let bodies: [PresenceBody]
     let faces: [CGRect]
     var analysisUsable = true
+    var needsLightAssistance = false
 }
 
 enum PresenceState: String, Equatable, Sendable { case unknown, present, absent }

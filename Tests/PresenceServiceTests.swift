@@ -28,14 +28,26 @@ import CoreGraphics
 @MainActor private final class PresenceFixture {
     var time = 100.0
     let capture = FakePresenceCapture()
+    let light = FakePresenceLight()
     let reference = PresenceSeatReference(cameraID: "builtin", configurationID: "fixed-vga",
         faceBounds: CGRect(x: 0.4, y: 0.6, width: 0.2, height: 0.2), captureHostTime: 1)
-    lazy var service = PresenceService(capture: capture, now: { [unowned self] in self.time })
-    func frame(handler: Int? = nil, occupied: Bool = true) {
+    lazy var service = PresenceService(capture: capture, faceLight: light, now: { [unowned self] in self.time })
+    func frame(handler: Int? = nil, occupied: Bool = true, dark: Bool = false) {
         let bodies = occupied ? [PresenceBody(bounds: CGRect(x: 0.25, y: 0.05, width: 0.5, height: 0.8), confidence: 0.95)] : []
         capture.observations[handler ?? capture.observations.count - 1](PresenceObservation(cameraID: "builtin",
-            configurationID: "fixed-vga", captureHostTime: time - 0.02, receiptHostTime: time, bodies: bodies, faces: []))
+            configurationID: "fixed-vga", captureHostTime: time - 0.02, receiptHostTime: time, bodies: bodies, faces: [],
+            analysisUsable: !dark, needsLightAssistance: dark))
         time += 0.34
+    }
+}
+
+@MainActor private final class FakePresenceLight: FaceLighting {
+    var isOn = false
+    var enables = 0
+    func setEnabled(_ enabled: Bool) -> Bool {
+        if enabled { enables += 1 }
+        isOn = enabled
+        return true
     }
 }
 
@@ -104,6 +116,24 @@ import CoreGraphics
             check(!f.service.isRunning && f.service.state == .unknown && f.service.status == "Camera interrupted",
                   "Capture failure stops the session and exposes uncertainty rather than absence")
         }
-        print("PASS: \(checks) presence capture lifecycle checks; injected capture only")
+        for ending in ["deadline", "stop", "failure", "presence"] {
+            let f = PresenceFixture(); try await f.service.start(reference: f.reference)
+            f.frame(occupied: false, dark: true)
+            check(!f.light.isOn, "One dark frame cannot turn on the presence light")
+            f.frame(occupied: false, dark: true)
+            check(f.light.isOn && f.service.isAssistLightOn && f.light.enables == 1,
+                  "Two fresh dark frames permit one brief local screen-light attempt")
+            if ending == "deadline" { f.time += 3; f.service.refresh() }
+            else if ending == "stop" { await f.service.stop() }
+            else if ending == "failure" { f.capture.failures[0]("Camera stopped"); await settle() }
+            else { for _ in 0..<3 { f.frame() } }
+            check(!f.light.isOn && !f.service.isAssistLightOn, "\(ending) releases the presence light")
+            if f.service.isRunning {
+                for _ in 0..<4 { f.frame(occupied: false, dark: true) }
+                check(f.light.enables == 1, "Darkness cannot restart the light repeatedly in the same removal session")
+            }
+            await f.service.stop()
+        }
+        print("PASS: \(checks) presence capture lifecycle checks; injected capture and light only")
     }
 }

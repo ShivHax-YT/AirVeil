@@ -118,6 +118,21 @@ private struct StoredCameraProbe: Codable {
         }
         func settle() async { for _ in 0..<20 { await Task.yield() } }
         func close(_ a: Double, _ b: Double) -> Bool { abs(a-b) < 0.001 }
+        do {
+            let f = CoordinatorFixture(enabled: false)
+            f.coordinator.setSessionActive(false)
+            f.coordinator.requestEnable(); await settle()
+            check(!f.coordinator.isBusy && !f.coordinator.isEnabled &&
+                  f.capture.permissionRequests == 0 && f.capture.starts == 0,
+                  "Inactive permission enable stays idle without asking for permission or opening capture")
+            check(f.coordinator.status.contains("Wake and unlock"),
+                  "Inactive enable explains how to retry")
+            f.coordinator.setSessionActive(true)
+            f.coordinator.requestEnable(); await settle()
+            check(f.coordinator.isEnabled && !f.coordinator.isBusy && f.capture.permissionRequests == 1,
+                  "An explicit retry after activation can enable camera assistance")
+            f.end()
+        }
         for cancellation in ["disable", "sleep"] {
             let f = CoordinatorFixture(enabled: false)
             f.coordinator.requestEnable()
@@ -455,60 +470,32 @@ private struct StoredCameraProbe: Codable {
             check(f.capture.starts == starts + 1, "Confirmed ear return permits one recovery after idle")
             f.end()
         }
-        do {
+        for cancelled in [false, true] {
             let f = CoordinatorFixture(stored: true)
             f.advance(0.8); await settle(); f.advance(0.8); f.frames(3, cameraYaw: 0, motionYaw: 0)
             let starts = f.capture.starts
+            let saved = f.defaults.data(forKey: "cameraScreenCenterV1")
             f.motion.disconnectEventCount += 1; f.motion.connectionState = .disconnected
-            f.motion.isFresh = false; f.motion.fusionSample = nil
-            f.coordinator.update(layoutKey: f.layout)
-            f.coordinator.cancelPendingRecovery()
-            f.time += 2; f.coordinator.update(layoutKey: f.layout)
+            f.motion.isFresh = false; f.motion.fusionSample = nil; f.coordinator.update(layoutKey: f.layout)
+            f.time += 2
             f.motion.connectionState = .connected; f.motion.isFresh = true
             f.advance(0.8); await settle()
             check(f.capture.starts == starts,
-                  "Explicit Pause consumes pending connection and gap recovery instead of reopening the camera")
-            f.motion.isFresh = false; f.motion.fusionSample = nil; f.coordinator.update(layoutKey: f.layout)
-            f.time += 2; f.motion.isFresh = true; f.advance(0.8); await settle()
-            check(f.capture.starts == starts, "A later sample gap alone cannot undo explicit camera Pause")
-            f.motion.disconnectEventCount += 1; f.motion.connectionState = .disconnected
+                  "A raw disconnect, sample gap, or source epoch without a removal session cannot open another camera check")
+            f.motion.removalEventCount += 1; f.motion.removalConnectionState = .disconnected
             f.motion.isFresh = false; f.coordinator.update(layoutKey: f.layout)
-            f.motion.connectionState = .connected; f.motion.isFresh = true; f.advance(0.8); await settle()
-            check(f.capture.starts == starts + 1, "A new connection-return event may rearm the enabled camera feature after Pause")
-            f.end()
-        }
-        for event in ["confirmed nonstreaming bud", "public reconnect", "sustained sample gap"] {
-            let f = CoordinatorFixture(stored: true)
-            f.advance(0.8); await settle(); f.advance(0.8)
-            f.frames(3, cameraYaw: 0, motionYaw: 0)
-            check(f.coordinator.trackingValid, "\(event): begin with a verified alignment")
-            let starts = f.capture.starts
-            let saved = f.defaults.data(forKey: "cameraScreenCenterV1")
-            if event == "confirmed nonstreaming bud" {
-                f.motion.removalEventCount += 1
-                f.motion.removalConnectionState = .disconnected
-                f.advance(0.4)
-                check(!f.coordinator.trackingValid && f.capture.starts == starts,
-                      "Confirmed removal suspends direction checks even when the partner keeps streaming")
-                f.motion.removalConnectionState = .connected
-            } else {
-                if event == "public reconnect" {
-                    f.motion.disconnectEventCount += 1
-                    f.motion.connectionState = .disconnected
-                }
-                f.motion.isFresh = false; f.motion.fusionSample = nil
-                f.coordinator.update(layoutKey: f.layout)
-                f.time += 1.2; f.coordinator.update(layoutKey: f.layout)
-                f.motion.connectionState = .connected; f.motion.isFresh = true
-            }
+            if cancelled { f.coordinator.cancelPendingRecovery() }
+            f.motion.removalConnectionState = .connected; f.motion.isFresh = true
             f.advance(0.8); await settle()
-            check(f.capture.starts == starts + 1 && f.coordinator.automaticReturnCheckCount == 1,
-                  "\(event): one return starts a camera check even without an AirPod source switch")
-            f.advance(0.8); f.frames(3, cameraYaw: 0, motionYaw: 0)
-            check(f.coordinator.trackingValid && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
-                  "\(event): return measurement preserves the saved screen center")
-            f.advance(1); await settle()
-            check(f.capture.starts == starts + 1, "\(event): the same return cannot repeat the check")
+            check(f.capture.starts == starts + (cancelled ? 0 : 1),
+                  "A completed both-out session rearms exactly one direction check unless explicitly cancelled")
+            if !cancelled {
+                f.advance(0.8); f.frames(3, cameraYaw: 0, motionYaw: 0)
+                check(f.coordinator.trackingValid && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                      "Return measurement preserves the saved screen center")
+                f.advance(1); await settle()
+                check(f.capture.starts == starts + 1, "The same return session cannot repeat the camera check")
+            }
             f.end()
         }
         print("PASS: \(checks) centered coordinator/service/fusion checks; injected inputs, no hardware access")

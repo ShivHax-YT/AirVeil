@@ -15,7 +15,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .camera: return "A little help finding center"
         case .displays: return "Choose your displays"
         case .input: return "Keep covered areas protected"
-        case .removal: return "When an AirPod comes out"
+        case .removal: return "When both AirPods come out"
         case .seated: return "Dim while you stay seated"
         case .energy: return "Choose how AirVeil uses energy"
         case .coverage: return "Choose how the screen fades"
@@ -32,11 +32,11 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .preview: return "Drag the highlighted slider to simulate a head turn. Center resets it. This tour preview works even while live blur is on, and changes only the example image."
         case .tracking: return "Wear compatible AirPods and choose Start head tracking if shown. Once motion is detected, face your display and choose Set center. Manual tracking needs a new center after an interruption."
         case .access: return "Screen Recording access lets AirVeil blur your actual desktop. Screen frames stay on this Mac. The preview and AirPod removal features work without this permission."
-        case .camera: return "Camera assistance checks screen direction after a confirmed AirPod return or reconnection. Enable it here, then set your center while facing the display. Use Refresh direction if a check fails. Images stay on your Mac and are discarded."
+        case .camera: return "Camera assistance checks screen direction when AirPods resume tracking after an interruption. Enable it here, then set your center while facing the display. Use Refresh direction if a check fails. Images stay on your Mac and are discarded."
         case .displays: return "Select the screens AirVeil should cover. Check displays refreshes the list after connecting a monitor. Only selected displays receive the effect."
         case .input: return "Block clicks and scrolling in the blurred area, or across the entire affected display. The menu bar and notch controls stay available so you can pause."
-        case .removal: return "Turn on automatic display management and keep Automatic Ear Detection on. Confirmed removal of either AirPod supports dimming. When in-ear status is unavailable, camera checks after connection changes turn displays off only if you have left."
-        case .seated: return "Choose your seated brightness; 0% goes black without locking. Dimming needs confirmed in-ear status, camera assistance, and a saved seat. A confirmed return restores brightness. Connection-only checks leave seated brightness unchanged."
+        case .removal: return "Turn on automatic display management and keep Automatic Ear Detection on. After tracking is established, removing both AirPods can stop their motion stream and start a seat check. AirVeil cannot identify individual earbuds."
+        case .seated: return "Choose your seated brightness; 0% goes black without locking. Camera assistance and a saved seat are needed. Fresh motion after putting AirPods back restores brightness. Only confirmed absence turns displays off; an uncertain check ends without locking."
         case .energy: return "Automatic reduces desktop refresh in Low Power Mode or when your Mac is running hot. Smoothest keeps the usual refresh; Reduced energy always refreshes less often. Head tracking, camera checks, and removal behavior keep their normal timing."
         case .coverage: return "Directional half covers one side as you turn. Whole-screen sweep spreads the effect across the screen. Choose either option here; scroll up to compare them in the preview."
         case .onset: return "Set separate left and right angles with the dial. A smaller angle begins blur sooner; a larger angle gives you more room to move before it starts."
@@ -70,10 +70,16 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
     var onFinish: (() -> Void)?
     var isActive: Bool { step != nil }
     var index: Int { step.flatMap { SettingsTourStep.allCases.firstIndex(of: $0) } ?? 0 }
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, startImmediately: Bool = true) {
         self.defaults = defaults
-        step = defaults.bool(forKey: Self.completionKey) ? nil : .welcome
+        step = startImmediately && !defaults.bool(forKey: Self.completionKey) ? .welcome : nil
     }
+    func beginIfNeeded() {
+        guard !isActive, !defaults.bool(forKey: Self.completionKey) else { return }
+        step = .welcome
+    }
+    /// Hiding setup for permission review is not tutorial completion.
+    func suspendForPermissions() { step = nil }
     func replay() { step = .welcome }
     func back() {
         guard isActive, index > 0 else { return }

@@ -26,7 +26,6 @@ private final class SyntheticAttitude: MotionAttitude {
     var connectionStops = 0
     var connection: (@MainActor (Bool) -> Void)?
     var sample: (@Sendable (MotionReading?, String?) -> Void)?
-    var wornMask: UInt8?
     func startConnectionUpdates(_ handler: @escaping @MainActor (Bool) -> Void) {
         connectionStarts += 1; connection = handler
     }
@@ -36,9 +35,7 @@ private final class SyntheticAttitude: MotionAttitude {
         streamStarts += 1; sample = handler
     }
     func stopMotionUpdates() { streamStops += 1 }
-    func readWearState(now: TimeInterval) -> AirPodsWearReading? {
-        wornMask.map { .init(deviceToken: "test-headset", wornMask: $0, receipt: now) }
-    }
+
 }
 
 @main @MainActor struct MotionReferenceLifecycleTests {
@@ -219,58 +216,53 @@ private final class SyntheticAttitude: MotionAttitude {
                   "Physical acquisition gaps and source handoffs never fabricate ear removal")
             backlog.stop()
         }
-        for source in [CMDeviceMotion.SensorLocation.headphoneLeft, .headphoneRight] {
+        do {
             let wearClock = SensorClock(), wearTransport = FakeHeadphoneTransport()
-            let wear = MotionService(transportFactory: { wearTransport },
-                now: { wearClock.time }, usesAutomaticWatchdog: false)
-            wear.monitorsIndividualAirPods = true
-            func poll(_ mask: UInt8?) {
-                wearTransport.wornMask = mask
-                for _ in 0..<3 {
-                    wearClock.time += 0.125
+            let wear = MotionService(transportFactory: { wearTransport }, now: { wearClock.time }, usesAutomaticWatchdog: false)
+            func emitWear(_ count: Int, source: CMDeviceMotion.SensorLocation = .headphoneRight) {
+                for _ in 0..<count {
+                    wearClock.time += 0.02
                     wearTransport.sample?(MotionReading(attitude: SyntheticAttitude(0),
                         timestamp: wearClock.time - 1000, receipt: wearClock.time,
                         quaternion: VeilQuaternion(x: 0, y: 0, z: 0, w: 1), speed: 0, source: source), nil)
                     wear.checkFreshness()
                 }
             }
-            wear.start(); poll(3); poll(3)
+            wear.start(); emitWear(60)
             wear.calibrate()
-            let wornEpoch = wear.fusionEpoch
-            // Remove the bud opposite the one supplying motion: Core Motion
-            // can keep streaming with no delegate disconnect or source switch.
-            let remaining: UInt8 = source == .headphoneLeft ? 1 : 2
-            poll(remaining); poll(remaining)
-            check(wear.connectionState == .connected && wear.isFresh && wear.disconnectEventCount == 0 &&
-                  wear.removalConnectionState == .disconnected && wear.removalEventCount == 1,
-                  "Either nonstreaming bud can trigger removal independently of live motion")
-            check(wear.fusionEpoch > wornEpoch && !wear.referenceUsable && !wear.trackingValid,
-                  "Confirmed nonstreaming-bud removal invalidates the old center even while samples stay fresh")
-            poll(nil); poll(nil)
-            check(wear.removalConnectionState == .disconnected && wear.removalEventCount == 1,
-                  "A disappearing metadata feed cannot let remaining-bud motion restore blackout")
-            let removedEpoch = wear.fusionEpoch
-            poll(3); poll(3)
-            check(wear.removalConnectionState == .connected && wear.removalEventCount == 1,
-                  "Either removed bud returning restores while the original motion source remains unchanged")
-            check(wear.fusionEpoch > removedEpoch && !wear.referenceUsable,
-                  "Same-source reinsertion starts a new camera alignment epoch without silently setting center")
-            poll(remaining); poll(remaining)
-            let event = wear.removalEventCount
+            let center = wear.centerRevision
+            emitWear(60, source: .headphoneLeft)
+            check(wear.removalEventCount == 0 && wear.removalConnectionState == .connected,
+                  "Continuous motion from either single AirPod or a source handoff never triggers removal")
             wearTransport.connection?(false)
-            check(wear.removalEventCount == event && wear.disconnectEventCount == 1,
-                  "Removing the second bud does not cancel or replace the ongoing per-bud episode")
-            wearTransport.wornMask = nil
-            wearTransport.connection?(true)
-            check(wear.connectionState == .connected && wear.removalConnectionState == .disconnected,
-                  "A transport reconnect cannot erase known per-bud removal while that AirPod may still be out")
-            poll(nil); poll(nil)
-            check(wear.removalConnectionState == .disconnected,
-                  "An unavailable metadata feed after transport reconnect still cannot fabricate reinsertion")
-            poll(3); poll(3); poll(remaining); poll(remaining)
-            wear.clearRemovalEvidence()
-            check(wear.removalConnectionState == .connected,
-                  "Visible manual recovery can clear a stale metadata latch without resetting head calibration")
+            wearClock.time += 0.2; wear.checkFreshness()
+            check(wear.removalEventCount == 0, "A brief disconnect is not yet a removal session")
+            wearTransport.connection?(true); emitWear(60, source: .headphoneLeft)
+            wearTransport.connection?(false)
+            wearClock.time += 0.4; wear.checkFreshness()
+            check(wear.removalEventCount == 1 && wear.removalConnectionState == .disconnected,
+                  "Sustained public disconnect after steady wearing emits one both-out proxy")
+            for _ in 0..<60 { wearClock.time += 0.2; wear.checkFreshness() }
+            check(wear.removalEventCount == 1 && wearTransport.streamStarts == 1,
+                  "Long removal remains one episode and does not restart the requested motion stream")
+            wearTransport.connection?(true); emitWear(60, source: .headphoneLeft)
+            check(wear.removalConnectionState == .connected && wear.centerRevision == center && !wear.referenceUsable,
+                  "Fresh headphone return restores availability without choosing a new screen center")
+            wearClock.time += 0.7; wear.checkFreshness()
+            wearClock.time += 0.4; wear.checkFreshness()
+            check(wear.removalEventCount == 2 && wear.removalConnectionState == .disconnected,
+                  "Sustained complete stream silence also works when no disconnect callback arrives")
+            emitWear(60, source: .headphoneLeft)
+            check(wear.removalConnectionState == .connected, "Actual samples restore availability after silent removal")
+            wearTransport.sample?(nil, "Injected failure"); wear.checkFreshness()
+            let events = wear.removalEventCount
+            wearClock.time += 1; wear.checkFreshness()
+            check(wear.removalConnectionState == .unknown && wear.removalEventCount == events,
+                  "A known stream error disables removal evidence instead of treating failure as both-out")
+            wearTransport.authorizationStatus = .denied
+            wearClock.time += 10; wear.checkFreshness()
+            check(wear.removalConnectionState == .unknown && wear.removalEventCount == events,
+                  "Denied motion permission cannot create a removal episode")
             wear.stop()
         }
         print("PASS: \(checks) real MotionService reference lifecycle assertions; sensor transport/attitude/clock injected, no hardware access")

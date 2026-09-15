@@ -4,6 +4,7 @@ TASK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TASK_SDK="${AIRVEIL_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk}"
 if [ ! -d "$TASK_SDK" ]; then TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
 mkdir -p "$TASK_ROOT/build/tests"
+bash "$TASK_ROOT/scripts/test-permission-onboarding.sh"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/EnergyPolicy.swift" "$TASK_ROOT/Tests/EnergyPolicyTests.swift" \
   -o "$TASK_ROOT/build/tests/energy-policy"
@@ -64,6 +65,7 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
 "$TASK_ROOT/build/tests/presence-tracker"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Sources/PresenceCaptureService.swift" \
+  "$TASK_ROOT/Sources/FaceLightService.swift" \
   "$TASK_ROOT/Tests/PresenceServiceTests.swift" -o "$TASK_ROOT/build/tests/presence-capture"
 "$TASK_ROOT/build/tests/presence-capture"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
@@ -72,6 +74,7 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
 "$TASK_ROOT/build/tests/display-dimming"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Sources/PresenceCaptureService.swift" \
+  "$TASK_ROOT/Sources/FaceLightService.swift" \
   "$TASK_ROOT/Sources/DisplayDimmingService.swift" "$TASK_ROOT/Sources/RemovalPresenceCoordinator.swift" \
   "$TASK_ROOT/Tests/RemovalPresenceCoordinatorTests.swift" -o "$TASK_ROOT/build/tests/removal-presence"
 "$TASK_ROOT/build/tests/removal-presence"

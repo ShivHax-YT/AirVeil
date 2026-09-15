@@ -33,7 +33,9 @@ enum PresenceCaptureError: LocalizedError {
     @Published private(set) var state: PresenceState = .unknown
     @Published private(set) var status = "Presence camera is off."
     @Published private(set) var isRunning = false
+    @Published private(set) var isAssistLightOn = false
     private let capture: any PresenceCapturing
+    private let faceLight: any FaceLighting
     private let now: () -> Double
     private var tracker: PresenceTracker?
     private var generation: UInt64 = 0
@@ -41,19 +43,25 @@ enum PresenceCaptureError: LocalizedError {
     private var receivedFrame = false
     private var stopRevision: UInt64 = 0
     private var stopBarrier: (id: UInt64, task: Task<Void, Never>)?
+    private var lowLightFrames = 0
+    private var lastLightCapture: Double?
+    private var lightAttempted = false
+    private var lightDeadline: Double?
 
     convenience init() {
         self.init(capture: SystemPresenceCapture())
     }
     init(capture: any PresenceCapturing,
+         faceLight: (any FaceLighting)? = nil,
          now: @escaping () -> Double = { CMClockGetHostTimeClock().time.seconds }) {
-        self.capture = capture; self.now = now
+        self.capture = capture; self.faceLight = faceLight ?? FaceLightService(); self.now = now
     }
 
     func start(reference: PresenceSeatReference) async throws {
         generation &+= 1
         let ticket = generation
         watchdog?.cancel(); watchdog = nil
+        stopAssistLight(); lowLightFrames = 0; lastLightCapture = nil; lightAttempted = false
         isRunning = false; tracker = nil
         publish(PresenceSnapshot(status: "Starting the presence check."))
         await stopCapture()
@@ -85,7 +93,12 @@ enum PresenceCaptureError: LocalizedError {
             try await capture.start(reference: reference, onObservation: { [weak self] observation in
                 guard let self, self.generation == ticket, self.isRunning else { return }
                 self.receivedFrame = true
+                if observation.cameraID == reference.cameraID,
+                   observation.configurationID == reference.configurationID {
+                    self.considerAssistLight(observation)
+                }
                 guard let snapshot = self.tracker?.observe(observation, now: self.now()) else { return }
+                if snapshot.state == .present || snapshot.state == .absent { self.stopAssistLight() }
                 self.publish(snapshot)
             }, onFailure: { [weak self] reason in
                 Task { @MainActor [weak self] in await self?.failed(reason, ticket: ticket) }
@@ -100,6 +113,7 @@ enum PresenceCaptureError: LocalizedError {
     func stop() async {
         generation &+= 1
         watchdog?.cancel(); watchdog = nil
+        stopAssistLight()
         isRunning = false; tracker = nil; receivedFrame = false
         publish(PresenceSnapshot(status: "Presence camera is off."))
         await stopCapture()
@@ -124,8 +138,30 @@ enum PresenceCaptureError: LocalizedError {
     /// Also callable by the application's ordinary lifecycle tick. Elapsed time
     /// can invalidate stale evidence but can never prove that someone left.
     func refresh() {
+        if let lightDeadline, now() >= lightDeadline { stopAssistLight() }
         guard isRunning, let snapshot = tracker?.tick(now: now()) else { return }
         publish(snapshot)
+    }
+
+    private func considerAssistLight(_ observation: PresenceObservation) {
+        let time = now()
+        guard observation.captureHostTime.isFinite, observation.receiptHostTime.isFinite,
+              observation.captureHostTime >= 0, observation.captureHostTime <= observation.receiptHostTime,
+              observation.receiptHostTime <= time, time - observation.captureHostTime <= PresenceTracker.frameFreshness,
+              lastLightCapture.map({ observation.captureHostTime > $0 }) ?? true else { return }
+        lastLightCapture = observation.captureHostTime
+        lowLightFrames = observation.needsLightAssistance ? min(2, lowLightFrames + 1) : 0
+        guard lowLightFrames >= 2, !lightAttempted, isRunning else { return }
+        lightAttempted = true
+        guard faceLight.setEnabled(true) else { return }
+        isAssistLightOn = faceLight.isOn
+        lightDeadline = time + 2.5
+    }
+
+    private func stopAssistLight() {
+        lightDeadline = nil
+        _ = faceLight.setEnabled(false)
+        isAssistLightOn = faceLight.isOn
     }
 
     private func failed(_ reason: String, ticket: UInt64) async {
@@ -280,11 +316,12 @@ private final class PresenceCaptureWorker: NSObject, AVCaptureVideoDataOutputSam
         do {
             try VNImageRequestHandler(cvPixelBuffer: pixels, orientation: .up, options: [:]).perform([bodies, faces])
             guard !isCancelled else { return }
+            let dark = Self.isVeryDark(pixels)
             onObservation(PresenceObservation(cameraID: reference.cameraID, configurationID: configurationID,
                 captureHostTime: captured, receiptHostTime: receipt,
                 bodies: (bodies.results ?? []).map { PresenceBody(bounds: $0.boundingBox, confidence: Double($0.confidence)) },
                 faces: (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox),
-                analysisUsable: !Self.isVeryDark(pixels)))
+                analysisUsable: !dark, needsLightAssistance: dark))
         } catch {
             fail("Human-body analysis could not complete.")
         }

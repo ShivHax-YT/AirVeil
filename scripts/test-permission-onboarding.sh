@@ -3,13 +3,9 @@ set -euo pipefail
 TASK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TASK_SDK="${AIRVEIL_SDK:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk}"
 if [ ! -d "$TASK_SDK" ]; then TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"; fi
-TASK_SOURCES=()
-for TASK_SOURCE in "$TASK_ROOT"/Sources/*.swift; do
-  case "$TASK_SOURCE" in */main.swift|*/AppDelegate.swift) continue ;; esac
-  TASK_SOURCES+=("$TASK_SOURCE")
-done
 mkdir -p "$TASK_ROOT/build/tests" "$TASK_ROOT/.build/module-cache"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   -module-cache-path "$TASK_ROOT/.build/module-cache" \
-  "${TASK_SOURCES[@]}" "$TASK_ROOT/Tests/SettingsTourRender.swift" -o "$TASK_ROOT/build/tests/settings-tour-render"
-"$TASK_ROOT/build/tests/settings-tour-render" "$TASK_ROOT/build/tour-previews"
+  "$TASK_ROOT/Sources/PermissionOnboarding.swift" "$TASK_ROOT/Tests/PermissionOnboardingTests.swift" \
+  -o "$TASK_ROOT/build/tests/PermissionOnboardingTests"
+"$TASK_ROOT/build/tests/PermissionOnboardingTests"

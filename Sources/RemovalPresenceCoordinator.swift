@@ -101,7 +101,7 @@ enum RemovalPresencePhase: String, Equatable {
             if departureArmed && allowsUncertainSleep { sleepOnce(reason: "No usable seat reference is available. Using the existing display-sleep action.") }
             else { finishWithoutSleep(reason: allowsUncertainSleep
                 ? "Wear your AirPods before another automatic removal action."
-                : "No current seat reference is available. Set center before automatic connection checks.") }
+                : "No current seat reference is available. Set center before automatic removal checks.") }
             return
         }
         let cleanup = startCleanup(ticket: ticket, suspend: false)
@@ -154,7 +154,7 @@ enum RemovalPresencePhase: String, Equatable {
             }
             guard let unknownSince, now - unknownSince >= unknownGrace else { return }
             if departureArmed && allowsUncertainSleep { sleepOnce(reason: "Presence could not be confirmed within the grace period. Using the existing display-sleep action.") }
-            else if !allowsUncertainSleep { finishWithoutSleep(reason: "Presence could not be confirmed. The connection check ended without changing the display.") }
+            else if !allowsUncertainSleep { finishWithoutSleep(reason: "Presence could not be confirmed. The check ended and any dimmed brightness was restored.") }
             else { finishWithoutSleep(reason: "Presence remains uncertain. Automatic removal sleep stays paused after manual wake.") }
         }
     }
