@@ -64,6 +64,7 @@ struct VeilDisplayInfo {
     @Published var isDimmed = false
     @Published var isBusy = false
     @Published var hasPendingRestore = false
+    var awaitingWakeStability = false
     @Published var status = "Injected brightness"
     private(set) var isSuspended = false
     private(set) var dimTargets: [Double] = []
@@ -89,7 +90,7 @@ struct VeilDisplayInfo {
         isBusy = false
         guard !isSuspended, !failRestore else { return false }
         if hasPendingRestore { brightnessWrites += 1 }
-        hasPendingRestore = false; isDimmed = false
+        hasPendingRestore = false; isDimmed = false; awaitingWakeStability = false
         return true
     }
     func releaseRestore() {
@@ -1691,6 +1692,30 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                   "Restoration retries while the automatic feature stays explicitly off")
             check(!model.presence.isRunning && model.overlay.startCalls == 0,
                   "A brightness-only retry never starts presence or blur")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            model.cancelWearWait(); await drainTasks()
+            model.handleScreenLock(true); await drainTasks()
+            model.dimming.awaitingWakeStability = true
+            model.dimming.failRestore = true
+            let calls = model.dimming.restoreCalls
+            model.checkAirPodsRemoval(now: now + 1); await drainTasks()
+            check(model.dimming.restoreCalls == calls,
+                  "A no-journal wake-stability retry cannot run while locked")
+            model.handleScreenLock(false); await drainTasks()
+            check(model.automaticFeaturesPaused && model.removalPresence.phase == .failed &&
+                  !model.dimming.hasPendingRestore && model.dimming.awaitingWakeStability,
+                  "Failed no-journal wake settling remains pending while automatic features are off")
+            model.dimming.failRestore = false
+            model.checkAirPodsRemoval(now: now + 3); await drainTasks()
+            check(!model.dimming.awaitingWakeStability && model.removalPresence.canResumeHeading,
+                  "An active lifecycle tick retries wake settling without requiring a dim journal")
+            check(model.automaticFeaturesPaused && !model.cameraHeading.sessionActive &&
+                  !model.presence.isRunning && model.overlay.startCalls == 0,
+                  "No-journal recovery preserves feature-off and starts no camera or desktop effect")
             model.shutdown()
         }
         for returnFirst in [true, false] {

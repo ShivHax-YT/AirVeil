@@ -14,9 +14,13 @@ import Foundation
     var pendingWrites: [(Double, String, CheckedContinuation<DisplayBrightnessReading, Error>)] = []
     var beforeWrite: ((Double) -> Void)?
     var quantizedZero: Double?
+    var readingValues: [Double] = []
+    var onRead: (() -> Void)?
     var reading: DisplayBrightnessReading { .init(displayID: id, brightness: value) }
     func read(displayID: String?) async throws -> DisplayBrightnessReading {
         reads += 1
+        onRead?()
+        if !readingValues.isEmpty { value = readingValues.removeFirst() }
         if let readFailure { throw readFailure }
         if let displayID, displayID != id { throw DisplayDimmingError.unsupported }
         if holdReads { return try await withCheckedThrowingContinuation { pendingReads.append($0) } }
@@ -36,6 +40,7 @@ import Foundation
         return reading
     }
     func completeRead() { pendingReads.removeFirst().resume(returning: reading) }
+    func failRead(_ error: Error) { pendingReads.removeFirst().resume(throwing: error) }
     func completeWrite() {
         let pending = pendingWrites.removeFirst()
         value = pending.0
@@ -76,10 +81,27 @@ import Foundation
     let backend = FakeBrightness()
     let store = FakeRestoreStore()
     let assertions = FakeIdleAssertions()
+    let wake = FakeWakeClock()
     let service: DisplayDimmingService
     init(timeout: TimeInterval = 1) {
+        let clock = wake
         service = DisplayDimmingService(brightness: backend, store: store, assertions: assertions,
-            timeout: timeout, now: { 1234 })
+            timeout: timeout, now: { 1234 }, wakeClock: { clock.time },
+            wakeDelay: { try await clock.wait($0) })
+    }
+}
+
+@MainActor private final class FakeWakeClock {
+    var time = 100.0
+    var delays: [Double] = []
+    var beforeDelay: ((Double) -> Void)?
+    func wait(_ duration: Double) async throws {
+        try Task.checkCancellation()
+        beforeDelay?(duration)
+        time += duration
+        delays.append(duration)
+        await Task.yield()
+        try Task.checkCancellation()
     }
 }
 
@@ -390,8 +412,8 @@ import Foundation
                 if order == "unlock-before-rewear" {
                     check(await f.service.setDimmed(true, targetBrightness: 0.23),
                           "A fresh seated check may dim again while unlocked AirPods remain out")
-                    check(f.store.record?.baseline == original && f.store.record?.requiresWakeRestore != true,
-                          "A resumed seated episode captures the restored baseline without stale wake ownership")
+                    check(f.store.record?.baseline == original && f.store.record?.requiresWakeRestore == true,
+                          "An immediately resumed seated episode captures the restored baseline with bounded wake ownership")
                     check(await f.service.restore(), "Later rewear restores the resumed seated episode")
                     check(f.backend.value == original, "Unlock-first then rewear restores consistently on every cycle")
                 }
@@ -407,7 +429,8 @@ import Foundation
             f.store.record = try JSONDecoder().decode(DisplayBrightnessRestoreRecord.self, from: journal)
             f.backend.value = 0.09
             let relaunched = DisplayDimmingService(brightness: f.backend, store: f.store,
-                assertions: f.assertions, now: { 1235 })
+                assertions: f.assertions, now: { 1235 }, wakeClock: { f.wake.time },
+                wakeDelay: { try await f.wake.wait($0) })
             check(await relaunched.recoverIfNeeded(), "Active relaunch restores durable suspended ownership")
             check(f.backend.value == original && f.store.record == nil &&
                   relaunched.lastRestoreObservedBrightness == 0.09 && relaunched.lastRestorationDecision == "wake-restore-verified",
@@ -504,6 +527,7 @@ import Foundation
             check(await f.service.suspendUntilActive(), "Post-wake manual fixture records suspension")
             f.backend.value = 0.12
             check(await f.service.recoverIfNeeded(), "Wake restoration completes before a subsequent awake episode")
+            f.wake.time += 16
             check(await f.service.setDimmed(true, targetBrightness: 0.23), "A new awake episode starts after verified wake restoration")
             f.backend.value = 0.43
             let writes = f.backend.writes.count
@@ -511,6 +535,172 @@ import Foundation
             check(f.backend.value == 0.43 && f.backend.writes.count == writes &&
                   f.service.lastRestorationDecision == "manual-override-preserved",
                   "The wake-restoration exception does not leak into later ordinary awake dimming")
+        }
+        do {
+            let f = Fixture()
+            check(await f.service.suspendUntilActive(), "Unlock-first fixture suspends without any dim journal")
+            f.backend.readingValues = [1, 0.82, 0.66, 0.66, 0.66, 0.66]
+            check(await f.service.recoverIfNeeded(), "Empty-journal activation waits for changing wake brightness to settle")
+            check(f.wake.delays.first == 3 && f.wake.time >= 104 && f.backend.value == 0.66 &&
+                  f.backend.writes.isEmpty && !f.service.awaitingWakeStability,
+                  "No new dim is permitted until the quiet interval and stable awake readings finish")
+            check(await f.service.setDimmed(true, targetBrightness: 0.23), "Fresh presence can dim after the wake barrier")
+            check(f.store.record?.baseline == 0.66 && f.store.record?.requiresWakeRestore == true,
+                  "The new post-wake journal uses the settled baseline and records wake ownership")
+            f.backend.value = 0.2691709101200104
+            check(await f.service.restore(), "Rewear restores a newly created post-wake dim despite the observed changed getter value")
+            check(f.backend.value == 0.66 && f.store.record == nil &&
+                  f.service.lastRestoreObservedBrightness == 0.2691709101200104 &&
+                  f.service.lastRestorationDecision == "wake-restore-verified",
+                  "The reproduced altered post-dim reading is not mislabeled as an intentional manual edit")
+        }
+        do {
+            let f = Fixture(); f.backend.value = 1
+            check(await f.service.suspendUntilActive(), "Stable full-brightness fixture begins without a journal")
+            check(await f.service.recoverIfNeeded(), "A stable full-brightness wake reading remains a valid user baseline")
+            check(await f.service.setDimmed(true, targetBrightness: 0.23), "The accepted full-brightness baseline can be dimmed")
+            f.backend.value = 0.2691709101200104
+            check(await f.service.restore(), "The observed 1.0 → 0.23 → 0.26917 sequence restores its recorded stable baseline")
+            check(f.backend.value == 1 && f.store.record == nil,
+                  "The fix does not assume that every 1.0 wake reading is transient or substitute historical brightness")
+        }
+        do {
+            let f = Fixture(); f.backend.value = 0.66
+            check(await f.service.suspendUntilActive(), "Delayed baseline-change fixture suspends without ownership")
+            check(await f.service.recoverIfNeeded(), "Initial wake readings stabilize before a later dim request")
+            f.backend.readingValues = [1, 0.92, 0.66, 0.66, 0.66, 0.66]
+            check(await f.service.setDimmed(true, targetBrightness: 0.23), "A changed first-dim reading is itself stabilized")
+            check(f.store.record?.baseline == 0.66 && f.store.record?.requiresWakeRestore == true && f.backend.writes.count == 1,
+                  "A later transient wake reading cannot become the baseline of the new dim")
+            f.backend.value = 0.2691709101200104
+            check(await f.service.setDimmed(true, targetBrightness: 0.18), "A target update respects existing post-wake ownership")
+            check(f.store.record?.baseline == 0.66 && f.store.record?.requiresWakeRestore == true && f.backend.value == 0.18,
+                  "Repeated dim requests cannot discard a wake-tagged baseline on an altered OS value")
+            check(await f.service.restore(), "The updated target still restores the same settled baseline")
+            check(f.backend.value == 0.66, "Changing the dim target never replaces the original wake baseline")
+        }
+        do {
+            let f = Fixture()
+            check(await f.service.suspendUntilActive(), "Unsettled empty-journal fixture records a wake boundary")
+            f.backend.onRead = { f.backend.value = f.backend.reads.isMultiple(of: 2) ? 0.6 : 0.9 }
+            check(!(await f.service.recoverIfNeeded()), "Continuously changing awake readings fail within the bounded settling interval")
+            check(f.service.awaitingWakeStability && !f.service.hasPendingRestore && f.backend.writes.isEmpty &&
+                  f.wake.time <= 108.000001 && f.service.lastError != nil,
+                  "No-journal failure keeps the recovery barrier pending without inventing ownership or writing brightness")
+            check(!(await f.service.setDimmed(true)), "New dimming cannot bypass failed no-journal wake settling")
+            let reads = f.backend.reads
+            check(await f.service.suspendUntilActive(), "A new lock cancels the pending active-session recovery")
+            check(f.backend.reads == reads && f.backend.writes.isEmpty,
+                  "Remaining locked performs no settling reads or brightness writes")
+            f.backend.onRead = nil; f.backend.value = 0.7
+            check(await f.service.recoverIfNeeded(), "A later active retry can finish empty-journal stabilization")
+            check(!f.service.awaitingWakeStability && !f.service.hasPendingRestore && f.service.lastError == nil,
+                  "Successful no-journal retry releases the brightness barrier without starting sensors")
+        }
+        do {
+            let f = Fixture(); f.backend.value = 0.66
+            check(await f.service.suspendUntilActive(), "First-dim settling failure fixture crosses a wake boundary")
+            check(await f.service.recoverIfNeeded(), "Initial activation settles before the first-dim instability")
+            f.backend.onRead = { f.backend.value = f.backend.reads.isMultiple(of: 2) ? 0.6 : 0.9 }
+            check(!(await f.service.setDimmed(true, targetBrightness: 0.23)),
+                  "A changing first-dim baseline cannot be captured after the settling limit")
+            check(f.service.awaitingWakeStability && !f.service.hasPendingRestore && f.backend.writes.isEmpty,
+                  "Failed first-dim stabilization retains the recovery barrier without creating ownership")
+            f.wake.time += 16
+            check(!(await f.service.setDimmed(true)),
+                  "An expired wake window cannot bypass the unresolved first-dim stability barrier")
+            f.backend.onRead = nil; f.backend.value = 0.7
+            check(await f.service.recoverIfNeeded(), "Explicit recovery retries the unresolved first-dim instability")
+            check(!f.service.awaitingWakeStability && f.backend.writes.isEmpty,
+                  "Stable recovery clears the barrier while preserving the current user brightness")
+        }
+        do {
+            let f = Fixture()
+            check(await f.service.setDimmed(true, targetBrightness: 0.23), "Unsettled owned-journal fixture records baseline")
+            let original = f.store.record!.baseline
+            check(await f.service.suspendUntilActive(), "Existing ownership crosses the wake boundary")
+            f.backend.onRead = { f.backend.value = f.backend.reads.isMultiple(of: 2) ? 0.3 : 0.5 }
+            let writes = f.backend.writes.count
+            check(!(await f.service.recoverIfNeeded()), "An owned baseline waits when awake values never stabilize")
+            check(f.service.awaitingWakeStability && f.store.record?.baseline == original &&
+                  f.store.record?.requiresWakeRestore == true && f.backend.writes.count == writes && f.store.clears == 0,
+                  "The durable journal is neither cleared nor replaced before wake readings are trustworthy")
+            f.backend.onRead = nil; f.backend.value = 0.2691709101200104
+            check(await f.service.recoverIfNeeded(), "A later stable reading permits the retained wake restoration")
+            check(f.backend.value == original && f.store.record == nil,
+                  "Settling failure preserves original ownership across retries")
+        }
+        do {
+            let f = Fixture(); f.backend.value = 0.72
+            check(await f.service.suspendUntilActive(), "Expired wake-window fixture starts with empty-journal suspension")
+            check(await f.service.recoverIfNeeded(), "The wake context begins only after successful stabilization")
+            f.wake.time += 3600
+            check(await f.service.setDimmed(true, targetBrightness: 0.23), "An unrelated dim an hour later behaves as ordinary awake dimming")
+            check(f.store.record?.requiresWakeRestore != true, "An unrelated future dim does not inherit stale wake ownership")
+            f.backend.value = 0.4
+            let writes = f.backend.writes.count
+            check(await f.service.restore(), "A manual edit in the later unrelated episode remains authoritative")
+            check(f.backend.value == 0.4 && f.backend.writes.count == writes &&
+                  f.service.lastRestorationDecision == "manual-override-preserved",
+                  "Bounded post-wake protection does not weaken normal awake manual override respect")
+        }
+        do {
+            let f = Fixture(); f.backend.value = 0.68
+            check(await f.service.suspendUntilActive(), "New post-wake relaunch fixture starts without ownership")
+            check(await f.service.recoverIfNeeded(), "New post-wake relaunch fixture establishes a stable baseline")
+            check(await f.service.setDimmed(true, targetBrightness: 0.23), "First post-wake dim records durable protection")
+            f.store.record = try JSONDecoder().decode(DisplayBrightnessRestoreRecord.self,
+                from: JSONEncoder().encode(f.store.record!))
+            f.backend.value = 0.2691709101200104
+            let recovered = DisplayDimmingService(brightness: f.backend, store: f.store, assertions: f.assertions,
+                wakeClock: { f.wake.time }, wakeDelay: { try await f.wake.wait($0) })
+            check(await recovered.recoverIfNeeded(), "Relaunch settles and restores a journal created after the previous wake")
+            check(f.backend.value == 0.68 && f.store.record == nil,
+                  "Post-wake ownership survives a process interruption and altered getter value")
+        }
+        do {
+            let f = Fixture()
+            check(await f.service.suspendUntilActive(), "Unsupported empty-journal fixture records suspension")
+            f.backend.readFailure = DisplayDimmingError.unsupported
+            check(await f.service.recoverIfNeeded(), "A Mac without controllable built-in brightness can finish empty-journal recovery")
+            check(!f.service.awaitingWakeStability && !f.service.hasPendingRestore && f.service.lastError == nil &&
+                  f.service.lastRestorationDecision == "wake-dimming-unavailable" && f.backend.writes.isEmpty,
+                  "Unsupported brightness alone does not block camera or motion recovery when nothing needs restoration")
+        }
+        do {
+            let f = Fixture()
+            check(await f.service.suspendUntilActive(), "Late unsupported-read fixture begins without a journal")
+            f.backend.holdReads = true
+            let recovery = Task { await f.service.recoverIfNeeded() }
+            await settle { f.backend.pendingReads.count == 1 }
+            let locked = Task { await f.service.suspendUntilActive() }
+            await settle { f.service.isSuspended }
+            f.backend.holdReads = false
+            f.backend.failRead(DisplayDimmingError.unsupported)
+            let recovered = await recovery.value, suspended = await locked.value
+            check(!recovered && suspended && f.service.awaitingWakeStability,
+                  "An old unsupported read cannot clear the new suspension's wake barrier")
+            check(f.backend.writes.isEmpty && f.store.record == nil,
+                  "A stale unsupported recovery result neither writes brightness nor creates ownership")
+            let reads = f.backend.reads, delays = f.wake.delays.count
+            check(await f.service.recoverIfNeeded(), "A subsequent active recovery retries after the stale unsupported result")
+            check(f.backend.reads >= reads + 4 && f.wake.delays[delays] == 3 && !f.service.awaitingWakeStability,
+                  "The next active recovery still performs its quiet interval and stable brightness readings")
+        }
+        do {
+            let backend = FakeBrightness(), store = FakeRestoreStore(), assertions = FakeIdleAssertions()
+            var waiting = false
+            let service = DisplayDimmingService(brightness: backend, store: store, assertions: assertions,
+                wakeDelay: { _ in waiting = true; try await Task.sleep(nanoseconds: 30_000_000_000) })
+            check(await service.suspendUntilActive(), "Timer cancellation fixture records suspension")
+            let recovery = Task { await service.recoverIfNeeded() }
+            await settle { waiting }
+            let locked = Task { await service.suspendUntilActive() }
+            let recovered = await recovery.value, suspended = await locked.value
+            check(!recovered && suspended && service.isSuspended && service.awaitingWakeStability,
+                  "New lock immediately cancels the settling timer instead of waiting for its duration")
+            check(backend.reads == 0 && backend.writes.isEmpty,
+                  "Cancelled wake settling cannot start hardware work after the lock")
         }
         do {
             let f = Fixture(timeout: 0.03), original = f.backend.value

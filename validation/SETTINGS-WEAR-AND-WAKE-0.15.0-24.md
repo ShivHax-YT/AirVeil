@@ -1,12 +1,12 @@
-# Settings, wear prompt, and wake recovery — builds 24–26
+# Settings, wear prompt, and wake recovery — builds 24–27
 
 ## Scope and status
 
-This records **0.15.0 builds 24–25** and the subsequent live-dial refinement on 15 September 2026. Build 24 passed the full regression suite and focused native UI checks, then was packaged, installed, verified, and launched through LaunchServices. The wearer confirmed that Turn off feature restored brightness and extinguished the green camera light. Installed build 25 passed the physical Settings wait/alignment/automatic-blur sequence. The wearer confirmed that Sync head moves the illustration, then requested that its arc marker and large degree readout move with it; that refinement is in progress. Repeated post-lock brightness recovery remains pending.
+This records **0.15.0 builds 24–27** on 15 September 2026. Turn off feature, the Settings wait/alignment/automatic-blur flow, and the moving head/arc/readout have wearer-confirmed results below. Build 26 is **not accepted for post-lock brightness recovery**: one reported success restored its journal before a separate lock and therefore did not test retained wake ownership; the subsequent unlock-before-return test reproduced a failure after creating a new dim journal during wake. Build 27's settling and post-wake ownership changes passed the full automated regression suite and were packaged, installed, and verified. Both physical brightness return orders and repeated cycles remain pending at this checkpoint.
 
 | Change | Current behavior | Remaining installed or physical acceptance |
 |---|---|---|
-| Restore brightness after departure and lock | Brightness reads reject an asleep display. A restore interrupted by another lock/sleep retains the original journal until awake recovery verifies it. Cleanup must finish before heading recovery. | Repeat both return orders below; confirm the actual panel returns to its original brightness each time. |
+| Restore brightness after departure and lock | Build 26 retains journals that cross suspension, but a new post-wake dim still failed on return. Installed build 27 now holds recovery until awake readings settle and retains ownership for a new dim within a bounded wake interval. | Full automated regression and installation checks pass. Repeat both physical return orders and verify original brightness each time. |
 | Organize Settings | Preview, Tracking, Displays, Appearance, and Power use native tabs. Each of the 16 tour steps selects its tab and scrolls to its real control. Enable/Pause remains in the header. | Installed tabs and the first three tour steps were inspected. Remaining acceptance includes the complete live tour and minimum-window interactions. |
 | Sync head | The explicit Appearance action requests camera/AirPods alignment, then displays signed live yaw independently of onset selection and blur inversion. It does not edit onset angles or independently start desktop capture. | Build 26 is wearer-confirmed: the head, moving arc marker, and large degree readout follow correctly. Stop sync returned to the saved 11°/13° onset controls in the installed UI. |
 | Seated wear prompt and off control | Missing motion during seated monitoring shows animated AirPods Pro artwork and “Wear AirPods to continue blurring.” “Turn off feature” cancels blur and camera work, restores owned brightness, and persists an automatic-check pause. | One live off action is wearer-confirmed for brightness restoration and camera-light shutdown. Animation acceptance, persistence after relaunch, and explicit re-enable remain pending. |
@@ -28,7 +28,7 @@ The final control review identified a paused camera session blocking explicit Se
 
 ### Rendering limits
 
-Offscreen native rendering omits some native glass and can omit or misplace nonzero `rotation3DEffect` layers. Static layout assertions and generated artwork are useful evidence, but do not prove the full live head/notch animation composition. Installed screenshots subsequently showed the Appearance head correctly centered, without the offscreen artifact. Live direction and moving notch composition still require wearer feedback. No energy or battery savings are measured here.
+Offscreen native rendering omits some native glass and can omit or misplace nonzero `rotation3DEffect` layers. Static layout assertions and generated artwork are useful evidence, but do not prove the full live head/notch animation composition. Installed screenshots subsequently showed the Appearance head correctly centered, without the offscreen artifact; the wearer accepted the live head/marker/readout in build 26 below. Moving notch composition remains a separate acceptance item. No energy or battery savings are measured here.
 
 ## Required physical sequence
 
@@ -104,8 +104,84 @@ Build 26 artifact evidence is retained in `build/validation/release-0.15.0-build
 - Executable SHA-256: `e78796a28d2eb9e9b5e73f6f21efe407e661f6f6b82b77043c378940c19781df`.
 - Installed executable matches the DMG, bundled policies match source, developer previews are excluded, and strict signature verification passed.
 
-Fresh build 26 diagnostics show the new session state and restoration decision fields. Sync head was started from the installed Appearance tab; it is waiting for the wearer to check the new marker/readout before the next controlled brightness cycle.
+Fresh build 26 diagnostics show the new session state and restoration decision fields. Sync head was started from the installed Appearance tab, with the resulting wearer feedback recorded below.
 
 ### Build 26 live dial accepted
 
-The wearer answered **“Yes, the marker and degrees follow correctly.”** A live native capture showed a rightward green arc marker and approximately -35° readout together, with the head and surrounding content positioned normally. After the wearer stopped sync, the installed UI returned to onset editing with Left 11° and Right 13° intact. The revised live dial is physically accepted. A new controlled return-before-unlock brightness cycle is now being collected in `build/validation/build26-return-before-unlock-cycle1.jsonl`; its result remains pending.
+The wearer answered **“Yes, the marker and degrees follow correctly.”** A live native capture showed a rightward green arc marker and approximately -35° readout together, with the head and surrounding content positioned normally. After the wearer stopped sync, the installed UI returned to onset editing with Left 11° and Right 13° intact. The revised live dial is physically accepted.
+
+### Build 26 brightness pretest did not establish a wake cycle
+
+The first attempted return-before-unlock sequence began with `automaticFeaturesPaused == true`. The wearer reported that the display did not dim or lock. The recording was renamed `build/validation/build26-paused-pretest-attempt.jsonl` to avoid presenting it as a completed wake test. Its initial state was active and unlocked, with no dimming or display-sleep request; later activity cleared the pause and returned fresh motion, but the recording contains no controlled dim → departure → lock → wake sequence. It is neither a pass nor a reproduced failure of the new brightness-restoration logic.
+
+A later pretest found `motionConnectionState == "disconnected"` and no fresh public Core Motion samples while `system_profiler` listed the AirPods under `device_connected`. The installed UI remained in its waiting state. The retained `build/validation/build26-motion-disconnected-pretest.json` records the disagreement: the motion service was running but disconnected, removal was unarmed, cameras/capture were off, and the Mac session was active and unlocked. Bluetooth connection alone did not establish a usable motion feed.
+
+The operator then quit AirVeil normally and relaunched it through LaunchServices. Fresh, connected motion returned immediately and the removal workflow armed. The local `build/validation/build26-restart-rearm.jsonl` records fresh motion after that restart. This restored the prerequisites for the subsequent tests below; it does not establish why the motion feed stalled or prove post-lock brightness recovery.
+
+### Reported success restored brightness before lock
+
+The wearer reported success after the next return-before-unlock attempt. The retained `build/validation/build26-return-before-unlock-cycle1.jsonl` limits what that result establishes. Relative to the recording's first snapshot:
+
+| Time | Recorded state |
+|---|---|
+| +27.0 s | Seated dim owns baseline 0.6633285880 and applied brightness 0.2300000042. |
+| +65.5 s | Fresh motion returns while the Mac is active/unlocked; restoration verifies and the journal clears. No display-sleep request has occurred. |
+| +99.5 s | A later departure causes screen sleep/lock, with the journal already absent. |
+| +106.5 s | The Mac becomes active/unlocked, still with no brightness journal. |
+
+This is a successful awake return restoration followed by a separate sleep/wake episode. It does **not** physically verify restoring a journal retained through lock or the new wake-ownership flag. Later snapshots also show brief `screenLocked` flips; the half-second status snapshots do not identify their event sources or delivery order.
+
+### Unlock-before-return failure in build 26
+
+The next controlled test reproduced dim brightness after unlocking before returning the AirPods. Evidence is retained in `build/validation/build26-unlock-before-return-cycle1.jsonl` and `build/validation/build26-unlock-before-return-cycle1-failed.json`. Relative to that recording's first snapshot:
+
+| Time | Recorded state |
+|---|---|
+| +31.0–31.5 s | Screen sleep and lock occur with no brightness journal. |
+| +36.5 s | The Mac becomes active/unlocked and the still-removed episode resumes its presence check. |
+| +38.0 s | Confirmed presence creates a **new** journal: baseline 1.0, applied dim 0.2300000042. |
+| +40.1 s | Fresh AirPods motion returns. |
+| +40.5 s | Restoration reads 0.2691709101, classifies it as a manual override, and discards the journal. |
+
+The wearer had not requested a brightness change. Build 26's wake flag covered a journal already present during suspension, but this journal was created after unlock and lacked that protection. The result is a real failure of the required unlock-before-return flow. It supersedes any suggestion that the earlier reported success completed wake-brightness acceptance. Both return orders and repeated cycles remain open.
+
+## Build 27 correction — installed, physical acceptance pending
+
+An actual suspension now keeps the existing `recoverIfNeeded()` brightness barrier pending **even when no journal exists**. New presence/dim work and heading recovery stay behind that barrier. The implemented settling contract is:
+
+| Boundary | Rule |
+|---|---|
+| Initial quiet interval | Wait 3 seconds after active recovery begins before sampling brightness. |
+| Consistency check | Sample every 0.2 seconds; require 0.6 seconds of readings within 0.002 on the 0–1 brightness scale, or 0.2 percentage points. |
+| Settling bound | Allow up to 8 seconds per settling attempt, including the initial quiet interval. No dim write occurs during this check. |
+| New dim ownership | A new dim begun within 15 seconds of successful stabilization receives a durable wake-ownership flag. That journal retains its baseline until restoration; the 15 seconds bounds which new dims receive the flag. |
+| Changed first-dim reading | If the current reading differs from the stabilized level, require consistent readings again before recording a new baseline. A stable value of 1.0 remains a valid measured baseline; no historical value is invented. |
+
+If readings never settle or become unavailable, the service retains its pending-wake state for retry. Expiry of the 15-second interval cannot bypass an unresolved first-dim baseline. The AppModel retry path now also handles pending wake stability **without a journal**, including while automatic features are paused. Ordinary awake episodes outside the wake context retain manual-brightness override behavior.
+
+On Macs with no supported built-in brightness control and no journal to restore, the unsupported-device fallback can release the barrier so camera/head tracking remain usable. A revision guard prevents a late unsupported read from clearing a newer suspension's pending state. Lock/sleep/inactivity still stops cameras, capture, and input blockers immediately and invalidates old recovery work.
+
+Focused validation passed **306 brightness-service checks** in `build/display-dimming-wake-settling-2026-09-15.log` and **338 AppModel/removal-coordinator lifecycle assertions** in `build/appmodel-wake-settling-2026-09-15.log`. These use injected hardware, permissions, and preferences. They include the stale unsupported-result guard and the no-journal paused retry; they do not establish physical wake behavior.
+
+Explicit local diagnostics now include the last 16 session-event names/timestamps and resulting state flags, journal wake ownership, pending brightness stabilization, and presence/direction illumination state. They record no image frames or WindowServer account dictionary.
+
+### Full regression and corrected integration fixture
+
+The final full regression run passed in `build/build27-regression.log`: **338 AppModel, 142 camera coordinator, 306 brightness-service, 97 removal-coordinator, and 2,534 dial checks**, plus the existing permission, motion, presence, energy, input-geometry, and actual Metal GPU suites.
+
+The first full attempt stopped in an older integration fixture that combined synthetic coordinator time with real wake timing. That failed attempt is preserved in `build/build27-regression-first.log`. Only the integration test was corrected: it now injects wake time/delay consistently and covers empty-journal unlock-first recovery using the real coordinator and dimmer. Its focused run passed **97 checks** in `build/removal-presence-wake-settling-2026-09-15.log`, followed by the clean full run. This fixture correction changed no production source.
+
+### Verified build 27 installation
+
+After a normal app quit, build 27 was installed at `/Applications/AirVeil.app`, strictly verified, and launched through LaunchServices. Fresh `build/build27-live.json` diagnostics report build 27 and expose the new wake/session/illumination fields. The machine-readable artifact record is `build/validation/release-0.15.0-build27.json`:
+
+- Version **0.15.0**, build **27**.
+- DMG SHA-256: `1855599030966bdddcd59ca5c09203b1d908463ce60739f624b7ffc49bfd6715`.
+- Executable SHA-256: `afdf9303ca8d5f643836090e0613e1b02bf5c3e79c7af31de7d33a98e720f9b5`.
+- Installed executable matches the DMG; bundled policies match source; developer previews are excluded; strict signature verification passed.
+
+The wearer confirmed that the fresh camera check finished. Live diagnostics independently showed connected, fresh and armed motion, a usable seat reference, camera off after completion, and automatic checks enabled. The saved `build/validation/build27-unlock-first-ready.json` records these prerequisites. Both brightness return orders and repeated cycles remain pending. No public release was made.
+
+### Build 27 low-light pretest
+
+The first attempted unlock-first sequence did not reach lock. In `build/validation/build27-low-light-pretest.jsonl`, presence initially needed its brief assist light to confirm the seat. It then dimmed the display from 0.7499998807907104 to 23%, switched the assist light off, and lost usable camera evidence. Eight seconds of uncertainty ended the check and restored the original brightness. The display-sleep counter remained zero. This confirms uncertainty cleanup, not wake restoration. The wearer was asked to add room lighting before repeating the physical wake test; darkness is not treated as proof that the seat is empty.

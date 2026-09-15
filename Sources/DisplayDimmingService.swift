@@ -19,8 +19,8 @@ struct DisplayBrightnessRestoreRecord: Codable, Equatable, Sendable {
     var lastApplied: Double
     var pendingTarget: Double?
     let createdAt: TimeInterval
-    /// Set only when an owned dim crosses explicit session suspension. Older
-    /// journals omit this key and retain ordinary awake ownership checks.
+    /// Set when an owned dim crosses explicit session suspension or begins in
+    /// the bounded wake window. Older journals retain awake ownership checks.
     var requiresWakeRestore: Bool? = nil
 
     var isValid: Bool {
@@ -40,6 +40,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     case ledgerFailed
     case timedOut
     case displayAsleep
+    case wakeUnsettled
 
     var errorDescription: String? {
         switch self {
@@ -52,6 +53,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         case .ledgerFailed: return "Could not save the brightness restore record."
         case .timedOut: return "Brightness control timed out. Any pending change will be restored when the display responds."
         case .displayAsleep: return "The display is asleep. Brightness restoration will wait until it is awake."
+        case .wakeUnsettled: return "Display brightness is still changing after wake. Waiting before dimming or resuming head tracking."
         }
     }
 }
@@ -83,9 +85,10 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     var hasPendingRestore: Bool { record != nil }
     /// Numeric state for explicitly enabled local diagnostics; no hardware read.
     var restorationSnapshot: DisplayBrightnessRestoreRecord? { record }
-    /// Last trusted pre-write restoration reading, retained after journal cleanup.
+    /// Last valid pre-write restoration reading, retained after journal cleanup.
     private(set) var lastRestoreObservedBrightness: Double?
     private(set) var lastRestorationDecision = "none"
+    var awaitingWakeStability: Bool { wakeNeedsSettling }
     var keepsDisplayAwake: Bool { assertion != nil }
     var isSuspended: Bool { desired == .suspended }
     static let defaultTargetBrightness = 0.0
@@ -108,6 +111,18 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     private let assertions: any DisplayIdleAssertionControlling
     private let timeout: TimeInterval
     private let now: () -> TimeInterval
+    private let wakeClock: () -> TimeInterval
+    private let wakeDelay: @MainActor (TimeInterval) async throws -> Void
+    private var wakeNeedsSettling = false
+    private var wakeProtectionUntil = -Double.infinity
+    private var settledWakeReading: DisplayBrightnessReading?
+    private var wakeWaitTask: Task<Void, Error>?
+    private static let wakeQuietPeriod = 3.0
+    private static let wakeStablePeriod = 0.6
+    private static let wakeSampleInterval = 0.2
+    private static let wakeSettlingLimit = 8.0
+    private static let wakeOwnershipWindow = 15.0
+    private static let wakeStabilityTolerance = 0.002
     private var desired: Desired = .restored
     private var revision: UInt64 = 0
     private var worker: Task<Void, Never>?
@@ -126,10 +141,15 @@ enum DisplayDimmingError: LocalizedError, Equatable {
          store: any DisplayBrightnessRestoreStoring,
          assertions: any DisplayIdleAssertionControlling,
          timeout: TimeInterval = 3,
-         now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 }) {
+         now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 },
+         wakeClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         wakeDelay: @escaping @MainActor (TimeInterval) async throws -> Void = {
+             try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
+         }) {
         self.brightness = brightness; self.store = store; self.assertions = assertions
         self.timeout = timeout.isFinite ? min(10, max(0.02, timeout)) : 3
         self.now = now
+        self.wakeClock = wakeClock; self.wakeDelay = wakeDelay
     }
 
     /// Call only while the removal policy explicitly requests dimming. The
@@ -138,7 +158,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     func setDimmed(_ dimmed: Bool, targetBrightness: Double = 0,
                    keepDisplayAwake: Bool = true) async -> Bool {
         guard dimmed else { return await restore() }
-        guard !isSuspended else { return false }
+        guard !isSuspended, !wakeNeedsSettling else { return false }
         guard targetBrightness.isFinite else {
             lastError = DisplayDimmingError.invalidReading.localizedDescription
             status = lastError!; return false
@@ -168,6 +188,9 @@ enum DisplayDimmingError: LocalizedError, Equatable {
             manualOverride = false
         } else if next == .suspended {
             releaseAssertion()
+            wakeNeedsSettling = true
+            wakeProtectionUntil = -Double.infinity
+            settledWakeReading = nil
             // Latch before awaiting the serial worker: an already-issued dim
             // may still be completing when macOS begins its sleep transition.
             do { try retainOwnershipForWake() }
@@ -176,10 +199,14 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         if worker == nil || desired != next {
             revision &+= 1
             desired = next
+            wakeWaitTask?.cancel()
         }
         let ticket = revision
         return await withCheckedContinuation { continuation in
-            let id = UUID(), delay = timeout
+            // The bounded settling wait is deliberate, not a stalled driver.
+            let settlingAllowance = next == .restored &&
+                (wakeNeedsSettling || !loadedLedger) ? Self.wakeSettlingLimit : 0
+            let id = UUID(), delay = timeout + settlingAllowance
             let deadline = Task { [weak self] in
                 do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
                 catch { return }
@@ -204,6 +231,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         // eventual result, then restore it. The journal survives forced exit.
         if desired != .suspended { desired = .restored }
         revision &+= 1
+        wakeWaitTask?.cancel()
         finishWaiters(through: ticket, success: false)
     }
 
@@ -216,9 +244,33 @@ enum DisplayDimmingError: LocalizedError, Equatable {
                     let stored = try store.load()
                     if let stored, !stored.isValid { throw DisplayDimmingError.ledgerFailed }
                     record = stored; loadedLedger = true
+                    if stored?.requiresWakeRestore == true { wakeNeedsSettling = true }
                 }
                 switch requested {
-                case .restored: success = try await restoreOwnedBrightness(ticket: ticket)
+                case .restored:
+                    if wakeNeedsSettling {
+                        lastRestorationDecision = "wake-settling"
+                        status = "Waiting for display brightness to settle after wake."
+                        do {
+                            guard let settled = try await waitForStableWakeReading(ticket: ticket,
+                                quietPeriod: Self.wakeQuietPeriod) else { continue }
+                            settledWakeReading = settled
+                            wakeNeedsSettling = false
+                            wakeProtectionUntil = wakeClock() + Self.wakeOwnershipWindow
+                            lastRestorationDecision = "wake-brightness-stable"
+                            lastError = nil
+                        } catch DisplayDimmingError.unsupported where record == nil {
+                            guard ticket == revision else { continue }
+                            // Macs without a controllable built-in panel must
+                            // still be able to resume camera and head tracking.
+                            wakeNeedsSettling = false
+                            wakeProtectionUntil = -Double.infinity
+                            settledWakeReading = nil
+                            lastRestorationDecision = "wake-dimming-unavailable"
+                            lastError = nil
+                        }
+                    }
+                    success = try await restoreOwnedBrightness(ticket: ticket)
                 case .suspended:
                     releaseAssertion()
                     // Also covers a journal first loaded while launching into
@@ -227,9 +279,13 @@ enum DisplayDimmingError: LocalizedError, Equatable {
                     status = record == nil ? "Brightness control is paused while the session is inactive." :
                         "Brightness restoration is waiting for an active session."
                     success = true
-                case .dimmed(let target, let awake): success = try await applyDim(target: target, awake: awake, ticket: ticket)
+                case .dimmed(let target, let awake):
+                    if wakeNeedsSettling {
+                        status = "Waiting for active-session brightness recovery before dimming."
+                    } else { success = try await applyDim(target: target, awake: awake, ticket: ticket) }
                 }
             } catch {
+                if ticket != revision { continue }
                 releaseAssertion()
                 lastError = error.localizedDescription
                 status = error.localizedDescription
@@ -253,10 +309,22 @@ enum DisplayDimmingError: LocalizedError, Equatable {
             status = "Brightness was adjusted manually. Your setting is being kept."
             return false
         }
-        let current = try await brightness.read(displayID: record?.displayID)
+        let beginsInWakeWindow = record == nil && wakeClock() < wakeProtectionUntil
+        var current = try await brightness.read(displayID: record?.displayID)
         try validate(current, matching: record?.displayID)
         guard ticket == revision else { return false }
-        if let record, !owns(current.brightness, record: record) {
+        if beginsInWakeWindow, let settledWakeReading,
+           !sameStableBrightness(current, settledWakeReading) {
+            // A new level can be a real user choice; accept it when stable,
+            // instead of capturing a single changed wake-animation reading.
+            wakeNeedsSettling = true
+            extendWaitersForWakeSettling(ticket: ticket)
+            guard let settled = try await waitForStableWakeReading(ticket: ticket, quietPeriod: 0) else { return false }
+            current = settled
+            self.settledWakeReading = settled
+            wakeNeedsSettling = false
+        }
+        if let record, record.requiresWakeRestore != true, !owns(current.brightness, record: record) {
             try relinquishOwnership()
             manualOverride = true
             if awake, assertion == nil { assertion = try assertions.acquire() }
@@ -266,7 +334,8 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         if awake, assertion == nil { assertion = try assertions.acquire() }
         if !awake { releaseAssertion() }
         let original = record ?? DisplayBrightnessRestoreRecord(displayID: current.displayID,
-            baseline: current.brightness, lastApplied: current.brightness, pendingTarget: nil, createdAt: now())
+            baseline: current.brightness, lastApplied: current.brightness, pendingTarget: nil, createdAt: now(),
+            requiresWakeRestore: beginsInWakeWindow ? true : nil)
         let applied = min(original.baseline, target)
         if record != nil, original.pendingTarget == nil,
            abs(current.brightness - applied) <= 0.000001,
@@ -314,8 +383,8 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         lastRestoreObservedBrightness = current.brightness
         // macOS may change the panel's numeric brightness during wake. That
         // first awake value cannot establish an intentional manual override of
-        // a dim explicitly retained through suspension. Restore its original
-        // baseline; ordinary uninterrupted-awake episodes still respect edits.
+        // a dim retained through suspension or created in the bounded wake
+        // window. Ordinary awake episodes still respect manual edits.
         guard wakeRestore || owns(current.brightness, record: journal) else {
             try relinquishOwnership()
             lastRestorationDecision = "manual-override-preserved"
@@ -337,6 +406,11 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         // journal so the next activation can safely verify either value again.
         guard ticket == revision else { return false }
         try store.clear(); record = nil
+        // A verified restore is a trustworthy current level for the remaining
+        // bounded wake window, never an instruction to reuse an old baseline.
+        if wakeClock() < wakeProtectionUntil {
+            settledWakeReading = .init(displayID: journal.displayID, brightness: journal.baseline)
+        }
         lastRestorationDecision = wakeRestore ? "wake-restore-verified" : "owned-restore-verified"
         isDimmed = false; lastError = nil
         status = "Original display brightness restored."
@@ -351,6 +425,60 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         record = journal
         lastRestorationDecision = "suspended-awaiting-wake"
         try store.save(journal)
+    }
+
+    private func sameStableBrightness(_ a: DisplayBrightnessReading, _ b: DisplayBrightnessReading) -> Bool {
+        a.displayID == b.displayID && abs(a.brightness - b.brightness) <= Self.wakeStabilityTolerance
+    }
+
+    /// No writes occur here. A suspension/replacement ticket wins after every
+    /// await, and inconsistent values retain the recovery barrier for retry.
+    private func waitForStableWakeReading(ticket: UInt64, quietPeriod: TimeInterval) async throws -> DisplayBrightnessReading? {
+        let started = wakeClock()
+        guard started.isFinite else { throw DisplayDimmingError.wakeUnsettled }
+        if quietPeriod > 0 { try await waitDuringWake(quietPeriod) }
+        guard ticket == revision else { return nil }
+        var candidate: DisplayBrightnessReading?
+        var stableSince = wakeClock()
+        while wakeClock() - started <= Self.wakeSettlingLimit {
+            let reading = try await brightness.read(displayID: record?.displayID)
+            try validate(reading, matching: record?.displayID)
+            guard ticket == revision else { return nil }
+            let time = wakeClock()
+            guard time.isFinite, time >= started else { throw DisplayDimmingError.wakeUnsettled }
+            if let candidate, sameStableBrightness(reading, candidate) {
+                if time - stableSince >= Self.wakeStablePeriod - 0.000001 { return reading }
+            } else {
+                candidate = reading
+                stableSince = time
+            }
+            let remaining = Self.wakeSettlingLimit - (time - started)
+            guard remaining > 0.000001 else { throw DisplayDimmingError.wakeUnsettled }
+            try await waitDuringWake(min(Self.wakeSampleInterval, remaining))
+            guard ticket == revision else { return nil }
+        }
+        throw DisplayDimmingError.wakeUnsettled
+    }
+
+    private func waitDuringWake(_ duration: TimeInterval) async throws {
+        let delay = wakeDelay
+        let task = Task { try await delay(duration) }
+        wakeWaitTask = task
+        defer { wakeWaitTask = nil }
+        try await task.value
+    }
+
+    private func extendWaitersForWakeSettling(ticket: UInt64) {
+        for (id, waiter) in waiters where waiter.revision == ticket {
+            waiter.timeout.cancel()
+            let delay = timeout + Self.wakeSettlingLimit
+            let deadline = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                catch { return }
+                self?.timedOut(id: id, revision: ticket)
+            }
+            waiters[id] = Waiter(revision: ticket, continuation: waiter.continuation, timeout: deadline)
+        }
     }
 
     private func validate(_ reading: DisplayBrightnessReading, matching id: String? = nil) throws {

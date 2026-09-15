@@ -68,6 +68,14 @@ final class AppModel: NSObject, ObservableObject {
          "screensAwake": screensAwake, "sessionActive": sessionActive,
          "screenLocked": screenLocked]
     }
+    private(set) var recentSessionEvents: [[String: Any]] = []
+    private func recordSessionEvent(_ source: String) {
+        // Keep event ordering for opt-in local diagnostics without retaining
+        // the WindowServer session dictionary or any account information.
+        recentSessionEvents.append(["timestamp": Date().timeIntervalSince1970,
+                                    "source": source, "state": sessionDiagnosticState])
+        if recentSessionEvents.count > 16 { recentSessionEvents.removeFirst() }
+    }
     @Published var sleepDisplaysOnRemoval = false {
         didSet {
             cancelRemovalAction()
@@ -385,9 +393,10 @@ final class AppModel: NSObject, ObservableObject {
             removalGuard.reset(disconnectCount: motion.removalEventCount)
             return
         }
-        // Finishing an owned brightness change is independent of whether the
-        // user has paused automatic features or opened permission setup.
-        if removalPresence.phase == .failed, dimming.hasPendingRestore,
+        // Restoring brightness and settling wake readings are independent of
+        // whether automatic features or permission setup have paused sensors.
+        if removalPresence.phase == .failed,
+           (dimming.hasPendingRestore || dimming.awaitingWakeStability),
            !restoringRemoval, !removalPresence.isBusy, !dimming.isBusy,
            now >= nextRemovalRecoveryAt {
             nextRemovalRecoveryAt = now + 2
@@ -607,6 +616,7 @@ final class AppModel: NSObject, ObservableObject {
         default: return
         }
         screenLocked = sessionLockState()
+        recordSessionEvent(name.rawValue)
         if isShuttingDown {
             if !isMacSessionActive { cameraHeading.setSessionActive(false); removalPresence.suspend() }
             return
@@ -620,6 +630,7 @@ final class AppModel: NSObject, ObservableObject {
     func handleScreenLock(_ locked: Bool) {
         let wasActive = isMacSessionActive
         screenLocked = locked
+        recordSessionEvent(locked ? "screen-lock" : "screen-unlock")
         if isShuttingDown {
             if !isMacSessionActive { cameraHeading.setSessionActive(false); removalPresence.suspend() }
             return
@@ -631,6 +642,7 @@ final class AppModel: NSObject, ObservableObject {
     }
     func prepareAfterLaunch() {
         screenLocked = sessionLockState()
+        recordSessionEvent("launch")
         if isShuttingDown {
             if !isMacSessionActive { cameraHeading.setSessionActive(false); removalPresence.suspend() }
             return

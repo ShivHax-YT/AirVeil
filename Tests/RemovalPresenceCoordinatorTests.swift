@@ -135,14 +135,28 @@ import CoreGraphics
     func release(_ assertion: UInt32) { held = false }
 }
 
+@MainActor private final class RemovalWakeClock {
+    var time = 100.0
+    var delayGate: RemovalTestGate?
+    func wait(_ duration: TimeInterval) async throws {
+        try Task.checkCancellation()
+        if let delayGate { await delayGate.wait() }
+        try Task.checkCancellation()
+        time += duration
+        await Task.yield()
+    }
+}
+
 @MainActor private final class RealDimmingRemovalFixture {
     let presence = FakeRemovalPresence()
     let driver = RemovalBrightnessDriver()
     let journal = RemovalBrightnessJournal()
     let assertion = RemovalIdleAssertion()
+    let wake = RemovalWakeClock()
     var sleeps = 0
     lazy var dimmer = DisplayDimmingService(brightness: driver, store: journal, assertions: assertion,
-        timeout: 2, now: { 1234 })
+        timeout: 2, now: { 1234 }, wakeClock: { [wake] in wake.time },
+        wakeDelay: { [wake] in try await wake.wait($0) })
     lazy var coordinator = RemovalPresenceCoordinator(presence: presence, dimmer: dimmer,
         prepareCamera: {}, requestDisplaySleep: { [weak self] in self?.sleeps += 1 })
     func begin(now: Double, allowSleep: Bool = true) {
@@ -359,6 +373,7 @@ import CoreGraphics
             for (index, original) in [0.8124999403953552, 0.625, 0.4375].enumerated() {
                 let now = Double(200 + index * 20)
                 // Each completed cycle may start from a new manual awake choice.
+                f.wake.time = now
                 f.driver.value = original
                 let firstSaved = f.journal.saved.count
                 f.begin(now: now); await settle()
@@ -393,6 +408,34 @@ import CoreGraphics
                       f.journal.saved.dropFirst(firstSaved).allSatisfy { $0.baseline == original },
                       "Both return orders complete each cycle without a dimmed baseline or stale ownership")
             }
+        }
+        do {
+            let f = RealDimmingRemovalFixture()
+            f.coordinator.suspend(); await settle()
+            check(!f.dimmer.hasPendingRestore && f.dimmer.awaitingWakeStability,
+                  "Unlock-first integration begins suspended without any previous dim journal")
+            f.driver.value = 1
+            let gate = RemovalTestGate(); f.wake.delayGate = gate
+            let recovery = Task { await f.coordinator.recoverAfterActivation() }; await settle()
+            check(gate.waiters == 1 && f.coordinator.isBusy && !f.coordinator.canResumeHeading &&
+                  f.presence.starts == 0 && f.driver.writes.isEmpty,
+                  "Empty-journal wake stabilization blocks heading and new camera work without writing brightness")
+            f.wake.delayGate = nil; gate.release()
+            let recovered = await recovery.value
+            check(recovered && !f.dimmer.awaitingWakeStability && f.driver.value == 1 && f.presence.starts == 0,
+                  "Stable full brightness completes recovery before a resumed removal episode starts")
+            f.begin(now: 500, allowSleep: false); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 501); await settle()
+            check(f.driver.value == 0.02 && f.journal.record?.baseline == 1 &&
+                  f.journal.record?.requiresWakeRestore == true,
+                  "Fresh seated presence after unlock creates a new dim with durable wake ownership")
+            f.driver.value = 0.2691709101200104
+            let finished = await f.coordinator.finishForRewear()
+            check(finished && f.driver.value == 1 && f.journal.record == nil && f.sleeps == 0,
+                  "AirPods returned after unlock restore a newly created dim despite altered wake brightness")
+            check(f.dimmer.lastRestoreObservedBrightness == 0.2691709101200104 &&
+                  f.dimmer.lastRestorationDecision == "wake-restore-verified" && f.coordinator.canResumeHeading,
+                  "The production coordinator releases heading only after the new wake-owned baseline is restored")
         }
         for failure in [DisplayDimmingError.displayAsleep, .readFailed(-1)] {
             let f = RealDimmingRemovalFixture(), original = 0.8124999403953552
