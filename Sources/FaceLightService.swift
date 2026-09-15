@@ -32,6 +32,7 @@ import CoreGraphics
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.hidesOnDeactivate = false
+        window.canHide = false
         window.isReleasedWhenClosed = false
         window.level = .statusBar
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]

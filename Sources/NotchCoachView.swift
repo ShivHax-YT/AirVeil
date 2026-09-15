@@ -13,7 +13,7 @@ enum NotchTutorialStep: Int, CaseIterable {
     }
     var detail: String {
         switch self {
-        case .tracking: return "AirPods track your head's turn, not your eyes. After centering, turning left covers the right side; turning right covers the left. Invert direction swaps the sides."
+        case .tracking: return "AirPods follow your head movements. After centering, turning left covers the right side of the screen; turning right covers the left. Invert direction swaps the sides."
         case .center: return "Look straight at the built-in camera, within 5°, and hold briefly. The rail helps you line up. A green smile confirms the check; AirPods then follow your turns."
         case .light: return "When a visible face is too dark to read, a soft, rounded frame lights the display edges. It turns off when the check ends. You can turn Face light off in the notch controls."
         case .controls: return "Hover here for Set center, Enable blur, and Pause. If tracking stops, blur clears; use Refresh direction to retry. Clicking elsewhere keeps this tour open. Only End tutorial finishes it."
@@ -258,7 +258,7 @@ struct NotchCanopy: Shape {
             .accessibilityHint(presentation.demo ? "Visual preview only. The light stays off." : "Lights the edge of your display to help the camera see your face.")
             VStack(spacing: 4) {
                 Text("Light too low").font(.system(size: 12, weight: .medium))
-                Text(presentation.demo ? "Preview · light stays off" : "Tap to turn on Face light")
+                Text(presentation.demo ? "Preview · light stays off" : "Click to turn on Face light")
                     .font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
             }
         }

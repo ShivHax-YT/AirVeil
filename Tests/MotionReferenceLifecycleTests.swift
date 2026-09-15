@@ -235,6 +235,8 @@ private final class SyntheticAttitude: MotionAttitude {
                 }
             }
             wear.start(); poll(3); poll(3)
+            wear.calibrate()
+            let wornEpoch = wear.fusionEpoch
             // Remove the bud opposite the one supplying motion: Core Motion
             // can keep streaming with no delegate disconnect or source switch.
             let remaining: UInt8 = source == .headphoneLeft ? 1 : 2
@@ -242,12 +244,17 @@ private final class SyntheticAttitude: MotionAttitude {
             check(wear.connectionState == .connected && wear.isFresh && wear.disconnectEventCount == 0 &&
                   wear.removalConnectionState == .disconnected && wear.removalEventCount == 1,
                   "Either nonstreaming bud can trigger removal independently of live motion")
+            check(wear.fusionEpoch > wornEpoch && !wear.referenceUsable && !wear.trackingValid,
+                  "Confirmed nonstreaming-bud removal invalidates the old center even while samples stay fresh")
             poll(nil); poll(nil)
             check(wear.removalConnectionState == .disconnected && wear.removalEventCount == 1,
                   "A disappearing metadata feed cannot let remaining-bud motion restore blackout")
+            let removedEpoch = wear.fusionEpoch
             poll(3); poll(3)
             check(wear.removalConnectionState == .connected && wear.removalEventCount == 1,
                   "Either removed bud returning restores while the original motion source remains unchanged")
+            check(wear.fusionEpoch > removedEpoch && !wear.referenceUsable,
+                  "Same-source reinsertion starts a new camera alignment epoch without silently setting center")
             poll(remaining); poll(remaining)
             let event = wear.removalEventCount
             wearTransport.connection?(false)

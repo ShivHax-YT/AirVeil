@@ -14,6 +14,8 @@ import Combine
 enum MotionConnectionState { case connected, disconnected, unknown }
 @MainActor final class MotionService: ObservableObject {
     var removalEventCount: UInt64 = 0
+    var disconnectEventCount: UInt64 = 0
+    var connectionState = MotionConnectionState.connected
     var removalConnectionState = MotionConnectionState.connected
     @Published var fusionSample: HeadingMotionSample?
     var fusionEpoch: UInt64 = 1
@@ -451,6 +453,62 @@ private struct StoredCameraProbe: Codable {
             f.motion.removalEventCount += 1
             f.advance(0.1); await settle()
             check(f.capture.starts == starts + 1, "Confirmed ear return permits one recovery after idle")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8); await settle(); f.advance(0.8); f.frames(3, cameraYaw: 0, motionYaw: 0)
+            let starts = f.capture.starts
+            f.motion.disconnectEventCount += 1; f.motion.connectionState = .disconnected
+            f.motion.isFresh = false; f.motion.fusionSample = nil
+            f.coordinator.update(layoutKey: f.layout)
+            f.coordinator.cancelPendingRecovery()
+            f.time += 2; f.coordinator.update(layoutKey: f.layout)
+            f.motion.connectionState = .connected; f.motion.isFresh = true
+            f.advance(0.8); await settle()
+            check(f.capture.starts == starts,
+                  "Explicit Pause consumes pending connection and gap recovery instead of reopening the camera")
+            f.motion.isFresh = false; f.motion.fusionSample = nil; f.coordinator.update(layoutKey: f.layout)
+            f.time += 2; f.motion.isFresh = true; f.advance(0.8); await settle()
+            check(f.capture.starts == starts, "A later sample gap alone cannot undo explicit camera Pause")
+            f.motion.disconnectEventCount += 1; f.motion.connectionState = .disconnected
+            f.motion.isFresh = false; f.coordinator.update(layoutKey: f.layout)
+            f.motion.connectionState = .connected; f.motion.isFresh = true; f.advance(0.8); await settle()
+            check(f.capture.starts == starts + 1, "A new connection-return event may rearm the enabled camera feature after Pause")
+            f.end()
+        }
+        for event in ["confirmed nonstreaming bud", "public reconnect", "sustained sample gap"] {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8); await settle(); f.advance(0.8)
+            f.frames(3, cameraYaw: 0, motionYaw: 0)
+            check(f.coordinator.trackingValid, "\(event): begin with a verified alignment")
+            let starts = f.capture.starts
+            let saved = f.defaults.data(forKey: "cameraScreenCenterV1")
+            if event == "confirmed nonstreaming bud" {
+                f.motion.removalEventCount += 1
+                f.motion.removalConnectionState = .disconnected
+                f.advance(0.4)
+                check(!f.coordinator.trackingValid && f.capture.starts == starts,
+                      "Confirmed removal suspends direction checks even when the partner keeps streaming")
+                f.motion.removalConnectionState = .connected
+            } else {
+                if event == "public reconnect" {
+                    f.motion.disconnectEventCount += 1
+                    f.motion.connectionState = .disconnected
+                }
+                f.motion.isFresh = false; f.motion.fusionSample = nil
+                f.coordinator.update(layoutKey: f.layout)
+                f.time += 1.2; f.coordinator.update(layoutKey: f.layout)
+                f.motion.connectionState = .connected; f.motion.isFresh = true
+            }
+            f.advance(0.8); await settle()
+            check(f.capture.starts == starts + 1 && f.coordinator.automaticReturnCheckCount == 1,
+                  "\(event): one return starts a camera check even without an AirPod source switch")
+            f.advance(0.8); f.frames(3, cameraYaw: 0, motionYaw: 0)
+            check(f.coordinator.trackingValid && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                  "\(event): return measurement preserves the saved screen center")
+            f.advance(1); await settle()
+            check(f.capture.starts == starts + 1, "\(event): the same return cannot repeat the check")
             f.end()
         }
         print("PASS: \(checks) centered coordinator/service/fusion checks; injected inputs, no hardware access")

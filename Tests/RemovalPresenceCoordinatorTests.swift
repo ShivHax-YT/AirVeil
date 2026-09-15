@@ -284,6 +284,13 @@ import CoreGraphics
             f.sleepGate?.release(); await settle()
             check(f.coordinator.phase == .idle && f.sleeps == 1, "Late sleep completion cannot overwrite a newer rewear state")
         }
+        do {
+            let f = RemovalFixture()
+            f.coordinator.begin(reference: nil, now: 100, allowDimming: false, allowUncertainSleep: false)
+            await settle()
+            check(f.sleeps == 0 && f.presence.starts == 0 && !f.coordinator.isActive,
+                  "A connection-only check without valid seat geometry never falls back to sleep")
+        }
         print("PASS: \(checks) RemovalPresenceCoordinator checks with fake providers; no camera, brightness, assertion, or sleep access")
     }
 }

@@ -27,6 +27,11 @@ import CoreMedia
     private var automaticRecoveryAllowed = true
     private var lastAttemptEpoch: UInt64?
     private var observedRemovalEvent: UInt64 = 0
+    private var observedDisconnectEvent: UInt64 = 0
+    private var transportReturnPending = false
+    private var gapStarted: Double?
+    private var canCheckAfterGap = false
+    private(set) var automaticReturnCheckCount = 0
     private var burstTicket: UInt64 = 0
     private var phase: Phase?
     private var burstStarted = false
@@ -120,6 +125,7 @@ import CoreMedia
         }
     }
     func disable() {
+        clearReturnRecoveryIntent()
         cancelBurst()
         isEnabled = false; defaults.set(false, forKey: "cameraAssistance")
         engine.invalidate(); isAligned = false
@@ -127,8 +133,14 @@ import CoreMedia
     }
     func cancelPendingRecovery() {
         automaticRecoveryAllowed = false
+        clearReturnRecoveryIntent()
         cancelBurst()
         if isEnabled { status = "Camera is off. Refresh direction when you want to resume." }
+    }
+    private func clearReturnRecoveryIntent() {
+        canCheckAfterGap = false; gapStarted = nil; transportReturnPending = false
+        observedDisconnectEvent = motion.disconnectEventCount
+        observedRemovalEvent = motion.removalEventCount
     }
     func setSessionActive(_ active: Bool) {
         guard sessionActive != active else { return }
@@ -141,13 +153,37 @@ import CoreMedia
     func update(layoutKey: String) {
         self.layoutKey = layoutKey
         guard isEnabled, sessionActive else { return }
+        if motion.disconnectEventCount != observedDisconnectEvent {
+            observedDisconnectEvent = motion.disconnectEventCount
+            transportReturnPending = hasCenter
+        }
+        // An actual sustained loss and return can occur without a delegate
+        // callback. Allow one recheck after a successful alignment; a failed
+        // retry cannot turn noisy epochs into a repeating camera loop.
+        if !motion.isFresh {
+            if gapStarted == nil { gapStarted = now() }
+        }
+        let returnedAfterGap = motion.isFresh && canCheckAfterGap &&
+            gapStarted.map { now() - $0 >= 1 } == true
+        if motion.isFresh { gapStarted = nil }
+        if motion.removalConnectionState == .disconnected {
+            if phase != nil { cancelBurst() }
+            engine.invalidate(); isAligned = false; hadLiveAlignment = false
+            status = "AirPod removal confirmed. Waiting for reinsertion before checking direction."
+            return
+        }
         // A sensor epoch is not a wear event: idle audio and Continuity can
         // change it repeatedly. Rearm only after a confirmed removal returns.
-        if motion.removalEventCount != observedRemovalEvent,
-           motion.removalConnectionState == .connected, motion.isFresh {
+        let confirmedReturn = motion.removalEventCount != observedRemovalEvent &&
+            motion.removalConnectionState == .connected && motion.isFresh
+        let transportReturn = transportReturnPending && motion.connectionState == .connected && motion.isFresh
+        if confirmedReturn || transportReturn || returnedAfterGap {
             observedRemovalEvent = motion.removalEventCount
-            automaticRecoveryAllowed = !trackingValid
+            transportReturnPending = false; canCheckAfterGap = false
+            cancelBurst(); engine.invalidate(); isAligned = false; hadLiveAlignment = false
+            automaticRecoveryAllowed = true
             lastAttemptEpoch = nil
+            automaticReturnCheckCount += 1
         }
         if let phase {
             guard burstLayoutKey == layoutKey else {
@@ -448,6 +484,7 @@ import CoreMedia
                 // Keep its motion history and alignment; never configure again
                 // or start a second capture after completing this check.
                 cancelBurst(clearCoach: false); isAligned = true; hadLiveAlignment = true
+                canCheckAfterGap = true; gapStarted = nil
                 status = "Facing-center check complete. Camera is off."
                 showSuccess()
                 return

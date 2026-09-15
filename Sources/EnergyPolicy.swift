@@ -99,13 +99,13 @@ struct EnergySystemState {
         case .automatic:
             if systemState.lowPowerMode {
                 fps = 30
-                nextReason = "Automatic is reducing desktop refresh while Low Power Mode is on."
+                nextReason = "Refreshes desktop content less often while Low Power Mode is on."
             } else if systemState.thermalState == .serious || systemState.thermalState == .critical {
                 fps = 30
-                nextReason = "Automatic is reducing desktop refresh while your Mac is running hot."
+                nextReason = "Refreshes desktop content less often while your Mac is running hot."
             } else {
                 fps = 60
-                nextReason = "Automatic is using the usual desktop refresh."
+                nextReason = "Uses the usual desktop refresh under current conditions."
             }
         }
         if reason != nextReason { reason = nextReason }

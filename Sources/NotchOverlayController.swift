@@ -26,6 +26,7 @@ private final class NotchPanel: NSPanel {
     private var active = true
     private var pointerInside = false
     private var contentHeight: CGFloat = 190
+    var windowLevel: Int { panel?.level.rawValue ?? -1 }
 
     init(model: AppModel, defaults: UserDefaults = .standard) {
         self.model = model
@@ -154,8 +155,11 @@ private final class NotchPanel: NSPanel {
         let window = NotchPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.isFloatingPanel = true; window.hidesOnDeactivate = false
+        window.canHide = false
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
-        window.level = .statusBar
+        // Above desktop coverage and face illumination, including the final
+        // checkmark while Settings or another ordinary app is frontmost.
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle, .canJoinAllApplications]
         window.ignoresMouseEvents = true
         window.title = "AirVeil Notch Coach"

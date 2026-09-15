@@ -7,7 +7,7 @@ import ScreenCaptureKit
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var model: AppModel!
     private let tour = SettingsTour()
-    private var window: NSWindow!
+    private var window: AirVeilSettingsWindow!
     private var item: NSStatusItem!
     private var hotKey: EventHotKeyRef?
     private var hotHandler: EventHandlerRef?
@@ -43,15 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // waits for the welcome tour, while restoration must never wait on UI.
         model.prepareAfterLaunch()
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
-        window = NSWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)),
-                          styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
-        window.title = "AirVeil"
+        window = AirVeilSettingsWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)))
         window.delegate = self
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width:740,height:660)
-        window.level = .normal
         window.contentView = NSHostingView(rootView:SettingsView(model:model,tour:tour))
         window.center()
+        model.overlay.registerSettingsWindow(window)
         model.showWindow = { [weak self] in self?.showSettings() }
         model.stateChanged = { [weak self] in self?.refreshStatus() }
         item = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
@@ -96,8 +92,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         appMenu.addItem(withTitle:"Show Notch Controls",action:#selector(showNotch),keyEquivalent:"").target = self
         appMenu.addItem(withTitle:"Preview Notch Animation",action:#selector(previewNotch),keyEquivalent:"").target = self
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle:"Hide AirVeil",action:#selector(NSApplication.hide(_:)),keyEquivalent:"h")
+        let hideOthers = appMenu.addItem(withTitle:"Hide Others",action:#selector(NSApplication.hideOtherApplications(_:)),keyEquivalent:"h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle:"Show All",action:#selector(NSApplication.unhideAllApplications(_:)),keyEquivalent:"")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle:"Quit AirVeil",action:#selector(quit),keyEquivalent:"q").target = self
-        appItem.submenu = appMenu; menu.addItem(appItem); NSApp.mainMenu = menu
+        appItem.submenu = appMenu; menu.addItem(appItem)
+        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        windowItem.submenu = windowMenu; menu.addItem(windowItem)
+        NSApp.mainMenu = menu
+        NSApp.windowsMenu = windowMenu
     }
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -119,8 +130,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     private func refreshStatus() {
         notch?.updateControls()
-        let level: NSWindow.Level = model.enabled || model.starting ? NSWindow.Level(rawValue:NSWindow.Level.statusBar.rawValue+1) : .normal
-        if window?.level != level { window?.level = level }
         let icon = model.shielded ? "exclamationmark.shield.fill" : "circle.lefthalf.filled"
         if lastIconName != icon {
             item?.button?.image = NSImage(systemSymbolName:icon,accessibilityDescription:"AirVeil")
@@ -132,7 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if item?.button?.toolTip != tip { item?.button?.toolTip = tip }
     }
     @objc func showSettings() {
-        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
+        window.showSettings()
+        model.overlay.settingsWindowDidBecomeVisible()
         model.setPreviewVisible(true); model.refreshPermission()
     }
     func windowWillClose(_ notification: Notification) { tour.finish(); model.setPreviewVisible(false) }
@@ -140,7 +150,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowDidDeminiaturize(_ notification: Notification) { updatePreviewVisibility() }
     func windowDidChangeOcclusionState(_ notification: Notification) { updatePreviewVisibility() }
     private func updatePreviewVisibility() {
-        model.setPreviewVisible(window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible))
+        let visible = window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+        if visible { model.overlay.settingsWindowDidBecomeVisible() }
+        model.setPreviewVisible(visible)
     }
     @objc private func pause() { model.pause() }
     @objc private func calibrate() { model.calibrate() }
@@ -207,6 +219,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
             "removalEventCount":model.motion.removalEventCount,"removalConnectionState":model.motion.removalConnectionState.rawValue,
             "wearStatus":model.motion.wearStatus,"individualAirPodsMonitoring":model.motion.monitorsIndividualAirPods,
+            "hasIndividualWearState":model.motion.hasIndividualWearState,
+            "connectionPresenceCheckCount":model.connectionPresenceCheckCount,
+            "automaticReturnCheckCount":model.cameraHeading.automaticReturnCheckCount,
             "wearDiagnosticStatus":model.motion.wearDiagnosticStatus,"leftBlurOnset":model.leftOnset,"rightBlurOnset":model.rightOnset,
             "displaySleepRequestCount":model.displaySleepRequestCount,
             "referenceState":model.motion.referenceState.rawValue,"hasSavedCenter":model.motion.hasSavedCenter,
@@ -227,6 +242,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "notchDirectionKnown":model.cameraHeading.notchMotion.snapshot.directionKnown,
             "notchVisible":notch?.presentation.expanded ?? false,
             "settingsVisible":window?.isVisible ?? false,
+            "settingsWindowLevel":window?.level.rawValue ?? -1,
+            "applicationActivationPolicy":NSApp.activationPolicy().rawValue,
+            "settingsCaptureStatus":model.overlay.settingsCaptureStatus,
+            "notchWindowLevel":notch?.windowLevel ?? -1,
             "settingsVisibleAtLaunch":settingsVisibleAtLaunch,
             "captureExclusionPreflight":diagnosticCaptureExclusion,
             "trackingValid":model.trackingValid,

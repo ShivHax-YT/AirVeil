@@ -4,26 +4,37 @@ import Combine
 
 struct VeilPreview: NSViewRepresentable {
     let model: AppModel
+    /// Tour simulation is confined to this view, including while live blur is on.
+    var simulationYaw: Double? = nil
+    final class Coordinator { var simulationYaw: Double? }
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> VeilMetalView {
         let view = VeilMetalView(frame: NSRect(x:0,y:0,width:660,height:280))
         view.rendersBaseImage = true
         try? view.setImage(PreviewArt.image)
+        let coordinator = context.coordinator
+        coordinator.simulationYaw = simulationYaw
         model.previewFrame = { [weak view, weak model] strengths in
             guard let view, let model else { return }
-            Self.update(view, model: model, strengths: strengths)
+            Self.update(view, model: model, strengths: strengths, simulationYaw: coordinator.simulationYaw)
         }
         model.previewVisibility = { [weak view] visible in view?.renderingEnabled = visible }
-        Self.update(view, model: model, strengths: model.strengths)
+        Self.update(view, model: model, strengths: model.strengths, simulationYaw: simulationYaw)
         return view
     }
     func updateNSView(_ view: VeilMetalView, context: Context) {
-        Self.update(view, model: model, strengths: model.strengths)
+        context.coordinator.simulationYaw = simulationYaw
+        Self.update(view, model: model, strengths: model.strengths, simulationYaw: simulationYaw)
     }
-    static func dismantleNSView(_ view: VeilMetalView, coordinator: ()) { view.renderingEnabled = false }
-    private static func update(_ view: VeilMetalView, model: AppModel, strengths: VeilStrength) {
+    static func dismantleNSView(_ view: VeilMetalView, coordinator: Coordinator) { view.renderingEnabled = false }
+    private static func update(_ view: VeilMetalView, model: AppModel, strengths: VeilStrength, simulationYaw: Double?) {
+        let strengths = simulationYaw.map {
+            VeilMath.target(yawDegrees: model.inverted ? -$0 : $0, leftOnset: model.leftOnset,
+                rightOnset: model.rightOnset, full: model.fullAngle, wholeScreen: model.wholeScreen)
+        } ?? strengths
         view.setEffect(left: strengths.left, right: strengths.right, blurPoints: model.blurPoints,
             feather: model.feather, opaque: model.opaque || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
-            shield: model.shielded || (model.enabled && !model.overlay.isReady), wholeScreen: model.wholeScreen)
+            shield: simulationYaw == nil && (model.shielded || (model.enabled && !model.overlay.isReady)), wholeScreen: model.wholeScreen)
     }
 }
 
@@ -60,7 +71,7 @@ private struct RefreshDirectionButton: View {
 }
 private struct HeadTrackingControls: View {
     @ObservedObject var presentation: TrackingPresentation
-    let model: AppModel
+    @ObservedObject var model: AppModel
     var body: some View {
         VStack(alignment:.leading,spacing:10) {
             Label("Head tracking",systemImage:"airpodspro").font(.headline)
@@ -70,8 +81,14 @@ private struct HeadTrackingControls: View {
             Label(presentation.snapshot.hasSavedCenter ? "Screen direction saved" : "Set your screen direction",
                   systemImage:presentation.snapshot.hasSavedCenter ? "scope" : "viewfinder")
                 .font(.caption.weight(.medium))
-            Text(model.cameraHeading.isEnabled ? "Face straight ahead within 5°. A brief camera and AirPods check establishes center after setup or reinsertion." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
+            Text(model.cameraHeading.isEnabled ? "Face straight ahead within 5°. A brief camera and AirPods check establishes center after setup or a supported return event." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
                 .font(.caption2).foregroundStyle(.secondary)
+            if model.startupTourActive {
+                Button("Start head tracking") { model.startTrackingFromTour() }
+                    .controlSize(.large)
+                Text("Starts AirPods motion tracking so you can set your center during the tour.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             Button(presentation.snapshot.centerBusy ? "Checking direction…" : "Set center") { model.calibrate() }
                 .disabled(!presentation.snapshot.canSetCenter).controlSize(.large)
             if !presentation.snapshot.source.isEmpty {
@@ -118,7 +135,7 @@ struct EnergySettingsView: View {
                 Text(status).font(.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("Desktop refresh status: " + status)
             }
-            Text("Reduced energy refreshes the desktop image less often. Head tracking and the movement of the cover stay responsive; camera and AirPod-removal checks keep their normal timing.")
+            Text("Reduced energy refreshes the desktop image less often. Head tracking and the cover stay responsive; camera and AirPod removal checks keep their normal timing.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 20))
@@ -131,6 +148,18 @@ struct SettingsView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var advanced = false
     @State private var advancedBeforeTour = false
+    @State private var tourSimulation = true
+    @State private var tourPreviewYaw = 0.0
+    private var simulating: Bool { tour.isActive ? tourSimulation : model.simulate }
+    private var previewAngle: Binding<Double> {
+        Binding(get: { tour.isActive ? tourPreviewYaw : model.previewYaw }, set: { angle in
+            if tour.isActive { tourSimulation = true; tourPreviewYaw = angle }
+            else { model.simulate = true; model.previewYaw = angle }
+        })
+    }
+    private var simulation: Binding<Bool> {
+        tour.isActive ? $tourSimulation : $model.simulate
+    }
     private let accent = Color(red:0.18,green:0.43,blue:0.92)
     var body: some View {
         ScrollViewReader { proxy in
@@ -155,29 +184,38 @@ struct SettingsView: View {
                         .background(.quaternary,in:Capsule())
                 }.tourTarget(.welcome)
                 VStack(alignment:.leading,spacing:12) {
-                    TrackingHeader(presentation:model.presentation)
-                    VeilPreview(model:model)
-                        .frame(height:280).clipShape(RoundedRectangle(cornerRadius:14))
+                    if tour.isActive {
+                        HStack {
+                            Label("Interactive preview", systemImage: "play.rectangle").font(.headline)
+                            Spacer()
+                            Text(String(format: "%+.0f°", tourPreviewYaw)).monospacedDigit()
+                        }
+                    } else { TrackingHeader(presentation:model.presentation) }
+                    VeilPreview(model:model, simulationYaw: tour.isActive && simulating ? tourPreviewYaw : nil)
+                        .frame(height:tour.isActive ? 150 : 280).clipShape(RoundedRectangle(cornerRadius:14))
                         .overlay(RoundedRectangle(cornerRadius:14).stroke(.primary.opacity(0.08)))
-                        .accessibilityLabel("Directional blur preview").tourTarget(.preview)
+                        .accessibilityLabel("Directional blur preview")
                     HStack {
-                        TrackingDirection(presentation:model.presentation)
+                        if tour.isActive {
+                            Text("Try the effect in this preview.").font(.caption).foregroundStyle(.secondary)
+                        } else { TrackingDirection(presentation:model.presentation) }
                         Spacer()
-                        Text(model.simulate && !model.enabled ? "SIMULATED PREVIEW" : "AIRPODS PREVIEW")
+                        Text(simulating && (tour.isActive || !model.enabled) ? "SIMULATED PREVIEW" : (tour.isActive ? "CURRENT PREVIEW" : "AIRPODS PREVIEW"))
                             .font(.system(size:10,weight:.semibold)).foregroundStyle(.secondary)
                     }
-                    if !model.enabled {
-                        Toggle("Simulate a head turn",isOn:$model.simulate).toggleStyle(.switch).controlSize(.small)
-                        if model.simulate {
-                            HStack {
-                                Text("Right").font(.caption).foregroundStyle(.secondary)
-                                Slider(value:$model.previewYaw,in:-60...60).accessibilityLabel("Simulated head angle")
-                                Text("Left").font(.caption).foregroundStyle(.secondary)
-                                Button("Center") { model.previewYaw = 0 }.controlSize(.small)
-                            }
+                    if !model.enabled || tour.isActive {
+                        Toggle("Simulate a head turn",isOn:simulation).toggleStyle(.switch).controlSize(.small)
+                            .accessibilityIdentifier("preview-simulation")
+                        HStack {
+                            Text("Right").font(.caption).foregroundStyle(.secondary)
+                            Slider(value:previewAngle,in:-60...60).accessibilityLabel("Simulated head angle")
+                                .accessibilityIdentifier("preview-angle")
+                            Text("Left").font(.caption).foregroundStyle(.secondary)
+                            Button("Center") { previewAngle.wrappedValue = 0 }.controlSize(.large)
+                                .accessibilityIdentifier("preview-center")
                         }
                     }
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.preview)
 
                 HStack(alignment:.top,spacing:16) {
                     HeadTrackingControls(presentation:model.presentation,model:model).tourTarget(.tracking)
@@ -238,43 +276,52 @@ struct SettingsView: View {
                     }.tourTarget(.displays)
                     VStack(alignment:.leading,spacing:12) {
                     Toggle("Block clicks and scrolling while blurred",isOn:$model.blockInput).toggleStyle(.switch).controlSize(.small)
-                    if model.blockInput {
+                    if model.blockInput || tour.step == .input {
                         Picker("Block interaction in",selection:$model.blocksEntireDisplay) {
                             Text("Blurred area").tag(false)
                             Text("Entire affected display").tag(true)
                         }.pickerStyle(.segmented)
                     }
-                    Text("The clear area stays usable in Blurred area mode. AirVeil controls and the menu bar remain available.")
+                    Text(model.blockInput
+                         ? "The clear area stays usable in Blurred area mode. The menu bar and notch controls remain available."
+                         : "Choose an area, then turn on blocking to apply it. The menu bar and notch controls remain available.")
                         .font(.caption2).foregroundStyle(.secondary)
                     }.tourTarget(.input)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
                 VStack(alignment:.leading,spacing:12) {
+                    VStack(alignment:.leading,spacing:12) {
                     Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
                     Toggle("Automatically manage displays when AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
-                        .toggleStyle(.switch).controlSize(.small).tourTarget(.removal)
+                        .toggleStyle(.switch).controlSize(.small)
                     Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
-                    if model.sleepDisplaysOnRemoval {
+                    }.tourTarget(.removal)
+                    if model.sleepDisplaysOnRemoval || tour.step == .seated {
+                        VStack(alignment:.leading,spacing:12) {
                         AirPodsWearStatus(motion: model.motion)
                         Toggle("Dim while I am still seated", isOn: $model.dimWhilePresent)
                             .toggleStyle(.switch).controlSize(.small)
-                        if model.dimWhilePresent {
+                        if model.dimWhilePresent || tour.step == .seated {
                             HStack {
                                 Text("Screen brightness while seated")
                                 Slider(value: $model.removalBrightness, in: 0...0.50, step: 0.01)
                                     .accessibilityLabel("Dimmed brightness")
+                                    .accessibilityIdentifier("seated-brightness")
                                 Text("\(Int((model.removalBrightness * 100).rounded()))%")
                                     .monospacedDigit().frame(width: 38, alignment: .trailing)
                             }
-                            Text(model.cameraHeading.isEnabled
+                            Text(!model.sleepDisplaysOnRemoval || !model.dimWhilePresent
+                                ? "Choose a brightness, then enable automatic display management and seated dimming to apply it."
+                                : model.cameraHeading.isEnabled
                                 ? (model.presenceReady ? "Your seat is ready. Turning away is fine. At 0%, the display goes black without locking. Put an AirPod back in to restore your brightness." : "Use Set center once to remember your seat before removing AirPods.")
                                 : "Enable camera assistance and use Set center to check your seat.")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("The built-in camera stays on while AirPods are removed. Foreground position and size help exclude background or side occupants. No identity recognition or recordings. If you leave, or the view cannot be confirmed, displays turn off. Only the built-in display is dimmed.")
+                            Text("The built-in camera stays on while AirPods are removed. Face position and size help distinguish your seat from people in the background. Images are not recorded or used to identify you. If you leave, or your seat cannot be confirmed, displays turn off. Only the built-in display is dimmed.")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
+                        }.tourTarget(.seated)
                     }
-                    Text("Keep Automatic Ear Detection on. Removing either AirPod starts the check when its in-ear status is available. Idle audio, device switching, and unavailable in-ear status do not start removal checks. Tracking interruptions pause the blur; use Refresh direction to resume.")
+                    Text("Keep Automatic Ear Detection on. Confirmed removal of either AirPod supports seated dimming. If in-ear status is unavailable, a connection change can check whether you left; it keeps seated brightness unchanged and turns displays off only after confirming absence. Tracking interruptions pause blur; use Refresh direction if an automatic check cannot restore it.")
                         .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment:.top) {
                         Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")
@@ -328,21 +375,21 @@ struct SettingsView: View {
                 }.font(.caption2).foregroundStyle(.secondary)
             }.padding(28).frame(maxWidth:800)
         }
-        .scrollDisabled(tour.isActive)
-        .allowsHitTesting(!tour.isActive)
-        .accessibilityHidden(tour.isActive)
         .overlayPreferenceValue(TourAnchorKey.self) { anchors in
             if let step = tour.step {
                 GeometryReader { geometry in
                     TourSpotlight(rect: anchors[step].map { geometry[$0] })
-                }
+                }.allowsHitTesting(false)
             }
         }
         .clipped()
         if tour.isActive { SettingsTourCard(tour: tour).transition(.move(edge: .bottom).combined(with: .opacity)) }
         }
         .onChange(of: tour.step) { old, step in
-            if old == nil, step != nil { advancedBeforeTour = advanced }
+            if old == nil, step != nil {
+                advancedBeforeTour = advanced
+                tourSimulation = true; tourPreviewYaw = 0
+            }
             if step == .tuning { advanced = true }
             if let step {
                 // Let disclosure/layout changes settle before resolving the target.

@@ -171,6 +171,7 @@ enum MotionReferenceState { case unset, established, awaitingReturn, retainedAft
     var connectionState = MotionConnectionState.connected
     var disconnectEventCount: UInt64 = 0
     var removalStateOverride: MotionConnectionState?
+    var hasIndividualWearState = true
     var removalCountOverride: UInt64?
     var removalConnectionState: MotionConnectionState { removalStateOverride ?? connectionState }
     var removalEventCount: UInt64 { removalCountOverride ?? disconnectEventCount }
@@ -1477,10 +1478,14 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.startMotionAutomatically()
             model.checkReferenceRecovery()
             check(!model.motion.isRunning, "Startup tutorial defers sensor startup")
-            model.startupTourActive = false
-            model.startMotionAutomatically()
-            check(model.motion.isRunning, "Completing or skipping the tour permits sensor startup")
+            model.startTrackingFromTour()
+            check(model.motion.isRunning && !model.startupTourActive,
+                  "Explicit tutorial Start head tracking permits sensor setup before completing the tour")
             model.shutdown()
+            model.startupTourActive = true
+            model.startTrackingFromTour()
+            check(!model.motion.isRunning && model.startupTourActive,
+                  "Tutorial Start head tracking cannot restart a shutting-down app")
         }
         do {
             let model = makeModel()
@@ -1508,6 +1513,108 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             model.energy.request(30)
             check(model.energy.stopped && model.overlay.cadenceRequests == requests,
                   "Shutdown prevents late energy delivery reaching capture")
+        }
+        for result in [PresenceState.present, .absent, .unknown] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model); acceptSeat(model, now: now)
+            model.sleepDisplaysOnRemoval = true
+            model.motion.hasIndividualWearState = false
+            model.motion.removalStateOverride = .connected; model.motion.removalCountOverride = 0
+            model.checkAirPodsRemoval(now: now)
+            check(!model.removalStatus.hasPrefix("Ready"), "Unavailable individual-ear metadata cannot claim removal is ready")
+            model.motion.connectionState = .disconnected; model.motion.isFresh = false
+            model.motion.removalStateOverride = .unknown; model.motion.disconnectEventCount = 1
+            model.checkAirPodsRemoval(now: now + 0.1)
+            model.checkAirPodsRemoval(now: now + 1)
+            check(model.connectionPresenceCheckCount == 0, "Connection-only checks observe the full debounce")
+            model.checkAirPodsRemoval(now: now + 2); await drainTasks()
+            check(model.connectionPresenceCheckCount == 1 && model.presence.isRunning,
+                  "A real disconnect with unavailable metadata starts one configured-seat check")
+            model.presence.state = result
+            model.checkAirPodsRemoval(now: now + 2.5)
+            if result == .unknown { model.checkAirPodsRemoval(now: now + 11) }
+            await drainTasks()
+            check(model.dimming.brightnessWrites == 0 && model.dimming.dimTargets.isEmpty,
+                  "Connection-only evidence never dims a seated or uncertain user")
+            check(model.displaySleep.requests == (result == .absent ? 1 : 0),
+                  "Only confirmed seat absence permits display sleep after an uncertain connection event")
+            for tick in 12...20 { model.checkAirPodsRemoval(now: now + Double(tick)) }
+            await drainTasks()
+            check(model.connectionPresenceCheckCount == 1 && !model.presence.isRunning,
+                  "The same disconnected interval cannot repeat a finished presence check")
+            model.shutdown()
+        }
+        for blocker in ["no seat", "no prior motion", "camera off", "removal off", "sample gap only"] {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model)
+            if blocker != "no seat" { acceptSeat(model, now: now) }
+            model.sleepDisplaysOnRemoval = blocker != "removal off"
+            if blocker == "camera off" { model.cameraHeading.isEnabled = false }
+            model.motion.hasIndividualWearState = false
+            model.motion.removalStateOverride = .connected; model.motion.removalCountOverride = 0
+            if blocker == "no prior motion" { model.motion.isFresh = false }
+            model.checkAirPodsRemoval(now: now)
+            model.motion.isFresh = false; model.motion.removalStateOverride = .unknown
+            if blocker != "sample gap only" {
+                model.motion.connectionState = .disconnected; model.motion.disconnectEventCount = 1
+            }
+            model.checkAirPodsRemoval(now: now + 0.1); model.checkAirPodsRemoval(now: now + 3)
+            await drainTasks()
+            check(model.connectionPresenceCheckCount == 0 && model.presence.startReferences.isEmpty &&
+                  model.displaySleep.requests == 0 && model.dimming.brightnessWrites == 0,
+                  "\(blocker) cannot start connection presence or a display action")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model); acceptSeat(model, now: now); model.sleepDisplaysOnRemoval = true
+            model.motion.hasIndividualWearState = false
+            model.motion.removalStateOverride = .connected; model.motion.removalCountOverride = 0
+            model.checkAirPodsRemoval(now: now)
+            model.motion.connectionState = .disconnected; model.motion.isFresh = false
+            model.motion.removalStateOverride = .unknown; model.motion.disconnectEventCount = 1
+            model.checkAirPodsRemoval(now: now + 0.1); model.checkAirPodsRemoval(now: now + 2)
+            await drainTasks()
+            model.motion.connectionState = .connected
+            model.checkAirPodsRemoval(now: now + 2.1); await drainTasks()
+            check(model.presence.isRunning, "A reconnect callback waits for actual fresh motion before cleanup")
+            model.motion.isFresh = true; model.motion.removalStateOverride = .connected
+            model.checkAirPodsRemoval(now: now + 2.2); await drainTasks()
+            check(!model.presence.isRunning && model.cameraHeading.sessionActive && model.displaySleep.requests == 0,
+                  "Fresh transport return stops presence before permitting a heading check")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            useCamera(model); acceptSeat(model, now: now); model.sleepDisplaysOnRemoval = true
+            model.motion.hasIndividualWearState = false
+            model.motion.removalStateOverride = .connected; model.motion.removalCountOverride = 0
+            model.checkAirPodsRemoval(now: now)
+            model.motion.connectionState = .disconnected; model.motion.isFresh = false
+            model.motion.removalStateOverride = .unknown; model.motion.disconnectEventCount = 1
+            model.checkAirPodsRemoval(now: now + 0.1); model.checkAirPodsRemoval(now: now + 2)
+            await drainTasks()
+            model.presence.holdStop = true
+            model.motion.connectionState = .connected; model.motion.isFresh = true
+            model.motion.removalStateOverride = .connected
+            model.checkAirPodsRemoval(now: now + 2.1); await drainTasks()
+            model.motion.connectionState = .disconnected; model.motion.isFresh = false
+            model.motion.removalStateOverride = .unknown; model.motion.disconnectEventCount = 2
+            model.checkAirPodsRemoval(now: now + 2.2); await drainTasks()
+            model.presence.releaseStop(); await drainTasks()
+            model.checkAirPodsRemoval(now: now + 3)
+            model.checkAirPodsRemoval(now: now + 4)
+            check(model.connectionPresenceCheckCount == 1,
+                  "A second connection event waits for cleanup and receives its own full debounce")
+            model.checkAirPodsRemoval(now: now + 5); await drainTasks()
+            check(model.connectionPresenceCheckCount == 2 && model.presence.isRunning &&
+                  model.displaySleep.requests == 0 && model.dimming.brightnessWrites == 0,
+                  "Fresh transport return witnessed during cleanup preserves arming for the next connection check")
+            model.shutdown()
         }
         print("PASS: \(checks) real AppModel and removal-coordinator lifecycle assertions; camera, motion, brightness, capture, display sleep, permissions, and preferences stubbed")
     }

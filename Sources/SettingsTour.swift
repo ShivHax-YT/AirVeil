@@ -3,7 +3,7 @@ import Combine
 
 /// Stable identifiers also serve as scroll destinations and spotlight anchors.
 enum SettingsTourStep: String, CaseIterable, Identifiable {
-    case welcome, preview, tracking, access, camera, displays, input, removal
+    case welcome, preview, tracking, access, camera, displays, input, removal, seated
     case energy, coverage, onset, full, appearance, tuning, ready
     var id: String { rawValue }
     var title: String {
@@ -16,6 +16,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .displays: return "Choose your displays"
         case .input: return "Keep covered areas protected"
         case .removal: return "When an AirPod comes out"
+        case .seated: return "Dim while you stay seated"
         case .energy: return "Choose how AirVeil uses energy"
         case .coverage: return "Choose how the screen fades"
         case .onset: return "Pick when blur begins"
@@ -27,21 +28,22 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
     }
     var detail: String {
         switch self {
-        case .welcome: return "AirVeil uses AirPods head motion to cover your screen as you turn away. This quick tour shows you the controls. You can replay it here anytime."
-        case .preview: return "Simulate a head turn to explore the effect without screen access. Move the slider left or right; Center resets the preview. Your desktop stays clear until you enable blur."
-        case .tracking: return "Wear compatible AirPods, look straight at your display, and choose Set center. Manual tracking needs a new center after an interruption. The angle shows your head's turn from center."
+        case .welcome: return "AirVeil follows your AirPods to cover your screen as you turn away. Try the highlighted controls as you go, or scroll to explore. You can replay this tour anytime."
+        case .preview: return "Drag the highlighted slider to simulate a head turn. Center resets it. This tour preview works even while live blur is on, and changes only the example image."
+        case .tracking: return "Wear compatible AirPods and choose Start head tracking if shown. Once motion is detected, face your display and choose Set center. Manual tracking needs a new center after an interruption."
         case .access: return "Screen Recording access lets AirVeil blur your actual desktop. Screen frames stay on this Mac. The preview and AirPod removal features work without this permission."
-        case .camera: return "Optional camera assistance checks your screen direction and can restore it after confirmed reinsertion. Refresh direction starts a check; Stop check cancels it. Face light turns on when repeated camera frames confirm it is needed. Images stay local and are discarded."
+        case .camera: return "Camera assistance checks screen direction after a confirmed AirPod return or reconnection. Enable it here, then set your center while facing the display. Use Refresh direction if a check fails. Images stay on your Mac and are discarded."
         case .displays: return "Select the screens AirVeil should cover. Check displays refreshes the list after connecting a monitor. Only selected displays receive the effect."
-        case .input: return "Block clicks and scrolling in the blurred area, or across the entire affected display. AirVeil controls and the menu bar stay available so you can pause."
-        case .removal: return "Optional removal control needs confirmed in-ear status and Automatic Ear Detection. Seated dimming uses the camera: 0% goes black without locking; reinsertion restores brightness. If your seat cannot be confirmed, displays turn off. Lock Screen settings controls the wake password."
+        case .input: return "Block clicks and scrolling in the blurred area, or across the entire affected display. The menu bar and notch controls stay available so you can pause."
+        case .removal: return "Turn on automatic display management and keep Automatic Ear Detection on. Confirmed removal of either AirPod supports dimming. When in-ear status is unavailable, camera checks after connection changes turn displays off only if you have left."
+        case .seated: return "Choose your seated brightness; 0% goes black without locking. Dimming needs confirmed in-ear status, camera assistance, and a saved seat. A confirmed return restores brightness. Connection-only checks leave seated brightness unchanged."
         case .energy: return "Automatic reduces desktop refresh in Low Power Mode or when your Mac is running hot. Smoothest keeps the usual refresh; Reduced energy always refreshes less often. Head tracking, camera checks, and removal behavior keep their normal timing."
-        case .coverage: return "Directional half covers one side as you turn. Whole-screen sweep spreads the effect across the screen. You can compare both in the preview after this tour."
+        case .coverage: return "Directional half covers one side as you turn. Whole-screen sweep spreads the effect across the screen. Choose either option here; scroll up to compare them in the preview."
         case .onset: return "Set separate left and right angles with the dial. A smaller angle begins blur sooner; a larger angle gives you more room to move before it starts."
         case .full: return "Fully obscured sets the angle where the effect reaches maximum coverage. Keep it beyond the starting angles for a gradual transition."
-        case .appearance: return "Opaque cover replaces blur with a solid cover. Invert direction swaps which side responds to a head turn. Use the preview to choose the behavior that feels right."
-        case .tuning: return "Blur strength changes how much detail disappears. Soft edge controls the fade boundary. Response sets smoothing time: lower feels quicker, higher feels gentler. Reset defaults pauses the effect and restores its settings."
-        case .ready: return "Set center, allow screen access if you want live blur, then choose Enable blur. Pause & clear screen is always in the menu bar. Control–Option–Command–P pauses when the shortcut is available."
+        case .appearance: return "Opaque cover replaces blur with a solid cover. Invert direction swaps which side responds to a head turn. Try either switch, then scroll up to see the result in the preview."
+        case .tuning: return "Blur strength changes how much detail disappears. Soft edge controls the fade boundary. Response sets smoothing time: lower feels quicker, higher feels gentler. Try the sliders to find your preferred feel."
+        case .ready: return "Wear your AirPods, set your center, and allow screen access before choosing Enable blur. Pause & clear screen stays available in the menu bar. You can return to these settings anytime."
         }
     }
     var symbol: String {
@@ -52,7 +54,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .access, .displays: return "display"
         case .camera: return "camera"
         case .input: return "cursorarrow"
-        case .removal: return "airpodspro"
+        case .removal, .seated: return "airpodspro"
         case .energy: return "leaf"
         case .coverage, .appearance: return "circle.lefthalf.filled"
         case .tuning: return "slider.horizontal.3"
@@ -106,7 +108,6 @@ extension View {
 /// A true cutout leaves the original control visible, with no duplicate controls.
 struct TourSpotlight: View {
     let rect: CGRect?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         GeometryReader { geometry in
             let bounds = CGRect(origin: .zero, size: geometry.size)
@@ -114,11 +115,11 @@ struct TourSpotlight: View {
             Path { path in
                 path.addRect(bounds)
                 if !hole.isNull { path.addRoundedRect(in: hole, cornerSize: CGSize(width: 16, height: 16)) }
-            }.fill(.black.opacity(0.56), style: FillStyle(eoFill: true))
+            }.fill(.black.opacity(0.48), style: FillStyle(eoFill: true))
             if !hole.isNull {
                 RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(.white.opacity(0.95), lineWidth: 2)
-                    .shadow(color: .blue.opacity(0.3), radius: 12)
+                    .strokeBorder(.white.opacity(0.85), lineWidth: 1.5)
+                    .shadow(color: .black.opacity(0.12), radius: 8)
                     .frame(width: hole.width, height: hole.height)
                     .position(x: hole.midX, y: hole.midY)
             }
@@ -135,42 +136,50 @@ struct SettingsTourCard: View {
     @State private var appeared = false
     var body: some View {
         if let step = tour.step {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    Image(systemName: step.symbol).font(.system(size: 22, weight: .medium))
+                    Image(systemName: step.symbol).font(.system(size: 20, weight: .medium))
                         .foregroundStyle(Color.accentColor)
                         .frame(width: 44, height: 44)
                         .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("QUICK TOUR · \(tour.index + 1) OF \(SettingsTourStep.allCases.count)")
-                            .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                        Text(step.title).font(.system(size: 21, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Quick tour · \(tour.index + 1) of \(SettingsTourStep.allCases.count)")
+                            .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                        Text(step.title).font(.system(size: 20, weight: .semibold))
                             .accessibilityAddTraits(.isHeader).accessibilityFocused($titleFocused)
                     }
                     Spacer()
-                    Button("Skip tour") { tour.finish() }.buttonStyle(.plain)
-                        .frame(minWidth: 64, minHeight: 44)
+                    Button(action: { tour.finish() }) {
+                        Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }.buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help("Close tour").accessibilityLabel("Close tour")
+                        .accessibilityIdentifier("tour-close")
                 }
                 Text(step.detail).font(.system(size: 13)).lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Back") { tour.back() }.disabled(tour.index == 0)
-                        .frame(minWidth: 64, minHeight: 44)
+                HStack(spacing: 16) {
+                    ProgressView(value: Double(tour.index + 1), total: Double(SettingsTourStep.allCases.count))
+                        .progressViewStyle(.linear).frame(width: 108)
+                        .accessibilityLabel("Tour progress")
                     Spacer()
-                    Text("\(Int(Double(tour.index + 1) / Double(SettingsTourStep.allCases.count) * 100))%")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    Button(action: { tour.back() }) {
+                        Text("Back").frame(minWidth: 64, minHeight: 44).contentShape(Rectangle())
+                    }.buttonStyle(.plain).disabled(tour.index == 0)
+                        .accessibilityIdentifier("tour-back")
                     Button(action: { tour.next() }) {
                         Text(step == .ready ? "Get started" : "Continue")
                             .frame(minWidth: 104, minHeight: 32)
                     }.buttonStyle(.borderedProminent).controlSize(.large)
                         .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("tour-next")
                 }
             }
             .padding(20).frame(maxWidth: 680)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(.primary.opacity(0.08)))
             .shadow(color: .black.opacity(0.08), radius: 16, y: 4)
-            .padding(16).frame(maxWidth: .infinity)
+            .padding(.horizontal, 16).padding(.vertical, 12).frame(maxWidth: .infinity)
             .onChange(of: step) { _, _ in titleFocused = true }
             .opacity(appeared ? 1 : 0)
             .offset(y: appeared || reduceMotion ? 0 : 14)

@@ -55,8 +55,9 @@ import SwiftUI
         }
         check(panel.styleMask.contains(.nonactivatingPanel) && !panel.canBecomeKey && !panel.canBecomeMain,
               "The notch cannot take keyboard focus")
-        check(panel.level == .statusBar && panel.collectionBehavior.contains(.fullScreenAuxiliary),
-              "Panel supports fullscreen auxiliary presentation")
+        check(!panel.canHide, "Hiding Settings does not hide an active camera check")
+        check(panel.level.rawValue > NSWindow.Level.statusBar.rawValue && panel.collectionBehavior.contains(.fullScreenAuxiliary),
+              "Coach stays above ordinary windows, desktop coverage, and face light in fullscreen spaces")
         check(panel.frame.midX >= screen.frame.minX && panel.frame.midX <= screen.frame.maxX,
               "Panel targets the notched screen even with an external main display")
         if screen.safeAreaInsets.top > 0 {
@@ -119,6 +120,8 @@ import SwiftUI
         check(!controller.presentation.expanded && model.cameraHeading.coach.phase == .idle, "Cancel stops the task and dismisses coach")
         model.cameraHeading.coach = .init(phase: .success, title: "Center confirmed", detail: "", progress: 1)
         await drain()
+        check(panel.isVisible && panel.level.rawValue > NSWindow.Level.statusBar.rawValue && !panel.isKeyWindow,
+              "The completed check keeps the same elevated, nonactivating panel as camera guidance")
         model.cameraHeading.coach = .init()
         await drain()
         check(!controller.presentation.expanded && controller.presentation.snapshot.phase == .success,

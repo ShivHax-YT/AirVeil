@@ -13,7 +13,9 @@ import SwiftUI
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
         let model = AppModel()
-        for compact in [false, true] {
+        // Render the first-launch tracking action without starting sensors.
+        model.startupTourActive = true
+        for compact in [true, false] {
             for dark in [false, true] {
                 let size = CGSize(width: compact ? 740 : 800, height: compact ? 660 : 850)
                 let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!

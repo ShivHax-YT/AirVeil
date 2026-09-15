@@ -63,6 +63,8 @@ enum RemovalPresencePhase: String, Equatable {
     private var target = 0.0
     private var requestedTarget: Double?
     private var dimError: String?
+    private var allowsDimming = true
+    private var allowsUncertainSleep = true
 
     convenience init(prepareCamera: @escaping @MainActor () async -> Void,
                      requestDisplaySleep: @escaping @MainActor () async throws -> Void) {
@@ -83,19 +85,23 @@ enum RemovalPresencePhase: String, Equatable {
     /// requires fresh presence before it may put a manually woken display back
     /// to sleep. No reference means no invented foreground seat.
     func begin(reference: PresenceSeatReference?, targetBrightness: Double = 0,
-               now: Double, allowSleepBeforePresence: Bool = true) {
+               now: Double, allowSleepBeforePresence: Bool = true,
+               allowDimming: Bool = true, allowUncertainSleep: Bool = true) {
         guard !inactive else { status = "Presence checks are paused while the session is inactive."; return }
         guard now.isFinite, now >= 0 else { cancel(); status = "Presence timing is unavailable."; return }
         let ticket = invalidate()
         target = normalizedTarget(targetBrightness)
+        allowsDimming = allowDimming; allowsUncertainSleep = allowUncertainSleep
         lastTime = now; unknownSince = now
         sleepConsumed = false; departureArmed = allowSleepBeforePresence
         presenceStarted = false; requestedTarget = nil; dimError = nil
         isActive = true; isBusy = true; phase = .preparing
         status = "Preparing a local foreground-seat check."
         guard let reference, PresenceTracker.isReferenceUsable(reference, now: now) else {
-            if departureArmed { sleepOnce(reason: "No usable seat reference is available. Using the existing display-sleep action.") }
-            else { finishWithoutSleep(reason: "Wear your AirPods before another automatic removal action.") }
+            if departureArmed && allowsUncertainSleep { sleepOnce(reason: "No usable seat reference is available. Using the existing display-sleep action.") }
+            else { finishWithoutSleep(reason: allowsUncertainSleep
+                ? "Wear your AirPods before another automatic removal action."
+                : "No current seat reference is available. Set center before automatic connection checks.") }
             return
         }
         let cleanup = startCleanup(ticket: ticket, suspend: false)
@@ -129,6 +135,10 @@ enum RemovalPresencePhase: String, Equatable {
         let state: PresenceState = presenceStarted ? presence.state : .unknown
         switch state {
         case .present:
+            guard allowsDimming else {
+                finishWithoutSleep(reason: "You are still seated. The AirPods connection changed; brightness stays unchanged.")
+                return
+            }
             departureArmed = true; unknownSince = nil
             phase = .present
             status = dimError ?? (dimmer.isDimmed ? "You are still seated. The display stays dimmed." : "You are still seated. Dimming the built-in display.")
@@ -143,7 +153,8 @@ enum RemovalPresencePhase: String, Equatable {
                 if presenceStarted { status = presence.status }
             }
             guard let unknownSince, now - unknownSince >= unknownGrace else { return }
-            if departureArmed { sleepOnce(reason: "Presence could not be confirmed within the grace period. Using the existing display-sleep action.") }
+            if departureArmed && allowsUncertainSleep { sleepOnce(reason: "Presence could not be confirmed within the grace period. Using the existing display-sleep action.") }
+            else if !allowsUncertainSleep { finishWithoutSleep(reason: "Presence could not be confirmed. The connection check ended without changing the display.") }
             else { finishWithoutSleep(reason: "Presence remains uncertain. Automatic removal sleep stays paused after manual wake.") }
         }
     }
@@ -153,7 +164,7 @@ enum RemovalPresencePhase: String, Equatable {
         let next = normalizedTarget(brightness)
         guard next != target else { return }
         target = next
-        if isActive, !inactive, !sleepConsumed, requestedTarget != nil { requestDim(next) }
+        if allowsDimming, isActive, !inactive, !sleepConsumed, requestedTarget != nil { requestDim(next) }
     }
 
     /// Invalidates work synchronously; cleanup may need to await a camera or

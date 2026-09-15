@@ -81,6 +81,7 @@ private final class VeilPointerBlockerPanel: NSPanel {
         hasShadow = false
         ignoresMouseEvents = false
         hidesOnDeactivate = false
+        canHide = false
         isMovable = false
         level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .canJoinAllApplications]
@@ -133,6 +134,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     @Published private(set) var captureEnergyStatus: String?
     @Published private(set) var availableDisplays: [VeilDisplayInfo] = []
     @Published private(set) var blockedPointerEventCount: UInt64 = 0
+    private(set) var settingsCaptureStatus = "Desktop capture paused"
     var activeDisplayCount: Int { isRunning ? sessions.count : 0 }
     var drawSubmissionCount: UInt64 { sessions.reduce(0) { $0 + $1.view.drawSubmissionCount } }
     var sourceBlitCount: UInt64 { sessions.reduce(0) { $0 + $1.view.sourceBlitCount } }
@@ -146,6 +148,8 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
         let menuBand: CGFloat
         var sink: DisplayCaptureSink?
         var stream: SCStream?
+        var display: SCDisplay?
+        var settingsWindowID: CGWindowID?
         var cadence: CaptureCadenceController?
         var ready = false
         init(screen: NSScreen) {
@@ -159,6 +163,7 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             window.hasShadow = false
             window.ignoresMouseEvents = true
             window.hidesOnDeactivate = false
+            window.canHide = false
             window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary, .canJoinAllApplications]
             window.contentView = view
             view.autoresizingMask = [.width, .height]
@@ -221,12 +226,66 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     private var captureFramesPerSecond = 60
     private var displayObserver: NSObjectProtocol?
     private var selectedDisplayIDs: Set<UInt32>?
+    private weak var settingsWindow: NSWindow?
+    private var settingsCaptureUpdate: Task<Void, Never>?
     private var effect: (left: Double, right: Double, blur: Double, feather: Double, opaque: Bool, shield: Bool, wholeScreen: Bool, blockInput: Bool, blocksEntireDisplay: Bool) = (0, 0, 32, 0.12, false, false, false, false, false)
 
     init() {
         refreshDisplays()
         displayObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.displaysChanged() }
+        }
+    }
+
+    func registerSettingsWindow(_ window: NSWindow) {
+        settingsWindow = window
+    }
+
+    private func settingsCaptureWindows(in content: SCShareableContent) -> [SCWindow] {
+        guard let window = settingsWindow, window.windowNumber > 0 else { return [] }
+        let number = CGWindowID(window.windowNumber)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        return content.windows.filter { $0.windowID == number && $0.owningApplication?.processID == pid }
+    }
+
+    /// A window not yet ordered on screen may be absent from ScreenCaptureKit's
+    /// initial inventory. Include it on first show without ever capturing the
+    /// app's dynamically created veil, notch, or illumination surfaces.
+    func settingsWindowDidBecomeVisible() {
+        guard isRunning, settingsCaptureUpdate == nil else { return }
+        if let number = settingsWindow?.windowNumber, number > 0,
+           sessions.allSatisfy({ $0.settingsWindowID == CGWindowID(number) }) { return }
+        let run = generation
+        settingsCaptureUpdate = Task { [weak self] in
+            guard let self else { return }
+            defer { if run == generation { settingsCaptureUpdate = nil } }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                guard run == generation, !Task.isCancelled else { return }
+                guard let ownApp = content.applications.first(where: { $0.processID == ProcessInfo.processInfo.processIdentifier }) else {
+                    settingsCaptureStatus = "Settings inclusion unavailable: application missing"
+                    return
+                }
+                let included = settingsCaptureWindows(in: content)
+                guard let windowID = included.first?.windowID else {
+                    settingsCaptureStatus = "Settings inclusion unavailable: window missing"
+                    return
+                }
+                for session in sessions where session.settingsWindowID != windowID {
+                    guard let display = session.display, let stream = session.stream else { continue }
+                    let filter = SCContentFilter(display: display, excludingApplications: [ownApp], exceptingWindows: included)
+                    if #available(macOS 14.2, *) { filter.includeMenuBar = true }
+                    try await stream.updateContentFilter(filter)
+                    guard run == generation, !Task.isCancelled else { return }
+                    session.settingsWindowID = windowID
+                }
+                settingsCaptureStatus = "Settings included; animation and veil windows excluded"
+            } catch {
+                guard run == generation, !Task.isCancelled else { return }
+                // The existing exclusion filter stays in force if an update
+                // fails, so recursive capture cannot be introduced by a retry.
+                settingsCaptureStatus = "Settings inclusion failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -275,13 +334,17 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             guard let ownApp = content.applications.first(where: { $0.processID == ProcessInfo.processInfo.processIdentifier }) else {
                 throw VeilRenderError.unavailable("AirVeil could not identify its own windows for capture exclusion. Keep Settings open and try again.")
             }
+            let includedSettings = settingsCaptureWindows(in: content)
             for (screen, session) in zip(screens, fresh) {
                 try validateStartup(generation: run, initialDisplays: initialDisplays)
                 guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
                       let display = content.displays.first(where: { $0.displayID == number.uint32Value }) else {
                     throw VeilRenderError.unavailable("An active display could not be matched to screen capture.")
                 }
-                let filter = SCContentFilter(display: display, excludingApplications: [ownApp], exceptingWindows: [])
+                // Settings is an ordinary desktop window. Excluding the whole
+                // app without this exception would show the app behind it in
+                // blurred regions. Every overlay remains excluded by default.
+                let filter = SCContentFilter(display: display, excludingApplications: [ownApp], exceptingWindows: includedSettings)
                 if #available(macOS 14.2, *) { filter.includeMenuBar = true }
                 let scale = Double(filter.pointPixelScale)
                 guard scale.isFinite, scale > 0, filter.contentRect.width > 0, filter.contentRect.height > 0 else {
@@ -295,7 +358,8 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
                 let sink = DisplayCaptureSink(mailbox: session.mailbox)
                 sink.onFailure = { [weak self] reason in Task { @MainActor [weak self] in self?.captureFailed(reason, generation: run) } }
                 let stream = SCStream(filter: filter, configuration: config, delegate: sink)
-                session.sink = sink; session.stream = stream
+                session.sink = sink; session.stream = stream; session.display = display
+                session.settingsWindowID = includedSettings.first?.windowID
                 session.view.onRenderFailure = { [weak self] reason in self?.captureFailed("Renderer failed: \(reason)", generation: run) }
                 session.view.onFirstFrame = { [weak self, weak session] in
                     guard let self, self.generation == run, !self.failed else { return }
@@ -323,10 +387,12 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
             try validateStartup(generation: run, initialDisplays: initialDisplays)
             displayConfiguration.begin(initialDisplays)
             isRunning = true
+            settingsCaptureStatus = includedSettings.isEmpty ? "Settings will be included when shown" : "Settings included; animation and veil windows excluded"
             status = "Waiting for first desktop frames…"
             applyEffect()
             for session in fresh { session.window.orderFrontRegardless() }
             updateBlockers()
+            if settingsWindow?.isVisible == true { settingsWindowDidBecomeVisible() }
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, self.generation == run, !self.isReady else { return }
@@ -342,10 +408,12 @@ private final class DisplayCaptureSink: NSObject, SCStreamOutput, SCStreamDelega
     func stop() {
         displayConfiguration.stop()
         generation &+= 1
+        settingsCaptureUpdate?.cancel(); settingsCaptureUpdate = nil
         let old = sessions
         sessions.removeAll()
         isRunning = false; isReady = false; failed = false; failureReason = nil
         status = "Desktop effect paused"
+        settingsCaptureStatus = "Desktop capture paused"
         captureEnergyStatus = nil
         for session in old {
             session.cadence?.stop()

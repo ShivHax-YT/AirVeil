@@ -43,6 +43,7 @@ final class MotionService: NSObject, ObservableObject {
     @Published private(set) var removalEventCount: UInt64 = 0
     @Published private(set) var wearStatus = "Waiting for confirmed in-ear status."
     @Published private(set) var wearDiagnosticStatus = "Individual-AirPod metadata has not been queried."
+    var hasIndividualWearState: Bool { wearEvidence.hasCurrentMetadata && wearEvidence.wornMask != nil }
     var monitorsIndividualAirPods = false {
         didSet {
             guard oldValue != monitorsIndividualAirPods else { return }
@@ -378,8 +379,17 @@ final class MotionService: NSObject, ObservableObject {
         let receipt = now()
         guard receipt >= nextWearPoll else { return }
         nextWearPoll = receipt + 0.25
-        _ = wearEvidence.update(manager?.readWearState(now: receipt),
-            freshMotion: isFresh && connectionState == .connected, now: receipt)
+        let transition = wearEvidence.update(manager?.readWearState(now: receipt),
+            freshMotion: isFresh && connectionState == .connected &&
+                VeilMath.isRecent(receipt: lastReceipt, now: receipt, timeout: staleAfter), now: receipt)
+        if transition != .unchanged {
+            // A nonstreaming bud can leave or return while its partner keeps
+            // the same live source. That continuity does not verify the old
+            // wearing geometry or screen alignment.
+            invalidateCalibration(transition == .removed
+                ? "AirPod removal confirmed. Screen direction must be checked on return."
+                : "AirPods returned. Use Set center or camera assistance to check screen direction.")
+        }
         let diagnostic = manager?.readWearDiagnosticStatus() ?? "Headphone transport is unavailable."
         if wearDiagnosticStatus != diagnostic { wearDiagnosticStatus = diagnostic }
         synchronizeRemovalEvidence()
