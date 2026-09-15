@@ -24,9 +24,56 @@ enum BlurDialGeometry {
         guard x.isFinite, y.isFinite, x > 0 else { return 0 }
         return bounded(atan2(x, max(0, y)) / sweep * maximum)
     }
-    static func headRotation(side: BlurTurnSide, threshold: Double, liveYaw: Double?, syncing: Bool) -> Double {
-        if syncing, let liveYaw, liveYaw.isFinite { return -min(maximum, max(-maximum, liveYaw)) }
-        return syncing ? 0 : side.screenSign * bounded(threshold)
+}
+
+/// A live reading is a separate presentation mode, never an onset-setting write.
+enum BlurDialFeedback: Equatable {
+    case editing(side: BlurTurnSide, threshold: Double)
+    case waiting
+    case live(yaw: Double)
+
+    init(side: BlurTurnSide, threshold: Double, liveYaw: Double?, syncing: Bool) {
+        if !syncing { self = .editing(side: side, threshold: BlurDialGeometry.bounded(threshold)) }
+        else if let liveYaw, liveYaw.isFinite { self = .live(yaw: liveYaw) }
+        else { self = .waiting }
+    }
+    var allowsEditing: Bool { if case .editing = self { return true }; return false }
+    var showsMarker: Bool { self != .waiting }
+    /// Positive yaw is a physical left turn. Only the artwork is limited by the arc.
+    var arcYaw: Double {
+        switch self {
+        case .editing(let side, let threshold): return side.headingSign * threshold
+        case .waiting: return 0
+        case .live(let yaw): return min(BlurDialGeometry.maximum, max(-BlurDialGeometry.maximum, yaw))
+        }
+    }
+    var angleText: String {
+        switch self {
+        case .editing(_, let threshold): return String(format: "%.0f°", threshold)
+        case .waiting: return "—"
+        case .live(let yaw): return yaw.rounded() == 0 ? "0°" : String(format: "%+.0f°", yaw)
+        }
+    }
+    var caption: String {
+        switch self {
+        case .editing(let side, _): return "\(side.rawValue) turn starts blur"
+        case .waiting: return "Waiting for head tracking"
+        case .live(let yaw): return yaw.rounded() == 0 ? "Facing forward" : (yaw > 0 ? "Left head turn" : "Right head turn")
+        }
+    }
+    var isAtArcLimit: Bool { if case .live(let yaw) = self { return abs(yaw) > BlurDialGeometry.maximum }; return false }
+    var accessibilityValue: String {
+        switch self {
+        case .editing(_, let threshold): return String(format: "%.0f degrees", threshold)
+        case .waiting: return "Waiting for a valid head angle"
+        case .live(let yaw):
+            let angle = yaw.rounded() == 0 ? "0" : String(format: "%.0f", abs(yaw))
+            let direction = yaw.rounded() == 0 ? "straight ahead" : (yaw > 0 ? "left" : "right")
+            return "\(angle) degrees, \(direction)" + (isAtArcLimit ? ". Marker at the 60-degree arc limit" : "")
+        }
+    }
+    func acceptedEdit(_ proposed: Double) -> Double? {
+        allowsEditing ? BlurDialGeometry.bounded(proposed) : nil
     }
 }
 
@@ -48,55 +95,60 @@ struct BlurOnsetDial: View {
         self.compact = compact; self.toggleSync = toggleSync
     }
     private var selection: Binding<Double> { side == .left ? $left : $right }
+    private var feedback: BlurDialFeedback {
+        BlurDialFeedback(side: side, threshold: selection.wrappedValue, liveYaw: liveYaw, syncing: syncRequested)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Start blur when turning").font(.headline)
-                    Text("Choose a separate starting angle for each side.")
+                    Text(syncRequested ? "Follow your head" : "Start blur when turning").font(.headline)
+                    Text(syncRequested ? "Live angle from your AirPods." : "Choose a separate starting angle for each side.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Picker("Head turn", selection: $side) {
                     ForEach(BlurTurnSide.allCases) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().frame(width: 160)
+                    .disabled(syncRequested)
+                    .help(syncRequested ? "Stop sync to choose and edit a starting angle." : "Choose the starting angle to edit.")
             }
             HStack(spacing: compact ? 20 : 28) {
-                OnsetArc(side: side, value: selection,
-                         headRotation: BlurDialGeometry.headRotation(side: side, threshold: selection.wrappedValue,
-                                                                     liveYaw: liveYaw, syncing: syncRequested)).id(side)
+                OnsetArc(side: side, value: selection, feedback: feedback)
                     .frame(width: 300, height: 176)
                     .scaleEffect(compact ? 0.84 : 1)
                     .frame(width: compact ? 252 : 300, height: compact ? 148 : 176)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("\(Int(selection.wrappedValue.rounded()))°")
+                    Text(feedback.angleText)
                         .font(.system(size: 42, weight: .medium, design: .rounded).monospacedDigit())
                         .contentTransition(.numericText())
-                    Text("\(side.rawValue) turn starts blur")
+                        .accessibilityIdentifier("onset-angle-readout")
+                    Text(feedback.caption)
                         .font(.subheadline.weight(.medium))
-                    Text("0° is straight ahead. Drag along the arc to choose when the opposite side begins to blur.")
+                    Text(syncRequested
+                         ? "Stop sync to adjust when blur starts."
+                         : "0° is straight ahead. Drag along the arc to choose when the opposite side begins to blur.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if feedback.isAtArcLimit {
+                        Text("Marker at arc limit · 60°")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                     HStack(spacing: 10) {
+                        if syncRequested { Text("Blur starts") }
                         Label("Left \(Int(left.rounded()))°", systemImage: "arrow.turn.up.left")
                         Label("Right \(Int(right.rounded()))°", systemImage: "arrow.turn.up.right")
                     }.font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    if let liveYaw, liveYaw.isFinite {
-                        Text(String(format: "Live head · %+.0f°", liveYaw))
-                            .font(.caption.weight(.medium).monospacedDigit())
-                            .accessibilityLabel(String(format: "Live head angle, %+.0f degrees", liveYaw))
-                    }
-                    Text(syncStatus).font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(syncStatus).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 4)
                 Button(syncRequested ? "Stop sync" : "Sync head") { toggleSync?() }
                     .controlSize(.large).frame(minHeight: 44).disabled(toggleSync == nil)
                     .accessibilityIdentifier("onset-head-sync")
-                    .accessibilityHint("Uses a camera alignment before following your AirPods. Starting angles stay unchanged.")
+                    .accessibilityHint(syncRequested ? "Stops live feedback and returns to editing starting angles."
+                                       : "Uses a camera alignment before following your AirPods. Starting angles stay unchanged.")
             }
         }
     }
@@ -105,11 +157,51 @@ struct BlurOnsetDial: View {
 private struct OnsetArc: View {
     let side: BlurTurnSide
     @Binding var value: Double
-    let headRotation: Double
+    let feedback: BlurDialFeedback
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let center = CGPoint(x: 150, y: 10)
+    var body: some View {
+        if feedback.allowsEditing {
+            artwork
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                    if let edit = feedback.acceptedEdit(BlurDialGeometry.value(at: drag.location, side: side, center: center).rounded()) {
+                        value = edit
+                    }
+                })
+                .accessibilityLabel("\(side.rawValue) turn blur starting angle")
+                .accessibilityHint("Adjust between zero and sixty degrees. Zero is straight ahead.")
+                .accessibilityAdjustableAction { direction in
+                    if let edit = feedback.acceptedEdit(value + (direction == .increment ? 1 : -1)) { value = edit }
+                }
+        } else {
+            artwork
+                .accessibilityLabel("Live head angle")
+                .accessibilityHint("Read-only while syncing. Stop sync to edit starting angles.")
+        }
+    }
+    private var artwork: some View {
+        OnsetArcArtwork(yaw: feedback.arcYaw, showsMarker: feedback.showsMarker,
+                        editingSide: feedback.allowsEditing ? side : nil)
+            .animation(reduceMotion ? nil : .linear(duration: 0.1), value: feedback.arcYaw)
+            .accessibilityElement(children: .ignore)
+            .accessibilityValue(feedback.accessibilityValue)
+            .accessibilityIdentifier("onset-angle-arc")
+    }
+}
+
+/// Interpolate a signed angle so the marker follows the curved track through
+/// center instead of jumping sides or cutting across the arc in a straight line.
+private struct OnsetArcArtwork: View, Animatable {
+    var yaw: Double
+    let showsMarker: Bool
+    let editingSide: BlurTurnSide?
+    var animatableData: Double { get { yaw } set { yaw = newValue } }
     private let accent = Color.green
     private let center = CGPoint(x: 150, y: 10)
     private let radius = 135.0
+    private var side: BlurTurnSide { yaw == 0 ? (editingSide ?? .left) : (yaw > 0 ? .left : .right) }
+    private var value: Double { abs(yaw) }
     var body: some View {
         ZStack(alignment: .topLeading) {
             Canvas { context, _ in
@@ -119,15 +211,16 @@ private struct OnsetArc: View {
                         let p = BlurDialGeometry.point(value: Double(degree), side: direction, center: center, radius: radius)
                         if degree == 0 { arc.move(to: p) } else { arc.addLine(to: p) }
                     }
-                    context.stroke(arc, with: .color(.primary.opacity(direction == side ? 0.16 : 0.07)),
+                    let sideVisible = editingSide == nil || direction == editingSide
+                    context.stroke(arc, with: .color(.primary.opacity(sideVisible ? 0.16 : 0.07)),
                                    style: StrokeStyle(lineWidth: 3, lineCap: .round))
                     for degree in stride(from: 0, through: 60, by: 5) {
                         let major = degree % 15 == 0
                         var tick = Path()
                         tick.move(to: BlurDialGeometry.point(value: Double(degree), side: direction, center: center, radius: radius - (major ? 7 : 4)))
                         tick.addLine(to: BlurDialGeometry.point(value: Double(degree), side: direction, center: center, radius: radius + (major ? 7 : 4)))
-                        let active = direction == side && Double(degree) <= value
-                        context.stroke(tick, with: .color(active ? accent : .primary.opacity(direction == side ? 0.35 : 0.1)),
+                        let active = showsMarker && direction == side && Double(degree) <= value
+                        context.stroke(tick, with: .color(active ? accent : .primary.opacity(sideVisible ? 0.35 : 0.1)),
                                        style: StrokeStyle(lineWidth: major ? 2 : 1.5, lineCap: .round))
                     }
                 }
@@ -137,32 +230,23 @@ private struct OnsetArc: View {
                     let p = BlurDialGeometry.point(value: end * Double(step) / 120, side: side, center: center, radius: radius)
                     if step == 0 { filled.move(to: p) } else { filled.addLine(to: p) }
                 }
-                context.stroke(filled, with: .color(accent), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                if showsMarker { context.stroke(filled, with: .color(accent), style: StrokeStyle(lineWidth: 3, lineCap: .round)) }
             }
             IllustrativeHead()
                 .stroke(.primary.opacity(0.8), style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round))
                 .frame(width: 58, height: 74)
-                .rotation3DEffect(.degrees(headRotation), axis: (x: 0, y: 1, z: 0), perspective: 0.45)
-                .animation(reduceMotion ? nil : .linear(duration: 0.08), value: headRotation)
+                .rotation3DEffect(.degrees(-yaw), axis: (x: 0, y: 1, z: 0), perspective: 0.45)
+                .opacity(showsMarker ? 1 : 0.25)
                 .position(x: center.x, y: 61)
                 .accessibilityHidden(true)
-            Circle().fill(accent).frame(width: 15, height: 15)
-                .overlay(Circle().stroke(.background, lineWidth: 3))
-                .shadow(color: accent.opacity(0.25), radius: 5, y: 1)
-                .position(BlurDialGeometry.point(value: value, side: side, center: center, radius: radius))
+            if showsMarker {
+                Circle().fill(accent).frame(width: 15, height: 15)
+                    .overlay(Circle().stroke(.background, lineWidth: 3))
+                    .shadow(color: accent.opacity(0.25), radius: 5, y: 1)
+                    .position(BlurDialGeometry.point(value: value, side: side, center: center, radius: radius))
+            }
             Text("0°").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 .position(x: center.x, y: 169)
-        }
-        .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
-            value = BlurDialGeometry.value(at: drag.location, side: side, center: center).rounded()
-        })
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(side.rawValue) turn blur starting angle")
-        .accessibilityValue("\(Int(value.rounded())) degrees")
-        .accessibilityHint("Adjust between zero and sixty degrees. Zero is straight ahead.")
-        .accessibilityAdjustableAction { direction in
-            value = BlurDialGeometry.bounded(value + (direction == .increment ? 1 : -1))
         }
     }
 }

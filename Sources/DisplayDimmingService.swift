@@ -19,6 +19,9 @@ struct DisplayBrightnessRestoreRecord: Codable, Equatable, Sendable {
     var lastApplied: Double
     var pendingTarget: Double?
     let createdAt: TimeInterval
+    /// Set only when an owned dim crosses explicit session suspension. Older
+    /// journals omit this key and retain ordinary awake ownership checks.
+    var requiresWakeRestore: Bool? = nil
 
     var isValid: Bool {
         version == 1 && !displayID.isEmpty && displayID.count <= 512 &&
@@ -80,6 +83,9 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     var hasPendingRestore: Bool { record != nil }
     /// Numeric state for explicitly enabled local diagnostics; no hardware read.
     var restorationSnapshot: DisplayBrightnessRestoreRecord? { record }
+    /// Last trusted pre-write restoration reading, retained after journal cleanup.
+    private(set) var lastRestoreObservedBrightness: Double?
+    private(set) var lastRestorationDecision = "none"
     var keepsDisplayAwake: Bool { assertion != nil }
     var isSuspended: Bool { desired == .suspended }
     static let defaultTargetBrightness = 0.0
@@ -162,6 +168,10 @@ enum DisplayDimmingError: LocalizedError, Equatable {
             manualOverride = false
         } else if next == .suspended {
             releaseAssertion()
+            // Latch before awaiting the serial worker: an already-issued dim
+            // may still be completing when macOS begins its sleep transition.
+            do { try retainOwnershipForWake() }
+            catch { lastError = error.localizedDescription; status = error.localizedDescription }
         } else if case .dimmed(_, false) = next { releaseAssertion() }
         if worker == nil || desired != next {
             revision &+= 1
@@ -211,6 +221,9 @@ enum DisplayDimmingError: LocalizedError, Equatable {
                 case .restored: success = try await restoreOwnedBrightness(ticket: ticket)
                 case .suspended:
                     releaseAssertion()
+                    // Also covers a journal first loaded while launching into
+                    // an inactive session, and retries a failed durable save.
+                    try retainOwnershipForWake()
                     status = record == nil ? "Brightness control is paused while the session is inactive." :
                         "Brightness restoration is waiting for an active session."
                     success = true
@@ -273,6 +286,9 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         else { actual = try await brightness.write(applied, displayID: original.displayID) }
         try validate(actual, matching: original.displayID)
         guard matchesRequestedBrightness(actual.brightness, requested: applied) else { throw DisplayDimmingError.verificationFailed }
+        // Suspension can mark the shared journal while this write is awaited.
+        // A late dim acknowledgement must never erase that durable wake intent.
+        if record?.requiresWakeRestore == true { journal.requiresWakeRestore = true }
         journal.lastApplied = actual.brightness; journal.pendingTarget = nil
         try store.save(journal); record = journal
         isDimmed = true
@@ -290,11 +306,19 @@ enum DisplayDimmingError: LocalizedError, Equatable {
             if lastError == nil { status = "Display brightness is unchanged." }
             return true
         }
+        let wakeRestore = journal.requiresWakeRestore == true
+        lastRestorationDecision = wakeRestore ? "wake-restore-pending" : "restore-pending"
         let current = try await brightness.read(displayID: journal.displayID)
         try validate(current, matching: journal.displayID)
         guard ticket == revision else { return false }
-        guard owns(current.brightness, record: journal) else {
+        lastRestoreObservedBrightness = current.brightness
+        // macOS may change the panel's numeric brightness during wake. That
+        // first awake value cannot establish an intentional manual override of
+        // a dim explicitly retained through suspension. Restore its original
+        // baseline; ordinary uninterrupted-awake episodes still respect edits.
+        guard wakeRestore || owns(current.brightness, record: journal) else {
             try relinquishOwnership()
+            lastRestorationDecision = "manual-override-preserved"
             lastError = nil
             status = "Brightness was adjusted manually. Your setting was kept."
             return true
@@ -302,6 +326,7 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         if abs(current.brightness - journal.baseline) > 0.000001 {
             journal.pendingTarget = journal.baseline
             try store.save(journal); record = journal
+            lastRestorationDecision = wakeRestore ? "wake-restore-writing" : "owned-restore-writing"
             let restored = try await brightness.write(journal.baseline, displayID: journal.displayID)
             try validate(restored, matching: journal.displayID)
             guard matchesRequestedBrightness(restored.brightness, requested: journal.baseline) else { throw DisplayDimmingError.verificationFailed }
@@ -312,9 +337,20 @@ enum DisplayDimmingError: LocalizedError, Equatable {
         // journal so the next activation can safely verify either value again.
         guard ticket == revision else { return false }
         try store.clear(); record = nil
+        lastRestorationDecision = wakeRestore ? "wake-restore-verified" : "owned-restore-verified"
         isDimmed = false; lastError = nil
         status = "Original display brightness restored."
         return true
+    }
+
+    private func retainOwnershipForWake() throws {
+        guard var journal = record else { return }
+        journal.requiresWakeRestore = true
+        // Keep the latch in memory even if persistence fails; the suspended
+        // worker retries the save and reports failure without writing brightness.
+        record = journal
+        lastRestorationDecision = "suspended-awaiting-wake"
+        try store.save(journal)
     }
 
     private func validate(_ reading: DisplayBrightnessReading, matching id: String? = nil) throws {

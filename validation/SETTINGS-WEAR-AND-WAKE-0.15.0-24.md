@@ -1,16 +1,16 @@
-# Settings, wear prompt, and wake recovery — builds 24–25
+# Settings, wear prompt, and wake recovery — builds 24–26
 
 ## Scope and status
 
-This records **0.15.0 builds 24–25** on 15 September 2026. The five changes below are implemented. Build 24 passed the full regression suite and focused native UI checks, then was packaged, installed, verified, and launched through LaunchServices. The wearer confirmed that Turn off feature restored brightness and extinguished the green camera light. Build 25's status-wording correction passed its focused coordinator suite and is now installed and verified. Its no-motion Enable waiting state is observed below. Live head direction, automatic enable after alignment, and repeated post-lock brightness recovery remain pending.
+This records **0.15.0 builds 24–25** and the subsequent live-dial refinement on 15 September 2026. Build 24 passed the full regression suite and focused native UI checks, then was packaged, installed, verified, and launched through LaunchServices. The wearer confirmed that Turn off feature restored brightness and extinguished the green camera light. Installed build 25 passed the physical Settings wait/alignment/automatic-blur sequence. The wearer confirmed that Sync head moves the illustration, then requested that its arc marker and large degree readout move with it; that refinement is in progress. Repeated post-lock brightness recovery remains pending.
 
 | Change | Current behavior | Remaining installed or physical acceptance |
 |---|---|---|
 | Restore brightness after departure and lock | Brightness reads reject an asleep display. A restore interrupted by another lock/sleep retains the original journal until awake recovery verifies it. Cleanup must finish before heading recovery. | Repeat both return orders below; confirm the actual panel returns to its original brightness each time. |
 | Organize Settings | Preview, Tracking, Displays, Appearance, and Power use native tabs. Each of the 16 tour steps selects its tab and scrolls to its real control. Enable/Pause remains in the header. | Installed tabs and the first three tour steps were inspected. Remaining acceptance includes the complete live tour and minimum-window interactions. |
-| Sync head | The explicit Appearance action requests camera/AirPods alignment, then displays signed live yaw independently of onset selection and blur inversion. It does not edit onset angles or independently start desktop capture. | Turn physically left/right, check illustration direction and response, verify both thresholds remain unchanged, then stop sync or leave the tab. |
+| Sync head | The explicit Appearance action requests camera/AirPods alignment, then displays signed live yaw independently of onset selection and blur inversion. It does not edit onset angles or independently start desktop capture. | Build 26 is wearer-confirmed: the head, moving arc marker, and large degree readout follow correctly. Stop sync returned to the saved 11°/13° onset controls in the installed UI. |
 | Seated wear prompt and off control | Missing motion during seated monitoring shows animated AirPods Pro artwork and “Wear AirPods to continue blurring.” “Turn off feature” cancels blur and camera work, restores owned brightness, and persists an automatic-check pause. | One live off action is wearer-confirmed for brightness restoration and camera-light shutdown. Animation acceptance, persistence after relaunch, and explicit re-enable remain pending. |
-| Enable while waiting for AirPods | Enable queues a wait without starting the camera. Fresh motion then requests real camera alignment; valid alignment permits blur to start automatically. Failure or cancellation leaves blur off. | Build 25's Settings Enable waiting state is verified with both buds confirmed out and both cameras/capture off. Return, successful alignment, and automatic blur remain pending. |
+| Enable while waiting for AirPods | Enable queues a wait without starting the camera. Fresh motion then requests real camera alignment; valid alignment permits blur to start automatically. Failure or cancellation leaves blur off. | Build 25's full Settings Enable path is wearer-confirmed and agrees with runtime evidence. The notch entry point and interruption variants remain separate acceptance items. |
 
 ## Automated evidence
 
@@ -81,3 +81,31 @@ The wearer confirmed both AirPods were out before **Enable blur** was clicked in
 The wearer then put both AirPods back in, completed the camera check, and reported **“Yes, blur started automatically.”** The retained `build/validation/build25-auto-enable-confirmed.json` agrees: fresh motion and valid tracking, alignment revision 1, live blur and desktop capture running, the wear prompt hidden, and both cameras stopped. Onset preferences remained 11° left and 13° right. The bounded 100-second status collection `build/validation/build25-wait-to-enable.jsonl` also completed. This physical Settings Enable path passes; the notch entry point and interruption variants remain separate acceptance items.
 
 Before Sync head could be opened, computer control reported the Mac locked. The retained `build/validation/build25-unplanned-lock.json` records one display-sleep request, no active cameras/capture, and no pending brightness restoration. The wearer's exact removal/departure sequence was not yet known, so this is not counted as either a post-lock brightness pass or a failure. Later diagnostics showed the seated target at 23%, reflecting a changed preference; the test operator did not change that value.
+
+### Physical head sync and requested dial refinement
+
+The wearer confirmed that the illustrated head moves, then requested that the arc slider and large degree readout follow the live angle too. The bounded `build/validation/build25-head-sync.jsonl` observed yaw from approximately -56.9° to +61.3° with both onset settings fixed at 11° and 13°. A live native screenshot showed the centered head and all surrounding labels in place. This confirms head telemetry and movement, but the static onset marker/readout did not satisfy the expanded user request. Build 26 is reserved for the live dial refinement; it is not installed at this checkpoint. The first controlled return-before-unlock brightness test is now in progress.
+
+### Controlled post-lock failure reproduced
+
+The wearer completed the first return-before-unlock cycle with brightness controls untouched and reported **“It stayed dim.”** The retained `build/validation/build25-return-before-unlock-cycle1.jsonl` establishes the failure path: baseline 0.6252058744430542, applied dim 0.23000000417232513, then an intact journal in the suspended phase. On wake, build 25 cleared that journal with “Brightness was adjusted manually. Your setting was kept.” The original asleep-read and revision guards therefore did not fix the physical failure. Build 26 is being updated to retain dim ownership across explicit suspension and restore that baseline despite a different wake reading, while preserving normal awake manual overrides. No post-lock brightness pass is claimed.
+
+## Build 26 correction checkpoint
+
+The live dial now has separate editing, waiting, and tracking presentations. While synced, signed yaw drives its head, marker, arc fill, and large readout; the marker is limited to the ±60° arc while the actual readout and limit note remain honest. Waiting hides the marker and shows no numeric angle. Both pointer and accessibility edits are absent in live/waiting modes, preserving the two onset settings. The dial passed 2,534 focused checks (`build/onset-live-dial-2026-09-15.log`) and 108 native layout/rendered-arc checks across 40 fixtures (`build/onset-live-dial-render-2026-09-15.log`).
+
+The brightness journal now carries a backward-compatible optional wake-restoration flag. Explicit suspension latches it durably, including while a dim write is outstanding. Awake restoration of that owned dim restores the original baseline rather than interpreting a different wake reading as a manual override. Normal uninterrupted-awake overrides remain respected. The direct dimming suite passed 243 checks (`build/display-dimming-wake-ownership-2026-09-15.log`), including changed wake values, repeated return orders, legacy decoding, relaunch, failed verification, retries, and late locks. New explicit local diagnostics retain the restoration read/decision and Mac session state.
+
+The full regression suite completed successfully (`build/build26-regression.log`), including 334 AppModel, 142 camera coordinator, 243 brightness, 91 removal coordinator, and 2,534 dial checks plus existing GPU/motion/presence/energy suites. Build 26 was then packaged, strictly signature-verified, installed with a backup of build 25, and launched through LaunchServices. Physical acceptance remains pending.
+
+Build 26 artifact evidence is retained in `build/validation/release-0.15.0-build26.json`:
+
+- DMG SHA-256: `57065f97d8ba730bc133ae3602d69ea96e718f04bf66300a454979cdf0e5290c`.
+- Executable SHA-256: `e78796a28d2eb9e9b5e73f6f21efe407e661f6f6b82b77043c378940c19781df`.
+- Installed executable matches the DMG, bundled policies match source, developer previews are excluded, and strict signature verification passed.
+
+Fresh build 26 diagnostics show the new session state and restoration decision fields. Sync head was started from the installed Appearance tab; it is waiting for the wearer to check the new marker/readout before the next controlled brightness cycle.
+
+### Build 26 live dial accepted
+
+The wearer answered **“Yes, the marker and degrees follow correctly.”** A live native capture showed a rightward green arc marker and approximately -35° readout together, with the head and surrounding content positioned normally. After the wearer stopped sync, the installed UI returned to onset editing with Left 11° and Right 13° intact. The revised live dial is physically accepted. A new controlled return-before-unlock brightness cycle is now being collected in `build/validation/build26-return-before-unlock-cycle1.jsonl`; its result remains pending.

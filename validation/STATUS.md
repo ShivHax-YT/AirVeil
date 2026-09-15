@@ -1,8 +1,8 @@
 # AirVeil validation status
 
-## Current work — 0.15.0 builds 24–25
+## Current work — 0.15.0 builds 24–26
 
-See [Settings, wear prompt, and wake recovery](SETTINGS-WEAR-AND-WAKE-0.15.0-24.md) for the five current changes, automated results, verified builds 24–25 installation, partial installed observations, and pending physical acceptance. Build 24's off action is wearer-confirmed for brightness restoration and camera-light shutdown. Build 25's Settings Enable path passed the physical wait, camera alignment, and automatic blur start. Repeated post-lock brightness restoration and physical Sync head direction remain pending. The [build 23 record](PERMISSIONS-POLICIES-0.15.0.md) contains its separate installer evidence. Entries below are historical checkpoints; later centered-camera, public-motion removal, and wake-recovery changes supersede older behavior descriptions.
+See [Settings, wear prompt, and wake recovery](SETTINGS-WEAR-AND-WAKE-0.15.0-24.md) for current changes, automated checks, and installed builds 24–26. The off action and Settings wait/alignment/automatic-blur flow passed physical tests. Build 25 reproduced the post-lock brightness bug: the first wake reading incorrectly relinquished the recorded baseline. Build 26 now retains dim ownership across suspension and makes the live dial marker/readout follow the head. Both changes are installed. The moving live dial is wearer-confirmed; the corrected wake-brightness path is being physically retested. Repeated lock/unlock recovery remains an open gate. Entries below are historical checkpoints; later centered-camera, public-motion removal, and wake-recovery changes supersede older descriptions.
 
 ## Notch recenter coach, 0.8.0 (build 9)
 

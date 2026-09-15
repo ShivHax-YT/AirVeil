@@ -62,6 +62,12 @@ final class AppModel: NSObject, ObservableObject {
     private var sessionActive = true
     private var isShuttingDown = false
     private var isMacSessionActive: Bool { systemAwake && screensAwake && sessionActive && !screenLocked }
+    /// Read only when the user explicitly launches with local diagnostics.
+    var sessionDiagnosticState: [String: Bool] {
+        ["active": isMacSessionActive, "systemAwake": systemAwake,
+         "screensAwake": screensAwake, "sessionActive": sessionActive,
+         "screenLocked": screenLocked]
+    }
     @Published var sleepDisplaysOnRemoval = false {
         didSet {
             cancelRemovalAction()
