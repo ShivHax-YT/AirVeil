@@ -7,7 +7,7 @@
 | Requirement | Evidence before build 28 | Remaining work |
 |---|---|---|
 | Restore original brightness after lock and sleep, in either AirPods return order | Four wearer-confirmed build 27 passes: both orders after manual lock and actual Apple-menu Sleep. One actual wake reading exceeded the previous ownership tolerance and still restored correctly. | Three automatic-departure cycles per return order under current low lighting; the four existing passes cover distinct cases, not three repeats each. |
-| Organize Settings into clear tabs | Five tabs implemented and inspected. Native renders cover all tour targets at two sizes and appearances. | Complete installed tour interaction review, including minimum window size. |
+| Organize Settings into clear tabs | Five tabs implemented and inspected. Native renders cover all tour targets at two sizes and appearances. | All 16 installed steps inspected; preview pointer clicks, Center, and the left/right selector work. Manual dragging and minimum-size live interaction remain unverified (native render checks pass at minimum size). |
 | Sync head, moving arc marker, and degrees | Wearer confirmed all three follow real head movement in build 26. Stop sync preserves saved thresholds. | No new implementation requested. |
 | Show wear reminder; Turn off feature restores brightness and stops cameras | Wearer confirmed both cleanup effects; automated cancellation and persistence checks pass. | Verify new dismiss control separately from Turn off feature; retain physical feature-off persistence/re-enable acceptance across relaunch. |
 | Enable blur while AirPods are out, then align and start automatically on return | Full Settings route wearer-confirmed in build 25; notch route covered by native action/lifecycle checks. | Exercise the direct notch route on the installed app. |
@@ -38,3 +38,16 @@ Dock and Command-Tab visibility and the live head/dial were accepted by the wear
 - Physical low-light and dismissal acceptance is pending; no claim that dark camera frames can prove departure. The four build 27 brightness passes remain historical physical evidence, not a substitute for this new sequence.
 
 The version is 0.15.0, build 28. `build/validation/release-0.15.0-build28.json` records DMG SHA-256 `26e5a45be7e39c69bc3c0317b24286dfd474b2fede99dfa1dbe39c418b2543ac` and executable SHA-256 `5e360fb23ac531325b792dfc52eab0c4ca593dbe2499c98ec16b8f07129175af`. Installed executable and policies match the signed package; strict signature verification passes and developer preview commands are excluded. The verified build 27 installer is archived locally. No public release or push was made.
+
+## Installed tutorial review after build 28
+
+The installed tour was navigated through all 16 steps and completed normally. Each step selected its intended tab. The seated step visibly included both the dim switch and 23% slider in its spotlight; the onset step included the head, angle selector, and Sync head action; fine-tuning automatically opened and revealed all three sliders in the highlighted region.
+
+- Preview accessibility Increment changed 0° to12°; Center returned it to0°.
+- Actual pointer clicks toggled simulated preview off/on and changed the slider track from0° to approximately30°. Center restored0°.
+- A pointer click on the highlighted Right selector displayed the saved13° threshold; Left restored the11° display without editing either threshold.
+- Two automated drag attempts did not change the preview slider. This is not treated as a manual-drag pass or diagnosed as an app defect: track clicks work and the tour's visual overlay disables hit testing. Manual dragging still needs acceptance.
+- Camera/Enable actions were inspected but not invoked while awaiting wearer readiness. No completed hardware alignment is inferred from tour navigation. Check displays produced no visible change, as the connected display was unchanged.
+- Power was restored after the tour. `build/validation/build28-after-live-tour.json` confirms the tour is closed, Dim off, Lock on, the23% target and11°/13° thresholds preserved, and no active camera, presence capture, or blur.
+
+A separate bounded audit did not find a complete attributed Off → normal relaunch → paused new process → explicit Enable diagnostic chain. `build24-seated-after-off.json` proves its cleanup effects and `build25-wait-to-enable.jsonl` proves the waiting/alignment/start flow separately. Suggestive cross-build paused snapshots are not promoted into a physical persistence pass.
