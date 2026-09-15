@@ -38,6 +38,29 @@ import Foundation
         precondition(!tour.isActive && finishes == 2)
         precondition(defaults.double(forKey: "removalBrightnessV2") == 0.2)
         precondition(Set(SettingsTourStep.allCases.map(\.id)).count == SettingsTourStep.allCases.count)
-        print("PASS: Deferred permission-first launch, suspension without completion, completion, skip, replay, navigation bounds, unique targets, and preference isolation")
+        let expectedSections: [(SettingsSection, [SettingsTourStep])] = [
+            (.preview, [.welcome, .preview, .ready]),
+            (.tracking, [.tracking, .camera]),
+            (.displays, [.access, .displays, .input]),
+            (.appearance, [.coverage, .onset, .full, .appearance, .tuning]),
+            (.power, [.removal, .seated, .energy])
+        ]
+        precondition(expectedSections.count == SettingsSection.allCases.count)
+        precondition(expectedSections.flatMap(\.1).count == SettingsTourStep.allCases.count)
+        for (section, steps) in expectedSections {
+            precondition(!section.symbol.isEmpty)
+            for step in steps { precondition(step.section == section, "Every tour target must route to its real tab") }
+        }
+        tour.replay()
+        for next in SettingsTourStep.allCases.dropFirst() {
+            tour.next()
+            precondition(tour.step == next)
+            tour.back()
+            precondition(tour.step != next)
+            tour.next()
+            precondition(tour.step?.section == next.section)
+        }
+        precondition(defaults.double(forKey: "removalBrightnessV2") == 0.2)
+        print("PASS: Permission-first launch, suspension, completion, replay, all 16 forward/back tab destinations, unique targets, and preference isolation")
     }
 }

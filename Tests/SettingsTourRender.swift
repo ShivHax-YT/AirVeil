@@ -4,7 +4,15 @@ import SwiftUI
 /// Renders only an offscreen window owned by this process. No screen capture,
 /// headphone streaming, camera setup, or desktop effect is started.
 @main struct SettingsTourRender {
-    @MainActor static func main() async throws {
+    @MainActor static func main() async {
+        do { try await render() }
+        catch {
+            for window in NSApplication.shared.windows { window.orderOut(nil); window.close() }
+            fputs("FAIL: \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+    }
+    @MainActor static func render() async throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let destination = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -13,6 +21,7 @@ import SwiftUI
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
         let model = AppModel()
+        let originalOnsets = (model.leftOnset, model.rightOnset)
         // Render the first-launch tracking action without starting sensors.
         model.startupTourActive = true
         for compact in [true, false] {
@@ -22,7 +31,9 @@ import SwiftUI
                 app.appearance = appearance
                 let tour = SettingsTour(defaults: defaults)
                 tour.replay()
-                let host = NSHostingView(rootView: SettingsView(model: model, tour: tour)
+                var resolved: [SettingsTourStep: (SettingsSection, CGRect?, CGSize)] = [:]
+                let host = NSHostingView(rootView: SettingsView(model: model, tour: tour,
+                    onTourTargetResolved: { section, step, rect, size in resolved[step] = (section, rect, size) })
                     .environment(\.colorScheme, dark ? .dark : .light)
                     .transaction { $0.disablesAnimations = true })
                 host.appearance = appearance
@@ -40,9 +51,35 @@ import SwiftUI
                     appearance.performAsCurrentDrawingAppearance { host.cacheDisplay(in: host.bounds, to: bitmap) }
                     let data = bitmap.representation(using: .png, properties: [:])!
                     try data.write(to: destination.appendingPathComponent("\(compact ? "compact" : "regular")-\(dark ? "dark" : "light")-\(step.rawValue).png"))
+                    guard let (section, possibleRect, area) = resolved[step], let rect = possibleRect else {
+                        throw NSError(domain: "TourLayout", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Missing visible target for \(step.rawValue)"])
+                    }
+                    guard section == step.section, rect.width > 20, rect.height > 15,
+                          rect.intersection(CGRect(origin: .zero, size: area)).height >= min(rect.height * 0.70, 100) else {
+                        throw NSError(domain: "TourLayout", code: 2,
+                            userInfo: [NSLocalizedDescriptionKey: "Offscreen target \(step.rawValue): \(rect), section \(section), area \(area)"])
+                    }
                     tour.next()
                 }
                 window.orderOut(nil); window.close()
+                for section in SettingsSection.allCases {
+                    let page = NSHostingView(rootView: SettingsView(model: model, tour: tour, initialSection: section)
+                        .environment(\.colorScheme, dark ? .dark : .light)
+                        .transaction { $0.disablesAnimations = true })
+                    let pageWindow = NSPanel(contentRect: CGRect(origin: CGPoint(x: -20000, y: -20000), size: size),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                    pageWindow.isReleasedWhenClosed = false; pageWindow.contentView = page
+                    page.appearance = appearance; page.frame = CGRect(origin: .zero, size: size)
+                    pageWindow.orderFront(nil)
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                    page.layoutSubtreeIfNeeded(); page.displayIfNeeded()
+                    guard let bitmap = page.bitmapImageRepForCachingDisplay(in: page.bounds) else { fatalError("No tab bitmap") }
+                    appearance.performAsCurrentDrawingAppearance { page.cacheDisplay(in: page.bounds, to: bitmap) }
+                    try bitmap.representation(using: .png, properties: [:])!.write(to:
+                        destination.appendingPathComponent("tab-\(compact ? "compact" : "regular")-\(dark ? "dark" : "light")-\(section.rawValue.lowercased()).png"))
+                    pageWindow.orderOut(nil); pageWindow.close()
+                }
             }
         }
         let energy = EnergyController(defaults: defaults, monitorSystem: false)
@@ -76,6 +113,7 @@ import SwiftUI
             }
         }
         precondition(!model.motion.isRunning && !model.cameraHeading.camera.isRunning && !model.enabled)
-        print("PASS: \(SettingsTourStep.allCases.count * 4) native tour renders and 8 energy-control renders; no sensors or desktop capture started")
+        precondition(model.leftOnset == originalOnsets.0 && model.rightOnset == originalOnsets.1)
+        print("PASS: 64 native tour renders with tab/target visibility checks, 20 Settings-tab renders and 8 energy renders; onset values unchanged; no sensors or desktop capture started")
     }
 }

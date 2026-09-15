@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// A selected side owns a positive magnitude; crossing center never wraps into
-/// the other side. The preview is illustrative, separate from sensor heading.
+/// the other side. Live head feedback never writes either threshold.
 enum BlurTurnSide: String, CaseIterable, Identifiable {
     case left = "Left", right = "Right"
     var id: String { rawValue }
@@ -24,14 +24,28 @@ enum BlurDialGeometry {
         guard x.isFinite, y.isFinite, x > 0 else { return 0 }
         return bounded(atan2(x, max(0, y)) / sweep * maximum)
     }
+    static func headRotation(side: BlurTurnSide, threshold: Double, liveYaw: Double?, syncing: Bool) -> Double {
+        if syncing, let liveYaw, liveYaw.isFinite { return -min(maximum, max(-maximum, liveYaw)) }
+        return syncing ? 0 : side.screenSign * bounded(threshold)
+    }
 }
 
 struct BlurOnsetDial: View {
     @Binding var left: Double
     @Binding var right: Double
     @State private var side = BlurTurnSide.left
-    init(left: Binding<Double>, right: Binding<Double>, initialSide: BlurTurnSide = .left) {
+    var liveYaw: Double?
+    var syncRequested: Bool
+    var syncStatus: String
+    var compact: Bool
+    var toggleSync: (() -> Void)?
+    init(left: Binding<Double>, right: Binding<Double>, initialSide: BlurTurnSide = .left,
+         liveYaw: Double? = nil, syncRequested: Bool = false,
+         syncStatus: String = "Align with the camera, then follow your AirPods.",
+         compact: Bool = false, toggleSync: (() -> Void)? = nil) {
         _left = left; _right = right; _side = State(initialValue: initialSide)
+        self.liveYaw = liveYaw; self.syncRequested = syncRequested; self.syncStatus = syncStatus
+        self.compact = compact; self.toggleSync = toggleSync
     }
     private var selection: Binding<Double> { side == .left ? $left : $right }
     var body: some View {
@@ -47,9 +61,13 @@ struct BlurOnsetDial: View {
                     ForEach(BlurTurnSide.allCases) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().frame(width: 160)
             }
-            HStack(spacing: 28) {
-                OnsetArc(side: side, value: selection).id(side)
+            HStack(spacing: compact ? 20 : 28) {
+                OnsetArc(side: side, value: selection,
+                         headRotation: BlurDialGeometry.headRotation(side: side, threshold: selection.wrappedValue,
+                                                                     liveYaw: liveYaw, syncing: syncRequested)).id(side)
                     .frame(width: 300, height: 176)
+                    .scaleEffect(compact ? 0.84 : 1)
+                    .frame(width: compact ? 252 : 300, height: compact ? 148 : 176)
                 VStack(alignment: .leading, spacing: 8) {
                     Text("\(Int(selection.wrappedValue.rounded()))°")
                         .font(.system(size: 42, weight: .medium, design: .rounded).monospacedDigit())
@@ -64,6 +82,22 @@ struct BlurOnsetDial: View {
                     }.font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let liveYaw, liveYaw.isFinite {
+                        Text(String(format: "Live head · %+.0f°", liveYaw))
+                            .font(.caption.weight(.medium).monospacedDigit())
+                            .accessibilityLabel(String(format: "Live head angle, %+.0f degrees", liveYaw))
+                    }
+                    Text(syncStatus).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                Button(syncRequested ? "Stop sync" : "Sync head") { toggleSync?() }
+                    .controlSize(.large).frame(minHeight: 44).disabled(toggleSync == nil)
+                    .accessibilityIdentifier("onset-head-sync")
+                    .accessibilityHint("Uses a camera alignment before following your AirPods. Starting angles stay unchanged.")
+            }
         }
     }
 }
@@ -71,8 +105,8 @@ struct BlurOnsetDial: View {
 private struct OnsetArc: View {
     let side: BlurTurnSide
     @Binding var value: Double
+    let headRotation: Double
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var faceAngle = 0.0
     private let accent = Color.green
     private let center = CGPoint(x: 150, y: 10)
     private let radius = 135.0
@@ -108,7 +142,8 @@ private struct OnsetArc: View {
             IllustrativeHead()
                 .stroke(.primary.opacity(0.8), style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round))
                 .frame(width: 58, height: 74)
-                .rotation3DEffect(.degrees(side.screenSign * faceAngle), axis: (x: 0, y: 1, z: 0), perspective: 0.45)
+                .rotation3DEffect(.degrees(headRotation), axis: (x: 0, y: 1, z: 0), perspective: 0.45)
+                .animation(reduceMotion ? nil : .linear(duration: 0.08), value: headRotation)
                 .position(x: center.x, y: 61)
                 .accessibilityHidden(true)
             Circle().fill(accent).frame(width: 15, height: 15)
@@ -129,11 +164,6 @@ private struct OnsetArc: View {
         .accessibilityAdjustableAction { direction in
             value = BlurDialGeometry.bounded(value + (direction == .increment ? 1 : -1))
         }
-        .task { moveHead(to: value) }
-        .onChange(of: value) { _, next in moveHead(to: next) }
-    }
-    private func moveHead(to next: Double) {
-        withAnimation(reduceMotion ? nil : .smooth(duration: 0.24)) { faceAngle = BlurDialGeometry.bounded(next) }
     }
 }
 

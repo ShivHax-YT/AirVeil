@@ -10,6 +10,15 @@ final class AppModel: NSObject, ObservableObject {
     let motion = MotionService()
     lazy var cameraHeading = CameraHeadingCoordinator(motion: motion)
     let presentation = TrackingPresentation()
+    let headPreviewSync = HeadPreviewSyncPresentation()
+    @Published private(set) var wearAirPodsPrompt = false
+    @Published private(set) var automaticFeaturesPaused = false { didSet { persist() } }
+    private var trackingSetupRequested = false
+    private var trackingSetupAttempted = false
+    private var trackingPermissionRequested = false
+    private var trackingSetupNeedsCenter = false
+    private var enableAfterTrackingSetup = false
+
     var previewFrame: ((VeilStrength) -> Void)?
     var previewVisibility: ((Bool) -> Void)?
     private var previewVisible = true
@@ -147,9 +156,21 @@ final class AppModel: NSObject, ObservableObject {
             "\($0.stableID):\($0.frame.origin.x),\($0.frame.origin.y),\($0.frame.width),\($0.frame.height):\($0.backingScale)"
         }.joined(separator: "|")
     }
-    func enableCameraAssistance() { guard !permissionSetupActive else { return }; pause(); cameraHeading.requestEnable() }
+    func enableCameraAssistance() {
+        guard !permissionSetupActive else { return }
+        automaticFeaturesPaused = false
+        pause(); cameraHeading.setSessionActive(isMacSessionActive && removalPresence.canResumeHeading)
+        cameraHeading.requestEnable()
+    }
     func disableCameraAssistance() { pause(); seatReference = nil; seatLayout = nil; cameraHeading.disable() }
-    func refreshCameraDirection() { guard !permissionSetupActive, removalPresence.canResumeHeading else { return }; cameraHeading.refreshDirection() }
+    func refreshCameraDirection() {
+        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive,
+              removalPresence.canResumeHeading, !restoringRemoval,
+              cameraHeading.isEnabled, cameraHeading.hasCenter else { return }
+        automaticFeaturesPaused = false
+        cameraHeading.setSessionActive(true)
+        cameraHeading.refreshDirection()
+    }
     var shielded: Bool { enabled && (!trackingValid || !overlay.isRunning || overlay.failureReason != nil) }
     var headline: String {
         if starting { return "Starting desktop effect…" }
@@ -187,6 +208,7 @@ final class AppModel: NSObject, ObservableObject {
         blockInput = d.object(forKey: "blockInput") == nil ? true : d.bool(forKey: "blockInput")
         blocksEntireDisplay = d.bool(forKey: "blocksEntireDisplay")
         sleepDisplaysOnRemoval = d.bool(forKey: "sleepDisplaysOnRemoval")
+        automaticFeaturesPaused = d.bool(forKey: "automaticChecksPaused")
         dimWhilePresent = d.object(forKey: "dimWhilePresent") == nil ? true : d.bool(forKey: "dimWhilePresent")
         removalBrightness = Self.read(d, "removalBrightnessV2", 0, 0...0.5)
         selectedDisplayKeys = d.stringArray(forKey: "selectedDisplays").map { Set($0) }
@@ -196,6 +218,7 @@ final class AppModel: NSObject, ObservableObject {
         motion.$fusionSample.receive(on: DispatchQueue.main).sink { [weak self] _ in
             self?.checkTrackingSafety()
             self?.wakeAnimation()
+            self?.refreshHeadPreviewSync()
         }.store(in: &subscriptions)
         cameraHeading.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.objectWillChange.send(); self?.stateChanged?() }
@@ -267,6 +290,7 @@ final class AppModel: NSObject, ObservableObject {
         d.set(leftOnset, forKey: "blurOnsetLeft"); d.set(rightOnset, forKey: "blurOnsetRight")
         d.set(blockInput,forKey:"blockInput"); d.set(blocksEntireDisplay,forKey:"blocksEntireDisplay")
         d.set(sleepDisplaysOnRemoval,forKey:"sleepDisplaysOnRemoval")
+        d.set(automaticFeaturesPaused,forKey:"automaticChecksPaused")
         d.set(dimWhilePresent,forKey:"dimWhilePresent")
         d.set(removalBrightness,forKey:"removalBrightnessV2")
         if let selectedDisplayKeys { d.set(Array(selectedDisplayKeys).sorted(),forKey:"selectedDisplays") }
@@ -349,7 +373,22 @@ final class AppModel: NSObject, ObservableObject {
     /// a stable wearing session. Source switches and brief gaps do not count.
     /// A seat check decides seated dimming versus confirmed-absence sleep.
     func checkAirPodsRemoval(now: TimeInterval = CMClockGetHostTimeClock().time.seconds) {
-        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive else {
+        defer { updateWearAirPodsPrompt() }
+        guard !isShuttingDown, isMacSessionActive else {
+            if removalActionPending { cancelRemovalAction() }
+            removalGuard.reset(disconnectCount: motion.removalEventCount)
+            return
+        }
+        // Finishing an owned brightness change is independent of whether the
+        // user has paused automatic features or opened permission setup.
+        if removalPresence.phase == .failed, dimming.hasPendingRestore,
+           !restoringRemoval, !removalPresence.isBusy, !dimming.isBusy,
+           now >= nextRemovalRecoveryAt {
+            nextRemovalRecoveryAt = now + 2
+            recoverRemovalAfterActivation()
+            return
+        }
+        guard !permissionSetupActive, !automaticFeaturesPaused else {
             if removalActionPending { cancelRemovalAction() }
             removalGuard.reset(disconnectCount: motion.removalEventCount)
             return
@@ -493,7 +532,7 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func startMotionAutomatically() {
-        guard motionAccessAllowedByOnboarding, !permissionSetupActive, !startupTourActive, !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
+        guard motionAccessAllowedByOnboarding, !automaticFeaturesPaused, !permissionSetupActive, !startupTourActive, !isShuttingDown, isMacSessionActive, !motion.isRunning else { return }
         motion.start()
         message = "AirPods are detected automatically. Face the display and use Set center once."
     }
@@ -501,14 +540,19 @@ final class AppModel: NSObject, ObservableObject {
     /// Camera recovery measures against the saved screen anchor. Manual mode
     /// requires explicit calibration after a gap; stillness never establishes zero.
     func checkReferenceRecovery() {
+        defer { updateWearAirPodsPrompt(); refreshHeadPreviewSync() }
         guard !permissionSetupActive, !startupTourActive, !isShuttingDown else { return }
+        guard !automaticFeaturesPaused else { cameraHeading.setSessionActive(false); return }
         guard removalPresence.canResumeHeading, !restoringRemoval else {
             cameraHeading.setSessionActive(false)
             checkTrackingSafety()
             return
         }
         cameraHeading.setSessionActive(isMacSessionActive)
+        guard isMacSessionActive else { return }
+        advanceRequestedTrackingSetup()
         cameraHeading.update(layoutKey: cameraLayoutKey)
+        completeRequestedTrackingSetup()
         checkTrackingSafety()
         if cameraHeading.isEnabled {
             setReferenceRecoveryStatus(cameraHeading.status)
@@ -602,20 +646,23 @@ final class AppModel: NSObject, ObservableObject {
             guard !permissionSetupActive else { cameraHeading.setSessionActive(false); return }
             startMotionAutomatically()
             if let event = resumePresenceEvent, event == motion.removalEventCount,
-               motion.removalConnectionState == .disconnected, sleepDisplaysOnRemoval, usesRemovalPresence {
+               motion.removalConnectionState == .disconnected, sleepDisplaysOnRemoval, usesRemovalPresence, !automaticFeaturesPaused {
                 removalActionPending = true; pendingDisconnectCount = event
                 removalPresence.begin(reference: presenceReady ? seatReference : nil,
                     targetBrightness: removalBrightness, now: CMClockGetHostTimeClock().time.seconds,
                     allowSleepBeforePresence: false, allowUncertainSleep: false)
             } else {
                 resumePresenceEvent = nil
-                cameraHeading.setSessionActive(true)
+                cameraHeading.setSessionActive(!automaticFeaturesPaused)
             }
+            updateWearAirPodsPrompt()
             refreshPresentation(); wakeAnimation(force: true)
         }
     }
     func calibrate() {
         guard !permissionSetupActive, !isShuttingDown, isMacSessionActive, removalPresence.canResumeHeading, !restoringRemoval, motion.isFresh else { message = "Finish Permissions and wait for fresh AirPods motion before setting center."; return }
+        automaticFeaturesPaused = false
+        cameraHeading.setSessionActive(true)
         if cameraHeading.isEnabled {
             cameraHeading.setCenter(layoutKey: cameraLayoutKey)
             simulate = false
@@ -648,7 +695,142 @@ final class AppModel: NSObject, ObservableObject {
             message = "Could not find a steady pose. Face the display, hold still, and try Set center again."
         }
     }
+    func startHeadPreviewSync() {
+        guard !permissionSetupActive, !isShuttingDown, isMacSessionActive else { return }
+        guard motionAccessAllowedByOnboarding else {
+            message = "Allow Head Tracking in Permissions, then press Sync head."
+            showPermissionSetup?()
+            return
+        }
+        let resumeEffect = enabled || starting || resumeWhenReferenceReturns
+        pause(cancelRemoval: false)
+        cancelRemovalAction()
+        resumeWhenReferenceReturns = resumeEffect
+        headPreviewSync.update(.init(requested: true, status: "Wear your AirPods and face the camera."))
+        requestTrackingSetup(enableBlur: resumeEffect, freshCenter: true)
+    }
+
+    func stopHeadPreviewSync() {
+        guard headPreviewSync.snapshot.requested else { return }
+        headPreviewSync.update(.init(status: "Head sync stopped. Press Sync head to start again."))
+        if trackingSetupRequested && !enableAfterTrackingSetup {
+            clearRequestedTrackingSetup()
+            cameraHeading.cancelPendingRecovery()
+        }
+        updateWearAirPodsPrompt()
+    }
+
+    /// An explicit off action pauses the complete waiting/seat-check feature.
+    /// It preserves preferences and can be reversed from any Enable blur control.
+    func cancelWearWait() {
+        automaticFeaturesPaused = true
+        pause()
+        cameraHeading.setSessionActive(false)
+        setRemovalStatus("Automatic checks are paused. Enable blur to resume.")
+        message = "Blur and camera checks are off. Restoring your previous brightness."
+        updateWearAirPodsPrompt()
+    }
+
+    private func requestTrackingSetup(enableBlur: Bool, freshCenter: Bool) {
+        guard motionAccessAllowedByOnboarding else {
+            message = "Allow Head Tracking in Permissions, then enable blur."
+            showPermissionSetup?()
+            return
+        }
+        automaticFeaturesPaused = false
+        startupTourActive = false // This is an explicit user action during the tour.
+        trackingSetupRequested = true
+        trackingSetupAttempted = false
+        trackingPermissionRequested = false
+        trackingSetupNeedsCenter = freshCenter || !cameraHeading.hasCenter
+        enableAfterTrackingSetup = enableBlur
+        cameraHeading.cancelPendingRecovery()
+        startMotionAutomatically()
+        advanceRequestedTrackingSetup()
+        updateWearAirPodsPrompt()
+    }
+
+    private func advanceRequestedTrackingSetup() {
+        guard trackingSetupRequested, isMacSessionActive, !automaticFeaturesPaused,
+              removalPresence.canResumeHeading, !restoringRemoval else { return }
+        guard motion.isFresh else {
+            if trackingSetupAttempted && !cameraHeading.isBusy { trackingSetupAttempted = false }
+            message = "Wear your AirPods to continue. A camera check will align your head tracking."
+            return
+        }
+        if wearAirPodsPrompt { wearAirPodsPrompt = false }
+        cameraHeading.setSessionActive(true)
+        guard !cameraHeading.isBusy else { return }
+        guard cameraHeading.isEnabled else {
+            guard !trackingPermissionRequested else {
+                finishRequestedTrackingFailure("Camera access is needed for automatic alignment. Review Camera assistance and try again.")
+                return
+            }
+            trackingPermissionRequested = true
+            cameraHeading.requestEnable()
+            return
+        }
+        guard !trackingSetupAttempted else { return }
+        trackingSetupAttempted = true
+        // Refresh the current layout before an explicit saved-center retry.
+        // Prevent update() from spending its own automatic attempt first.
+        cameraHeading.cancelPendingRecovery()
+        cameraHeading.update(layoutKey: cameraLayoutKey)
+        if trackingSetupNeedsCenter { cameraHeading.setCenter(layoutKey: cameraLayoutKey) }
+        else { cameraHeading.resumeTracking() }
+        message = "Face the camera and hold still. Blur will start after alignment."
+        if !enableAfterTrackingSetup { message = "Face the camera and hold still to sync the head illustration." }
+    }
+
+    private func completeRequestedTrackingSetup() {
+        guard trackingSetupRequested, trackingSetupAttempted, motion.isFresh else { return }
+        if trackingValid && !cameraHeading.isBusy {
+            let startBlur = enableAfterTrackingSetup
+            clearRequestedTrackingSetup()
+            if startBlur {
+                resumeWhenReferenceReturns = false
+                enable()
+            }
+        } else if !cameraHeading.isBusy {
+            finishRequestedTrackingFailure(cameraHeading.status)
+        }
+    }
+
+    private func finishRequestedTrackingFailure(_ status: String) {
+        clearRequestedTrackingSetup()
+        resumeWhenReferenceReturns = false
+        if headPreviewSync.snapshot.requested { headPreviewSync.update(.init(status: status)) }
+        message = status
+    }
+
+    private func clearRequestedTrackingSetup() {
+        trackingSetupRequested = false
+        trackingSetupAttempted = false
+        trackingPermissionRequested = false
+        enableAfterTrackingSetup = false
+    }
+
+    private func updateWearAirPodsPrompt() {
+        let visible = isMacSessionActive && !permissionSetupActive && !automaticFeaturesPaused &&
+            !motion.isFresh && ((trackingSetupRequested && enableAfterTrackingSetup) || (removalActionPending && removalPresence.isActive))
+        if wearAirPodsPrompt != visible { wearAirPodsPrompt = visible }
+    }
+
+    private func refreshHeadPreviewSync() {
+        guard headPreviewSync.snapshot.requested else { return }
+        let valid = isMacSessionActive && !automaticFeaturesPaused && cameraHeading.trackingValid
+        let status: String
+        if !isMacSessionActive { status = "Head sync is paused while your Mac is locked or asleep." }
+        else if !motion.isFresh { status = "Wear your AirPods to sync your head." }
+        else if cameraHeading.isBusy { status = "Face the camera and hold still while head tracking aligns." }
+        else if valid { status = "Following your head. Turn left and right." }
+        else { status = cameraHeading.status }
+        headPreviewSync.update(.init(requested: true, status: status,
+                                     yaw: valid ? cameraHeading.yawDegrees : nil))
+    }
+
     func resetDefaults() {
+        automaticFeaturesPaused = false
         cameraHeading.disable()
         onset = 8; fullAngle = 32; blurPoints = 32; feather = 0.12; response = 0.07
         inverted = false; opaque = false; wholeScreen = false
@@ -695,18 +877,20 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
     var canRequestEnable: Bool {
-        !permissionSetupActive && selectedDisplayCount > 0 && isMacSessionActive && removalPresence.canResumeHeading && !restoringRemoval &&
-        (trackingValid || (cameraHeading.isEnabled && cameraHeading.hasCenter && motion.isFresh && !centerBusy))
+        !permissionSetupActive && selectedDisplayCount > 0 && isMacSessionActive &&
+        removalPresence.canResumeHeading && !restoringRemoval && !centerBusy
     }
     func enable() {
         guard !permissionSetupActive, !isShuttingDown, isMacSessionActive, removalPresence.canResumeHeading, !restoringRemoval, !enabled && !starting else { return }
         guard selectedDisplayCount > 0 else { message = "Select at least one display to blur."; return }
+        automaticFeaturesPaused = false
+        cameraHeading.setSessionActive(true)
         guard trackingValid else {
-            if cameraHeading.isEnabled, cameraHeading.hasCenter, motion.isFresh {
-                resumeWhenReferenceReturns = true
-                cameraHeading.resumeTracking()
-                message = "Checking your saved screen direction. The effect will resume after this check."
-            } else { message = "Wear your AirPods and set a valid center before enabling the desktop effect." }
+            if motion.isFresh && !cameraHeading.isEnabled {
+                message = "Face the display and use Set center, or Sync head for camera-assisted alignment."
+            } else {
+                requestTrackingSetup(enableBlur: true, freshCenter: false)
+            }
             return
         }
         refreshPermission()
@@ -750,6 +934,8 @@ final class AppModel: NSObject, ObservableObject {
     }
     func pause(cancelRemoval: Bool = true) {
         if cancelRemoval {
+            clearRequestedTrackingSetup()
+            headPreviewSync.update(.init(status: "Head sync stopped. Press Sync head to start again."))
             motion.clearRemovalEvidence()
             cancelRemovalAction(); cameraHeading.cancelPendingRecovery()
         }
@@ -761,10 +947,13 @@ final class AppModel: NSObject, ObservableObject {
         if previewVisible { previewFrame?(strengths) }
         wakeAnimation(force: true)
         message = "Desktop effect paused. Your screen is clear."
+        updateWearAirPodsPrompt()
         stateChanged?()
     }
     private func suspend() {
         let restoreEffect = enabled || starting || resumeWhenReferenceReturns
+        trackingSetupAttempted = false
+        trackingPermissionRequested = false
         let resumeEvent = removalActionPending && usesRemovalPresence && motion.removalConnectionState == .disconnected
             ? pendingDisconnectCount : resumePresenceEvent
         pause(cancelRemoval: false)
@@ -772,6 +961,7 @@ final class AppModel: NSObject, ObservableObject {
         resumePresenceEvent = resumeEvent
         clock?.isPaused = true; lastTime = 0
         resumeWhenReferenceReturns = restoreEffect
+        updateWearAirPodsPrompt(); refreshHeadPreviewSync()
         message = "Capture paused for sleep or session change. Your saved screen direction will be checked on return."
     }
     func prepareForTermination() async {

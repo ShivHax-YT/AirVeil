@@ -27,11 +27,13 @@ enum NotchTutorialStep: Int, CaseIterable {
     @Published var expanded = false
     @Published var controls = false
     @Published var demo = false
+    @Published var wearAirPodsPrompt = false
     @Published var tutorialStep: NotchTutorialStep?
     var endTutorial: () -> Void = {}
     @Published var topInset: CGFloat = 32
     @Published var hardwareWidth: CGFloat = 180
     @Published var canCenter = false
+    @Published var canEnable = false
     @Published var cameraEnabled = false
     @Published var enabled = false
     @Published var hovering = false
@@ -44,11 +46,16 @@ enum NotchTutorialStep: Int, CaseIterable {
     var settings: () -> Void = {}
     var toggleEffect: () -> Void = {}
     var toggleAssistLight: () -> Void = {}
+    var turnOffFeature: () -> Void = {}
     var contentHeightChanged: (CGFloat) -> Void = { _ in }
-    var contentWidth: CGFloat { tutorialStep != nil || controls ? 360 : min(248, max(212, hardwareWidth + 32)) }
+    var contentWidth: CGFloat {
+        if wearAirPodsPrompt { return 280 }
+        return tutorialStep != nil || controls ? 360 : min(248, max(212, hardwareWidth + 32))
+    }
     // Grow the black surround without resizing the camera, motion rail, or glyph.
-    var canopyWidth: CGFloat { tutorialStep != nil || controls ? contentWidth : min(360, contentWidth + 24) }
+    var canopyWidth: CGFloat { !wearAirPodsPrompt && (tutorialStep != nil || controls) ? contentWidth : min(360, contentWidth + 24) }
     var contentHeight: CGFloat {
+        if wearAirPodsPrompt { return 280 }
         if tutorialStep != nil { return 360 }
         if controls { return 118 }
         switch snapshot.phase {
@@ -103,6 +110,7 @@ struct NotchCanopy: Shape {
     let headMotion: NotchMotionFeedback
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var successStarted = Date()
+    @State private var wearStarted = Date()
     private var snapshot: NotchCoachSnapshot { presentation.snapshot }
     private var success: Bool { snapshot.phase == .success }
     private var accent: Color {
@@ -126,7 +134,8 @@ struct NotchCanopy: Shape {
         VStack(spacing: 0) {
             Color.clear.frame(height: presentation.topInset)
             ZStack {
-                if let step = presentation.tutorialStep { tutorial(step).transition(.opacity) }
+                if presentation.wearAirPodsPrompt { wearAirPodsContent.transition(.opacity) }
+                else if let step = presentation.tutorialStep { tutorial(step).transition(.opacity) }
                 else if presentation.controls { controls.transition(.opacity) }
                 else if success { successContent.transition(.opacity) }
                 else if snapshot.phase == .lighting { lightingContent.transition(.opacity) }
@@ -134,7 +143,7 @@ struct NotchCanopy: Shape {
             }
             .frame(width: presentation.contentWidth, height: presentation.contentHeight, alignment: .top)
             .overlay(alignment: .topTrailing) {
-                if presentation.tutorialStep == nil, !presentation.controls, !success {
+                if !presentation.wearAirPodsPrompt, presentation.tutorialStep == nil, !presentation.controls, !success {
                     actions.opacity(presentation.hovering || snapshot.isAssistLightOn ? 1 : 0)
                         .animation(.easeInOut(duration: 0.16), value: presentation.hovering)
                         .padding(.trailing, 9).padding(.top, 5)
@@ -154,13 +163,45 @@ struct NotchCanopy: Shape {
         .animation(morph, value: presentation.contentWidth)
         .animation(morph, value: presentation.canopyWidth)
         .animation(.easeInOut(duration: reduceMotion ? 0.16 : 0.22), value: snapshot.phase)
+        .animation(.easeInOut(duration: reduceMotion ? 0.16 : 0.22), value: presentation.wearAirPodsPrompt)
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
         .onAppear { presentation.contentHeightChanged(presentation.contentHeight); successStarted = Date() }
         .onChange(of: presentation.contentHeight) { _, height in presentation.contentHeightChanged(height) }
         .onChange(of: success) { _, accepted in if accepted { successStarted = Date() } }
-        .accessibilityAction(named: Text("Cancel check"), presentation.cancel)
+        .onChange(of: presentation.wearAirPodsPrompt) { _, waiting in if waiting { wearStarted = Date() } }
+        .accessibilityAction(named: Text(presentation.wearAirPodsPrompt ? "Turn off feature" : "Cancel check"), presentation.cancel)
         .accessibilityAction(named: Text("Open settings"), presentation.settings)
+    }
+    private var wearAirPodsContent: some View {
+        VStack(spacing: 12) {
+            TimelineView(.animation(minimumInterval: 1.0 / 30,
+                                    paused: reduceMotion || !presentation.expanded || presentation.animationTime != nil)) { context in
+                let time = reduceMotion ? 0 : (presentation.animationTime ?? max(0, context.date.timeIntervalSince(wearStarted)))
+                NotchAirPodsWaitGlyph(elapsed: time, moving: !reduceMotion)
+                    .frame(width: 160, height: 100)
+            }
+            .accessibilityHidden(true)
+            VStack(spacing: 6) {
+                Text("Wear AirPods to\ncontinue blurring")
+                    .font(.system(size: 16, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text("A quick direction check will\nresume your blur.")
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.68))
+            }
+            .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            Button("Turn off feature", action: presentation.turnOffFeature)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .foregroundStyle(.black)
+                .background(.white.opacity(0.94), in: Capsule())
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("notch-wear-turn-off")
+                .accessibilityHint("Restores brightness and turns off blur and camera checks until you enable them again.")
+        }
+        .padding(.horizontal, 24).padding(.top, 14).padding(.bottom, 18)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("notch-wear-airpods")
     }
     private func tutorial(_ step: NotchTutorialStep) -> some View {
         VStack(spacing: 12) {
@@ -305,9 +346,39 @@ struct NotchCanopy: Shape {
                 .disabled(presentation.cameraEnabled && !presentation.canCenter)
                 Button(presentation.enabled ? "Pause" : "Enable blur", action: presentation.toggleEffect)
                     .buttonStyle(NotchTextButton())
+                    .disabled(!presentation.enabled && !presentation.canEnable)
             }
         }
         .padding(.horizontal, 24).padding(.vertical, 18)
+    }
+}
+
+/// A native symbol stays readable while the light follows a quiet full orbit.
+/// The same artwork has a stable pose when Reduce Motion is enabled.
+struct NotchAirPodsWaitGlyph: View {
+    let elapsed: Double
+    let moving: Bool
+    var body: some View {
+        let phase = moving ? elapsed * .pi / 4 : 0
+        ZStack {
+            Ellipse().stroke(.white.opacity(0.12), lineWidth: 1)
+                .frame(width: 130, height: 34)
+                .rotationEffect(.degrees(-14)).offset(y: 22)
+            Image(systemName: "airpodspro")
+                .font(.system(size: 62, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.white)
+                .rotation3DEffect(.degrees(moving ? sin(phase) * 14 : 0), axis: (x: 0, y: 1, z: 0), perspective: 0.35)
+                .rotationEffect(.degrees(moving ? sin(phase * 0.5) * 3 : 0))
+                .offset(y: moving ? sin(phase) * 2 : 0)
+            Circle().fill(.white.opacity(0.85))
+                .frame(width: 4, height: 4)
+                .shadow(color: .white.opacity(0.25), radius: 4)
+                .offset(x: cos(phase) * 65, y: 22 + sin(phase) * 17)
+                .rotationEffect(.degrees(-14))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

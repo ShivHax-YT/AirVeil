@@ -1,5 +1,9 @@
 # AirVeil validation status
 
+## Current work — 0.15.0 builds 24–25
+
+See [Settings, wear prompt, and wake recovery](SETTINGS-WEAR-AND-WAKE-0.15.0-24.md) for the five current changes, automated results, verified builds 24–25 installation, partial installed observations, and pending physical acceptance. Build 24's off action is wearer-confirmed for brightness restoration and camera-light shutdown. Build 25's Settings Enable path passed the physical wait, camera alignment, and automatic blur start. Repeated post-lock brightness restoration and physical Sync head direction remain pending. The [build 23 record](PERMISSIONS-POLICIES-0.15.0.md) contains its separate installer evidence. Entries below are historical checkpoints; later centered-camera, public-motion removal, and wake-recovery changes supersede older behavior descriptions.
+
 ## Notch recenter coach, 0.8.0 (build 9)
 
 Implemented a native notch-attached camera coach and quiet menu-bar startup. Manual camera setup and automatic recovery drive the same panel: circular mirrored preview, live alignment rail, directional/red guidance, measured low-light messages, paired-evidence progress, and short green confirmation. Hover controls provide Set center, Enable/Pause and settings; the menu provides an explicit controls action and labeled camera-free animation preview. The physical notch is excluded from content; unnotched screens use a floating fallback. Existing camera identity/calibration, bounded checks and AirPods removal/wake policy are retained.

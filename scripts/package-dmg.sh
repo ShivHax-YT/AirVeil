@@ -46,6 +46,18 @@ assistance and seated dimming enabled, a seat check can dim the built-in
 display while you remain seated and request display sleep after confirmed
 absence. An uncertain or unavailable check does not request sleep.
 Returning motion restores owned brightness, even if only one bud is in.
+If the Mac is locked or asleep, restoration waits until the session and
+display are active. Verify both unlock/reinsert orders on your hardware.
+
+Settings are organized into Preview, Tracking, Displays, Appearance,
+and Power. Sync head in Appearance runs a camera alignment, then lets
+the head illustration follow live AirPods turns without changing your
+blur thresholds. Enable blur while AirPods are out waits for motion,
+checks alignment with the camera, then starts blur after valid tracking.
+
+The wear-AirPods reminder includes Turn off feature. It restores owned
+brightness and pauses blur and automatic camera/removal checks until
+you explicitly enable a feature again. This choice persists at relaunch.
 
 If automatic display management remains on while camera assistance or
 seated dimming is off, sustained motion loss requests display sleep

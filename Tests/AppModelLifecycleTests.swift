@@ -1555,6 +1555,174 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.motion.isRunning, "Finishing Permissions permits the user's explicit tracking start")
             model.shutdown()
         }
+        do {
+            let model = makeModel()
+            removeAirPods(model)
+            check(model.canRequestEnable, "Enable remains available with no AirPods motion")
+            model.enable()
+            check(model.wearAirPodsPrompt && model.overlay.startCalls == 0,
+                  "No-motion Enable presents the wear request without desktop capture")
+            check(model.cameraHeading.enableCalls == 0 && model.cameraHeading.centerCalls == 0,
+                  "The wear wait never starts a camera before fresh AirPods motion")
+            freshWear(model)
+            model.checkReferenceRecovery(); model.checkReferenceRecovery()
+            check(!model.wearAirPodsPrompt && model.cameraHeading.enableCalls == 1 && model.cameraHeading.centerCalls == 1,
+                  "Returning AirPods hand the waiting panel to a real camera-centering request")
+            check(model.overlay.startCalls == 0, "A requested camera check is not yet valid alignment")
+            model.cameraHeading.isBusy = false; model.cameraHeading.trackingValid = true
+            model.checkReferenceRecovery(); await drainTasks()
+            check(model.enabled && model.overlay.startCalls == 1,
+                  "Accepted alignment fulfills the original Enable intent automatically once")
+            recoveryTicks(model); await drainTasks()
+            check(model.overlay.startCalls == 1, "Subsequent updates do not duplicate the automatic start")
+            model.shutdown()
+        }
+        for action in ["Set center", "Refresh direction"] {
+            let model = makeModel()
+            useCamera(model)
+            model.cancelWearWait(); await drainTasks()
+            freshWear(model)
+            let centers = model.cameraHeading.centerCalls
+            let refreshes = model.cameraHeading.refreshCalls
+            model.handleScreenLock(true); await drainTasks()
+            if action == "Set center" { model.calibrate() } else { model.refreshCameraDirection() }
+            check(model.automaticFeaturesPaused && !model.cameraHeading.sessionActive &&
+                  model.cameraHeading.centerCalls == centers && model.cameraHeading.refreshCalls == refreshes,
+                  "\(action) cannot rearm the explicitly paused feature while locked")
+            model.handleScreenLock(false); await drainTasks()
+            freshWear(model); recoveryTicks(model)
+            check(model.automaticFeaturesPaused && !model.cameraHeading.sessionActive,
+                  "Passive unlock and motion preserve the feature-off choice before \(action)")
+            if action == "Set center" { model.calibrate() } else { model.refreshCameraDirection() }
+            check(!model.automaticFeaturesPaused && model.cameraHeading.sessionActive && model.cameraHeading.isBusy,
+                  "Explicit \(action) rearms camera alignment after Turn off feature")
+            check(model.cameraHeading.centerCalls == centers + (action == "Set center" ? 1 : 0) &&
+                  model.cameraHeading.refreshCalls == refreshes + (action == "Refresh direction" ? 1 : 0) &&
+                  model.overlay.startCalls == 0,
+                  "\(action) starts one requested camera action without enabling desktop capture")
+            model.shutdown()
+        }
+        for cancellation in ["waiting", "aligning"] {
+            let model = makeModel()
+            removeAirPods(model); model.enable()
+            if cancellation == "aligning" {
+                freshWear(model); model.checkReferenceRecovery(); model.checkReferenceRecovery()
+                check(model.cameraHeading.isBusy, "Cancellation fixture reaches alignment")
+            }
+            model.cancelWearWait(); await drainTasks()
+            let centerCalls = model.cameraHeading.centerCalls
+            freshWear(model); recoveryTicks(model); model.checkAirPodsRemoval(); await drainTasks()
+            check(model.automaticFeaturesPaused && !model.wearAirPodsPrompt && !model.cameraHeading.sessionActive,
+                  "\(cancellation): Turn off feature keeps cameras and the wear prompt off")
+            check(!model.enabled && model.overlay.startCalls == 0 && model.cameraHeading.centerCalls == centerCalls,
+                  "\(cancellation): late motion cannot fulfill canceled Enable intent")
+            let relaunched = AppModel()
+            check(relaunched.automaticFeaturesPaused, "The explicit feature-off choice survives relaunch")
+            relaunched.shutdown()
+            model.motion.isFresh = false
+            model.enable()
+            check(!model.automaticFeaturesPaused && model.wearAirPodsPrompt,
+                  "Only a later explicit Enable rearms the waiting workflow")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present
+            model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            check(model.wearAirPodsPrompt && model.dimming.hasPendingRestore && model.presence.isRunning,
+                  "Seated dimming keeps a visible AirPods reminder while presence is monitored")
+            model.cancelWearWait(); await drainTasks()
+            check(!model.dimming.hasPendingRestore && !model.presence.isRunning && !model.cameraHeading.sessionActive,
+                  "Turning the waiting feature off restores brightness and stops both camera owners")
+            freshWear(model); model.checkAirPodsRemoval(now: now + 4)
+            removeAirPods(model); model.checkAirPodsRemoval(now: now + 5); model.checkAirPodsRemoval(now: now + 8)
+            await drainTasks()
+            check(model.presence.startReferences.count == 1 && model.displaySleep.requests == 0,
+                  "Another removal cannot rearm the explicitly paused feature")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            useCamera(model)
+            model.inverted = true
+            let left = model.leftOnset, right = model.rightOnset
+            model.startHeadPreviewSync()
+            check(model.headPreviewSync.snapshot.requested && model.cameraHeading.centerCalls == 1,
+                  "Sync head explicitly starts camera alignment with fresh AirPods")
+            check(model.overlay.startCalls == 0, "Head sync alone does not enable desktop capture")
+            model.cameraHeading.isBusy = false; model.cameraHeading.trackingValid = true
+            for yaw in [-27.0, 22.0] {
+                model.cameraHeading.yawDegrees = yaw; model.checkReferenceRecovery()
+                check(model.headPreviewSync.snapshot.yaw == yaw,
+                      "Live head illustration follows the actual signed head pose before blur inversion")
+            }
+            check(model.leftOnset == left && model.rightOnset == right,
+                  "Head sync never changes either threshold control")
+            model.handleScreenLock(true); await drainTasks()
+            check(model.headPreviewSync.snapshot.yaw == nil,
+                  "Head illustration drops stale pose immediately at lock")
+            model.handleScreenLock(false); await drainTasks()
+            model.stopHeadPreviewSync()
+            model.cameraHeading.yawDegrees = 40; recoveryTicks(model)
+            check(!model.headPreviewSync.snapshot.requested && model.headPreviewSync.snapshot.yaw == nil,
+                  "Stopped or hidden head sync cannot keep updating the illustration")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            model.dimming.failRestore = true
+            model.cancelWearWait(); await drainTasks()
+            check(model.dimming.hasPendingRestore && model.automaticFeaturesPaused,
+                  "Feature-off retains brightness ownership when the first restore fails")
+            freshWear(model)
+            let centers = model.cameraHeading.centerCalls, refreshes = model.cameraHeading.refreshCalls
+            model.calibrate(); model.refreshCameraDirection()
+            check(model.automaticFeaturesPaused && !model.cameraHeading.sessionActive &&
+                  model.cameraHeading.centerCalls == centers && model.cameraHeading.refreshCalls == refreshes,
+                  "Explicit camera actions cannot bypass pending brightness restoration")
+            model.dimming.failRestore = false
+            model.checkAirPodsRemoval(now: now + 6); await drainTasks()
+            check(!model.dimming.hasPendingRestore && model.automaticFeaturesPaused && !model.cameraHeading.sessionActive,
+                  "Restoration retries while the automatic feature stays explicitly off")
+            check(!model.presence.isRunning && model.overlay.startCalls == 0,
+                  "A brightness-only retry never starts presence or blur")
+            model.shutdown()
+        }
+        for returnFirst in [true, false] {
+            let model = makeModel()
+            var now = ProcessInfo.processInfo.systemUptime
+            for cycle in 0..<3 {
+                freshWear(model)
+                await beginPresence(model, now: now)
+                model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+                check(model.dimming.hasPendingRestore, "Cycle \(cycle) begins with owned dimming")
+                model.presence.state = .absent; model.checkAirPodsRemoval(now: now + 3.5); await drainTasks()
+                model.handleScreenLock(true)
+                model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification); await drainTasks()
+                let writes = model.dimming.brightnessWrites
+                if returnFirst { freshWear(model) }
+                model.sessionLockState = { true }
+                model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification); await drainTasks()
+                check(model.dimming.hasPendingRestore && model.dimming.brightnessWrites == writes,
+                      "Return order \(returnFirst), cycle \(cycle): wake while locked retains brightness ownership")
+                model.sessionLockState = { false }
+                model.handleScreenLock(false); await drainTasks()
+                if !returnFirst {
+                    model.presence.state = .present
+                    model.checkAirPodsRemoval(now: now + 4.2); await drainTasks()
+                    freshWear(model); model.checkAirPodsRemoval(now: now + 5); await drainTasks()
+                }
+                check(!model.dimming.hasPendingRestore && model.removalPresence.canResumeHeading,
+                      "Return order \(returnFirst), cycle \(cycle): restoration completes before heading after unlock")
+                now += 12
+            }
+            model.shutdown()
+        }
         print("PASS: \(checks) real AppModel and removal-coordinator lifecycle assertions; camera, motion, brightness, capture, display sleep, permissions, and preferences stubbed")
     }
 }

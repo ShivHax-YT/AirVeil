@@ -54,7 +54,7 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 6 \
   -o "$TASK_ROOT/build/tests/notch-motion-feedback"
 "$TASK_ROOT/build/tests/notch-motion-feedback"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
-  "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/TrackingPresentation.swift" \
+  "$TASK_ROOT/Sources/AppModel.swift" "$TASK_ROOT/Sources/TrackingPresentation.swift" "$TASK_ROOT/Sources/HeadPreviewSyncPresentation.swift" \
   "$TASK_ROOT/Sources/PresenceTracker.swift" "$TASK_ROOT/Sources/RemovalPresenceCoordinator.swift" \
   "$TASK_ROOT/Sources/VeilMath.swift" "$TASK_ROOT/Sources/AirPodsRemovalGuard.swift" \
   "$TASK_ROOT/Tests/AppModelLifecycleTests.swift" -o "$TASK_ROOT/build/tests/appmodel-lifecycle"

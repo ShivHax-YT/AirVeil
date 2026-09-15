@@ -107,8 +107,13 @@ enum RemovalPresencePhase: String, Equatable {
         let cleanup = startCleanup(ticket: ticket, suspend: false)
         startTask = Task { [weak self] in
             guard let self else { return }
-            _ = await cleanup.value
+            let restored = await cleanup.value
             guard current(ticket) else { return }
+            guard restored else {
+                isActive = false
+                finishCleanup(restored: false, suspended: false)
+                return
+            }
             await prepareCamera()
             guard current(ticket) else { return }
             cameraFullyStopped = false
@@ -192,15 +197,20 @@ enum RemovalPresencePhase: String, Equatable {
     @discardableResult
     func recoverAfterActivation() async -> Bool {
         inactive = false
-        return await finishForRewear()
+        return await finishForRewear(recoveringAfterActivation: true)
     }
 
     @discardableResult
     func finishForRewear() async -> Bool {
+        await finishForRewear(recoveringAfterActivation: false)
+    }
+
+    private func finishForRewear(recoveringAfterActivation: Bool) async -> Bool {
         let ticket = invalidate()
         isActive = false; isBusy = true; phase = inactive ? .suspended : .finishing
         status = "Stopping presence and restoring brightness before head tracking."
-        let restored = await startCleanup(ticket: ticket, suspend: inactive).value
+        let restored = await startCleanup(ticket: ticket, suspend: inactive,
+            recoveringAfterActivation: recoveringAfterActivation).value
         guard generation == ticket else { return false }
         finishCleanup(restored: restored, suspended: inactive)
         return canResumeHeading
@@ -287,11 +297,13 @@ enum RemovalPresencePhase: String, Equatable {
         if stopBarrier?.id == id { stopBarrier = nil }
     }
 
-    private func startCleanup(ticket: UInt64, suspend: Bool) -> Task<Bool, Never> {
+    private func startCleanup(ticket: UInt64, suspend: Bool,
+                              recoveringAfterActivation: Bool = false) -> Task<Bool, Never> {
         let task = Task { [weak self] () -> Bool in
             guard let self, generation == ticket else { return false }
             async let stopped: Void = stopCamera()
-            async let restored: Bool = restoreBrightness(ticket: ticket, suspend: suspend)
+            async let restored: Bool = restoreBrightness(ticket: ticket, suspend: suspend,
+                recoveringAfterActivation: recoveringAfterActivation)
             let result = await restored
             await stopped
             guard generation == ticket else { return false }
@@ -303,9 +315,11 @@ enum RemovalPresencePhase: String, Equatable {
         return task
     }
 
-    private func restoreBrightness(ticket: UInt64, suspend: Bool) async -> Bool {
+    private func restoreBrightness(ticket: UInt64, suspend: Bool,
+                                   recoveringAfterActivation: Bool) async -> Bool {
         guard generation == ticket else { return false }
         if suspend { return await dimmer.suspendUntilActive() }
+        if recoveringAfterActivation { return await dimmer.recoverIfNeeded() }
         return await dimmer.restore()
     }
 

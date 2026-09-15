@@ -9,7 +9,7 @@ import SwiftUI
         // Constructing the service does not start or request access to the camera.
         let camera = CameraAnchorService()
         let p = NotchOverlayPresentation()
-        p.expanded = true; p.demo = true; p.canCenter = true; p.cameraEnabled = true
+        p.expanded = true; p.demo = true; p.canCenter = true; p.canEnable = true; p.cameraEnabled = true
         let states: [(String, NotchCoachSnapshot)] = [
             ("seeking", .init(phase: .seeking, title: "Looking for your face", detail: "Face the camera and keep your face visible.", issue: .faceMissing)),
             ("off-center", .init(phase: .offCenter, title: "Look straight ahead", detail: "13° from center. Aim within 5°.", horizontalError: -0.3, issue: .pose)),
@@ -55,6 +55,31 @@ import SwiftUI
             print("PASS: reveal keyframe \(index), screen-edge width \(metrics.width)pt")
         }
         p.revealProgress = nil
+        p.wearAirPodsPrompt = true
+        var firstWearArt: [UInt8]?
+        for (index, time) in [0.0, 2.0, 4.0, 6.0].enumerated() {
+            p.animationTime = time
+            let frame = try render("wear-airpods-keyframe-\(index)", p, camera, destination)
+            // Nonzero 3D transforms may omit unrelated sibling layers in
+            // ImageRenderer. Compare the artwork region itself, never treat
+            // missing text as proof of animation or live layout acceptance.
+            let art = imageRegion(frame, points: CGRect(x: 100, y: 32, width: 160, height: 105))
+            if let firstWearArt {
+                renderRequire(art != firstWearArt, "The AirPods artwork itself must change over time")
+            } else {
+                firstWearArt = art
+                let button = frame.colorAt(x: 160, y: 528)?.usingColorSpace(.deviceRGB)
+                renderRequire((button?.redComponent ?? 0) > 0.8,
+                              "The static full composition must include its visible Turn off feature button")
+            }
+        }
+        renderRequire(NSImage(systemSymbolName: "airpodspro", accessibilityDescription: nil) != nil,
+                      "The AirPods waiting illustration must use an available native symbol")
+        let staticA = try renderStaticWearGlyph(time: 0, name: "wear-reduced-motion-a", destination: destination)
+        let staticB = try renderStaticWearGlyph(time: 6, name: "wear-reduced-motion-b", destination: destination)
+        renderRequire(staticA == staticB, "Reduced-motion AirPods artwork must remain identical across times")
+        p.wearAirPodsPrompt = false
+        p.animationTime = 1
         p.controls = true
         try render("controls", p, camera, destination)
         p.topInset = 0; p.controls = false; p.snapshot = states[1].1
@@ -73,7 +98,7 @@ import SwiftUI
         p.topInset = 32; p.demo = false; p.snapshot = states[2].1
         try render("edge-light-controls", p, lightCamera, destination)
         lightCamera.stop()
-        print("Rendered \(states.count + 20) notch states at 2x without camera capture")
+        print("Rendered \(states.count + 24) notch states at 2x plus two identical reduced-motion AirPods glyphs without camera capture")
     }
     @discardableResult
     @MainActor static func render(_ name: String, _ p: NotchOverlayPresentation, _ camera: CameraAnchorService, _ destination: URL) throws -> NSBitmapImageRep {
@@ -94,6 +119,28 @@ import SwiftUI
     private struct RevealMetrics {
         let width: CGFloat
         let center: CGFloat
+    }
+    private static func imageRegion(_ bitmap: NSBitmapImageRep, points: CGRect) -> [UInt8] {
+        guard let bytes = bitmap.bitmapData else { renderFailure("Could not inspect generated art pixels") }
+        let channels = bitmap.bitsPerPixel / 8
+        var result: [UInt8] = []
+        for y in Int(points.minY * 2)..<min(bitmap.pixelsHigh, Int(points.maxY * 2)) {
+            let start = y * bitmap.bytesPerRow + Int(points.minX * 2) * channels
+            let length = Int(points.width * 2) * channels
+            result.append(contentsOf: UnsafeBufferPointer(start: bytes + start, count: length))
+        }
+        return result
+    }
+    @MainActor private static func renderStaticWearGlyph(time: Double, name: String, destination: URL) throws -> Data {
+        let renderer = ImageRenderer(content: NotchAirPodsWaitGlyph(elapsed: time, moving: false)
+            .frame(width: 160, height: 100).background(.black))
+        renderer.scale = 2
+        guard let image = renderer.cgImage,
+              let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+            renderFailure("Could not render static AirPods artwork")
+        }
+        try data.write(to: destination.appendingPathComponent("\(name).png"))
+        return data
     }
     /// Measure actual black output against the fixture's gray background. This
     /// catches a view still drawing a fixed-width stem even if Shape tests pass.

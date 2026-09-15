@@ -191,9 +191,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func windowWillClose(_ notification: Notification) {
         if onboarding.isActive { onboarding.cancelPendingRequest() }
         else { tour.finish() }
+        model.stopHeadPreviewSync()
         model.setPreviewVisible(false)
     }
-    func windowDidMiniaturize(_ notification: Notification) { model.setPreviewVisible(false) }
+    func windowDidMiniaturize(_ notification: Notification) {
+        model.stopHeadPreviewSync()
+        model.setPreviewVisible(false)
+    }
     func windowDidDeminiaturize(_ notification: Notification) { updatePreviewVisibility() }
     func windowDidChangeOcclusionState(_ notification: Notification) { updatePreviewVisibility() }
     private func updatePreviewVisibility() {
@@ -255,6 +259,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func writeDiagnostics(_ path:String) {
         let snapshot:[String:Any] = ["timestamp":Date().timeIntervalSince1970,
             "permissionSetupActive":onboarding.isActive,
+            "wearAirPodsPrompt":model.wearAirPodsPrompt,
+            "automaticFeaturesPaused":model.automaticFeaturesPaused,
+            "headPreviewSyncRequested":model.headPreviewSync.snapshot.requested,
+            "headPreviewSyncStatus":model.headPreviewSync.snapshot.status,
+            "headPreviewSyncYaw":model.headPreviewSync.snapshot.yaw as Any? ?? NSNull(),
             "permissionBackgroundTickCount":permissionBackgroundTickCount,
             "permissionBackgroundElapsed":permissionBackgroundElapsed,
             "motionAllowedBySetup":model.motionAccessAllowedByOnboarding,
@@ -271,6 +280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "presenceState":model.presence.state.rawValue,"presenceCameraRunning":model.presence.isRunning,
             "presenceStatus":model.presence.status,"displayDimmed":model.dimming.isDimmed,
             "brightnessRestorePending":model.dimming.hasPendingRestore,"brightnessStatus":model.dimming.status,
+            "brightnessOriginal":model.dimming.restorationSnapshot?.baseline as Any? ?? NSNull(),
+            "brightnessLastApplied":model.dimming.restorationSnapshot?.lastApplied as Any? ?? NSNull(),
+            "brightnessPendingTarget":model.dimming.restorationSnapshot?.pendingTarget as Any? ?? NSNull(),
             "displayIdleSleepPrevented":model.dimming.keepsDisplayAwake,
             "motionConnectionState":model.motion.connectionState.rawValue,"disconnectEventCount":model.motion.disconnectEventCount,
             "removalEventCount":model.motion.removalEventCount,"removalConnectionState":model.motion.removalConnectionState.rawValue,

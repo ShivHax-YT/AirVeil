@@ -15,9 +15,15 @@ import SwiftUI
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         for side in BlurTurnSide.allCases {
             for dark in [false, true] {
+                for (name, yaw, syncing) in [("illustrated", Optional<Double>.none, false),
+                                              ("live-left", 25.0, true), ("live-right", -25.0, true),
+                                              ("waiting", nil, true)] {
                 let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
                 app.appearance = appearance
-                let content = BlurOnsetDial(left: .constant(18), right: .constant(32), initialSide: side)
+                let content = BlurOnsetDial(left: .constant(18), right: .constant(32), initialSide: side,
+                    liveYaw: yaw, syncRequested: syncing,
+                    syncStatus: syncing ? (yaw == nil ? "Face the camera and hold still." : "Following your head. Starting angles stay unchanged.") : "Align with the camera, then follow your AirPods.",
+                    toggleSync: {})
                     .padding(24).frame(width: 680)
                     .background(Color(nsColor: .windowBackgroundColor))
                     .environment(\.colorScheme, dark ? .dark : .light)
@@ -35,8 +41,7 @@ import SwiftUI
                 window.setFrame(CGRect(x: -20_000, y: -20_000, width: size.width, height: size.height), display: false)
                 host.frame = CGRect(origin: .zero, size: size)
                 window.orderFront(nil)
-                // A real view lifecycle launches OnsetArc.task. Its 0.24 s
-                // illustrative head turn must settle before caching the bitmap.
+                // Allow the native control and composited layers to lay out.
                 try await Task.sleep(nanoseconds: 600_000_000)
                 host.layoutSubtreeIfNeeded()
                 host.displayIfNeeded()
@@ -49,9 +54,10 @@ import SwiftUI
                     host.cacheDisplay(in: host.bounds, to: bitmap)
                 }
                 guard let data = bitmap.representation(using: .png, properties: [:]) else { fatalError("Render failed") }
-                try data.write(to: destination.appendingPathComponent("\(side.rawValue.lowercased())-\(dark ? "dark" : "light").png"))
+                try data.write(to: destination.appendingPathComponent("\(name)-\(side.rawValue.lowercased())-\(dark ? "dark" : "light").png"))
                 window.orderOut(nil)
                 window.close()
+                }
             }
         }
         let note = """
@@ -61,10 +67,10 @@ import SwiftUI
         misplaced at the bitmap origin. This is a capture-path limitation; these PNGs
         are not proof of correct head placement or rotation. Inspect the live native
         window before claiming complete visual validation. No sensors or display
-        capture were used. The .task lifecycle was given 0.6 s to settle.
+        capture were used. The native lifecycle was given 0.6 s to settle.
         """
         try note.write(to: destination.appendingPathComponent("NATIVE-RENDER-LIMITATION.txt"), atomically: true, encoding: .utf8)
-        print("Wrote four native dial diagnostics at 2x. Picker/theme verified; 3D head requires live-window inspection.")
+        print("Wrote 16 native dial diagnostics at 2x: illustrated, live left/right, and pending. Picker/text layout verified; 3D head requires live-window inspection.")
     }
 }
 

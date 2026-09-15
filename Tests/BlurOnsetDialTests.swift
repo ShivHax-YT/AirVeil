@@ -24,6 +24,22 @@ import SwiftUI
             check(VeilMath.target(yawDegrees: -20, leftOnset: 10, rightOnset: 20, wholeScreen: fullScreen) == .zero, "Exact right onset remains clear")
             check(VeilMath.target(yawDegrees: 32, leftOnset: 10, rightOnset: 20, wholeScreen: fullScreen).right == 1, "Full point remains full coverage")
         }
-        print("PASS: \(checks) independent onset and one-sided dial checks")
+        for side in BlurTurnSide.allCases {
+            check(BlurDialGeometry.headRotation(side: side, threshold: 18, liveYaw: 25, syncing: true) == -25,
+                  "Live left yaw turns the illustration left regardless of edited threshold side")
+            check(BlurDialGeometry.headRotation(side: side, threshold: 32, liveYaw: -20, syncing: true) == 20,
+                  "Live right yaw turns the illustration right regardless of edited threshold side")
+            check(BlurDialGeometry.headRotation(side: side, threshold: 32, liveYaw: nil, syncing: true) == 0,
+                  "Pending camera alignment does not invent a live head pose")
+            check(BlurDialGeometry.headRotation(side: side, threshold: 32, liveYaw: .nan, syncing: true) == 0,
+                  "Invalid live yaw cannot reach a rendering transform")
+            check(BlurDialGeometry.headRotation(side: side, threshold: 18, liveYaw: 25, syncing: false) == side.screenSign * 18,
+                  "Stopping sync restores the selected threshold illustration even if a stale yaw remains")
+        }
+        check(BlurDialGeometry.headRotation(side: .left, threshold: 18, liveYaw: 120, syncing: true) == -60,
+              "Extreme positive yaw remains bounded")
+        check(BlurDialGeometry.headRotation(side: .right, threshold: 32, liveYaw: -120, syncing: true) == 60,
+              "Extreme negative yaw remains bounded")
+        print("PASS: \(checks) independent onset, one-sided dial, and live head preview checks")
     }
 }

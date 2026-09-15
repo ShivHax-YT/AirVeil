@@ -145,7 +145,19 @@ import CoreMedia
         sessionActive = active
         if !active {
             cancelBurst(); engine.invalidate(); isAligned = false; lastAttemptEpoch = nil; hadLiveAlignment = false
-            if isEnabled { status = "Camera is off while your Mac is asleep or inactive." }
+            if isEnabled { status = "Head-direction checks are paused." }
+        } else if isEnabled {
+            // Activation updates guidance only. Existing recovery policy and
+            // explicit actions remain responsible for starting a camera check.
+            if !motion.isFresh {
+                status = hasCenter
+                    ? "Waiting for AirPods before checking the saved screen direction."
+                    : "Wear your AirPods, then face the camera and use Set center."
+            } else {
+                status = hasCenter
+                    ? "Face the camera. Use Refresh direction to check your saved screen direction."
+                    : "Face the camera and use Set center to set up camera assistance."
+            }
         }
     }
     func update(layoutKey: String) {

@@ -1,11 +1,34 @@
 import SwiftUI
 import Combine
 
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case preview = "Preview", tracking = "Tracking", displays = "Displays", appearance = "Appearance", power = "Power"
+    var id: String { rawValue }
+    var symbol: String {
+        switch self {
+        case .preview: return "play.rectangle"
+        case .tracking: return "airpodspro"
+        case .displays: return "display.2"
+        case .appearance: return "slider.horizontal.3"
+        case .power: return "leaf"
+        }
+    }
+}
+
 /// Stable identifiers also serve as scroll destinations and spotlight anchors.
 enum SettingsTourStep: String, CaseIterable, Identifiable {
     case welcome, preview, tracking, access, camera, displays, input, removal, seated
     case energy, coverage, onset, full, appearance, tuning, ready
     var id: String { rawValue }
+    var section: SettingsSection {
+        switch self {
+        case .welcome, .preview, .ready: return .preview
+        case .tracking, .camera: return .tracking
+        case .access, .displays, .input: return .displays
+        case .coverage, .onset, .full, .appearance, .tuning: return .appearance
+        case .removal, .seated, .energy: return .power
+        }
+    }
     var title: String {
         switch self {
         case .welcome: return "Meet AirVeil"
@@ -28,7 +51,7 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
     }
     var detail: String {
         switch self {
-        case .welcome: return "AirVeil follows your AirPods to cover your screen as you turn away. Try the highlighted controls as you go, or scroll to explore. You can replay this tour anytime."
+        case .welcome: return "AirVeil follows your AirPods to cover your screen as you turn away. Settings are grouped into five tabs. This tour opens each tab for you; try its highlighted controls as you go."
         case .preview: return "Drag the highlighted slider to simulate a head turn. Center resets it. This tour preview works even while live blur is on, and changes only the example image."
         case .tracking: return "Wear compatible AirPods and choose Start head tracking if shown. Once motion is detected, face your display and choose Set center. Manual tracking needs a new center after an interruption."
         case .access: return "Screen Recording access lets AirVeil blur your actual desktop. Screen frames stay on this Mac. The preview and AirPod removal features work without this permission."
@@ -38,10 +61,10 @@ enum SettingsTourStep: String, CaseIterable, Identifiable {
         case .removal: return "Turn on automatic display management and keep Automatic Ear Detection on. After tracking is established, removing both AirPods can stop their motion stream and start a seat check. AirVeil cannot identify individual earbuds."
         case .seated: return "Choose your seated brightness; 0% goes black without locking. Camera assistance and a saved seat are needed. Fresh motion after putting AirPods back restores brightness. Only confirmed absence turns displays off; an uncertain check ends without locking."
         case .energy: return "Automatic reduces desktop refresh in Low Power Mode or when your Mac is running hot. Smoothest keeps the usual refresh; Reduced energy always refreshes less often. Head tracking, camera checks, and removal behavior keep their normal timing."
-        case .coverage: return "Directional half covers one side as you turn. Whole-screen sweep spreads the effect across the screen. Choose either option here; scroll up to compare them in the preview."
-        case .onset: return "Set separate left and right angles with the dial. A smaller angle begins blur sooner; a larger angle gives you more room to move before it starts."
+        case .coverage: return "Directional half covers one side as you turn. Whole-screen sweep spreads the effect across the screen. Choose either option here; open Preview to compare them."
+        case .onset: return "Set separate left and right starting angles with the dial. Sync head uses a camera check, then lets the illustration follow your AirPods. Syncing does not change either starting angle."
         case .full: return "Fully obscured sets the angle where the effect reaches maximum coverage. Keep it beyond the starting angles for a gradual transition."
-        case .appearance: return "Opaque cover replaces blur with a solid cover. Invert direction swaps which side responds to a head turn. Try either switch, then scroll up to see the result in the preview."
+        case .appearance: return "Opaque cover replaces blur with a solid cover. Invert direction swaps which side responds to a head turn. Try either switch, then open Preview to see the result."
         case .tuning: return "Blur strength changes how much detail disappears. Soft edge controls the fade boundary. Response sets smoothing time: lower feels quicker, higher feels gentler. Try the sliders to find your preferred feel."
         case .ready: return "Wear your AirPods, set your center, and allow screen access before choosing Enable blur. Pause & clear screen stays available in the menu bar. You can return to these settings anytime."
         }
@@ -137,6 +160,7 @@ struct TourSpotlight: View {
 
 struct SettingsTourCard: View {
     @ObservedObject var tour: SettingsTour
+    var showHighlightedControl: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var titleFocused: Bool
     @State private var appeared = false
@@ -165,9 +189,14 @@ struct SettingsTourCard: View {
                 Text(step.detail).font(.system(size: 13)).lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 16) {
-                    ProgressView(value: Double(tour.index + 1), total: Double(SettingsTourStep.allCases.count))
-                        .progressViewStyle(.linear).frame(width: 108)
-                        .accessibilityLabel("Tour progress")
+                    if let showHighlightedControl {
+                        Button("Show control", action: showHighlightedControl).controlSize(.large)
+                            .accessibilityHint("Returns to the tab for this tutorial step.")
+                    } else {
+                        ProgressView(value: Double(tour.index + 1), total: Double(SettingsTourStep.allCases.count))
+                            .progressViewStyle(.linear).frame(width: 108)
+                            .accessibilityLabel("Tour progress")
+                    }
                     Spacer()
                     Button(action: { tour.back() }) {
                         Text("Back").frame(minWidth: 64, minHeight: 44).contentShape(Rectangle())

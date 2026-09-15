@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import Combine
+import Darwin
 
 /// Standalone test-module shadows: the real coordinator/engine/service execute,
 /// but no actual MotionService or persistent preferences are constructed.
@@ -25,6 +26,8 @@ enum MotionConnectionState { case connected, disconnected, unknown }
     var authorization = CameraAuthorization.authorized
     var permissionAllowed = true
     var permissionRequests = 0
+    var holdPermission = false
+    var permissionContinuation: CheckedContinuation<Bool, Never>?
     var starts = 0
     var stops = 0
     var cameraID = "builtin-test"
@@ -34,8 +37,16 @@ enum MotionConnectionState { case connected, disconnected, unknown }
     var handlers: [@MainActor (CameraAnchorFrame) -> Void] = []
     func requestPermission() async -> Bool {
         permissionRequests += 1
-        authorization = permissionAllowed ? .authorized : .denied
-        return permissionAllowed
+        let allowed: Bool
+        if holdPermission { allowed = await withCheckedContinuation { permissionContinuation = $0 } }
+        else { allowed = permissionAllowed }
+        authorization = allowed ? .authorized : .denied
+        return allowed
+    }
+    func releasePermission(_ allowed: Bool) {
+        let continuation = permissionContinuation
+        permissionContinuation = nil
+        continuation?.resume(returning: allowed)
     }
     func start(onFrame: @escaping @MainActor (CameraAnchorFrame) -> Void,
                onPreview: @escaping @MainActor (CGImage) -> Void,
@@ -74,7 +85,8 @@ private struct StoredCameraProbe: Codable {
     let light = CoordinatorFaceLight()
     var coordinator: CameraHeadingCoordinator!
     var layout = "display-A"
-    init(enabled: Bool = true, stored: Bool = false, legacy: Bool = false) {
+    init(enabled: Bool = true, stored: Bool = false, legacy: Bool = false, holdPermission: Bool = false) {
+        capture.holdPermission = holdPermission
         camera = CameraAnchorService(capture: capture, faceLight: light)
         defaults.set(enabled, forKey: "cameraAssistance")
         if stored {
@@ -114,10 +126,48 @@ private struct StoredCameraProbe: Codable {
         var checks = 0
         func check(_ condition: @autoclosure () -> Bool, _ message: String) {
             checks += 1
-            if !condition() { fatalError(message) }
+            if !condition() {
+                FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8))
+                Darwin.exit(1)
+            }
         }
         func settle() async { for _ in 0..<20 { await Task.yield() } }
         func close(_ a: Double, _ b: Double) -> Bool { abs(a-b) < 0.001 }
+        for stored in [false, true] {
+            for fresh in [false, true] {
+                let f = CoordinatorFixture(stored: stored)
+                f.motion.isFresh = fresh
+                f.motion.removalConnectionState = .unknown
+                f.coordinator.setSessionActive(false)
+                check(f.coordinator.status == "Head-direction checks are paused.",
+                      "Paused heading guidance does not assume the Mac is asleep or the presence camera is off")
+                f.coordinator.setSessionActive(true)
+                await settle()
+                let expected = fresh
+                    ? (stored ? "Face the camera. Use Refresh direction to check your saved screen direction."
+                              : "Face the camera and use Set center to set up camera assistance.")
+                    : (stored ? "Waiting for AirPods before checking the saved screen direction."
+                              : "Wear your AirPods, then face the camera and use Set center.")
+                check(f.coordinator.status == expected,
+                      "Activation replaces stale inactive guidance for saved=\(stored), fresh=\(fresh)")
+                check(f.capture.starts == 0 && f.capture.permissionRequests == 0 &&
+                      !f.camera.isRunning && !f.coordinator.isBusy && !f.light.isOn &&
+                      f.coordinator.coach.phase == .idle && !f.coordinator.trackingValid,
+                      "Refreshing activation guidance starts no camera, permission request, light, or alignment")
+                f.end()
+            }
+        }
+        do {
+            let f = CoordinatorFixture(stored: true)
+            f.coordinator.cancelPendingRecovery()
+            f.coordinator.setSessionActive(false)
+            f.coordinator.setSessionActive(true)
+            f.advance(0.8)
+            await settle()
+            check(f.capture.starts == 0 && f.capture.permissionRequests == 0 && !f.coordinator.isBusy,
+                  "New activation guidance preserves an explicitly cancelled automatic recovery policy")
+            f.end()
+        }
         do {
             let f = CoordinatorFixture(enabled: false)
             f.coordinator.setSessionActive(false)
@@ -140,6 +190,39 @@ private struct StoredCameraProbe: Codable {
             await settle()
             check(f.capture.permissionRequests == 0 && f.capture.starts == 0, "Queued permission cancels before entry")
             check(!f.coordinator.isBusy && !f.coordinator.isEnabled && f.coordinator.coach.phase == .idle, "Cancelled enable stays idle")
+            f.end()
+        }
+        do {
+            let f = CoordinatorFixture(enabled: false, stored: true, holdPermission: true)
+            f.advance(0.8)
+            f.coordinator.requestEnable()
+            for _ in 0..<200 where f.capture.permissionContinuation == nil { await Task.yield() }
+            check(f.capture.permissionRequests == 1 && f.capture.permissionContinuation != nil &&
+                  f.coordinator.isBusy && f.capture.starts == 0,
+                  "The late-permission regression enters and holds the actual permission provider before cancellation")
+            // This is the real coordinator sequence used by Turn off feature:
+            // cancel the pending intent, then keep the camera session inactive.
+            f.coordinator.cancelPendingRecovery()
+            f.coordinator.setSessionActive(false)
+            check(!f.coordinator.isBusy && !f.coordinator.isEnabled && f.coordinator.coach.phase == .idle,
+                  "Turning the feature off immediately clears pending permission UI and enable intent")
+            f.capture.releasePermission(true)
+            await settle()
+            check(f.camera.authorization == .authorized && !f.coordinator.isEnabled &&
+                  !f.defaults.bool(forKey: "cameraAssistance") && !f.coordinator.isBusy,
+                  "A real late permission grant updates authorization without reviving cancelled camera assistance")
+            check(f.capture.starts == 0 && !f.camera.isRunning && !f.light.isOn && f.coordinator.coach.phase == .idle,
+                  "Late approval cannot open capture, illuminate the face, or show another camera check")
+            f.advance(0.8)
+            // Even later activation and a new wear event cannot recreate the
+            // cancelled Enable intent merely because OS permission is granted.
+            f.coordinator.setSessionActive(true)
+            f.motion.removalEventCount += 1
+            f.advance(0.8)
+            await settle()
+            check(f.capture.permissionRequests == 1 && f.capture.starts == 0 &&
+                  !f.coordinator.isEnabled && !f.camera.isRunning && !f.coordinator.isBusy,
+                  "Fresh motion and later active ticks do not restart a cancelled permission/Enable request")
             f.end()
         }
         do {

@@ -304,6 +304,63 @@ import Foundation
             check(f.backend.value == original && f.store.record == nil, "Late dim never loses the original baseline")
         }
         do {
+            let f = Fixture(), original = f.backend.value
+            check(await f.service.setDimmed(true, targetBrightness: 0.02), "Interrupted restore starts with the user's seated dim target")
+            f.backend.holdWrites = true
+            let restore = Task { await f.service.restore() }
+            await settle { f.backend.pendingWrites.count == 1 }
+            let suspend = Task { await f.service.suspendUntilActive() }
+            await settle { f.service.isSuspended }
+            f.backend.holdWrites = false; f.backend.completeWrite()
+            let restored = await restore.value, suspended = await suspend.value
+            check(!restored && suspended && f.service.isSuspended,
+                  "Lock supersedes a driver restore that completes after suspension")
+            check(f.store.record?.baseline == original && f.store.record?.pendingTarget == original,
+                  "A late restore acknowledgement retains the exact durable baseline until awake verification")
+            // The sleep transition may retain the old dim even after the driver
+            // acknowledged the previous write. Both journaled values remain owned.
+            f.backend.value = 0.02
+            check(await f.service.recoverIfNeeded(), "A fresh activation rechecks the driver after the interrupted restore")
+            check(f.backend.value == original && f.store.record == nil,
+                  "The following wake restores the original instead of accepting its own dim as the next baseline")
+        }
+        for error in [DisplayDimmingError.displayAsleep, .readFailed(-7)] {
+            let f = Fixture(), original = f.backend.value
+            check(await f.service.setDimmed(true, targetBrightness: 0.02), "Wake read-failure fixture starts dimmed")
+            check(await f.service.suspendUntilActive(), "Wake read-failure fixture retains its journal through sleep")
+            f.backend.readFailure = error
+            let writes = f.backend.writes.count
+            check(!(await f.service.recoverIfNeeded()), "A sleeping or unreadable panel cannot confirm restoration")
+            check(f.store.record?.baseline == original && f.backend.writes.count == writes,
+                  "An untrusted wake reading never clears ownership or creates a dimmed baseline")
+            f.backend.readFailure = nil
+            check(await f.service.recoverIfNeeded(), "A later awake reading retries the same restoration")
+            check(f.backend.value == original && f.store.record == nil,
+                  "Successful wake recovery restores the original after a transient read failure")
+        }
+        do {
+            let f = Fixture(), original = f.backend.value
+            check(await f.service.setDimmed(true, targetBrightness: 0.02), "Failed restore setter fixture starts dimmed")
+            f.backend.nextWriteFailure = DisplayDimmingError.writeFailed(-8)
+            f.backend.failAfterApplying = true
+            check(!(await f.service.restore()), "A setter error cannot claim a completed restore even after applying it")
+            check(f.store.record?.baseline == original && f.store.record?.pendingTarget == original,
+                  "A failed restore setter retains the original and pending baseline for verification")
+            check(await f.service.recoverIfNeeded(), "A later verified baseline resolves an uncertain restore setter")
+            check(f.backend.value == original && f.store.record == nil,
+                  "Uncertain restore completion never replaces the original baseline")
+        }
+        do {
+            let f = Fixture()
+            check(await f.service.setDimmed(true, targetBrightness: 0.02), "Manual adjustment after wake fixture starts dimmed")
+            check(await f.service.suspendUntilActive(), "Manual adjustment fixture crosses suspension")
+            f.backend.value = 0.4
+            let writes = f.backend.writes.count
+            check(await f.service.recoverIfNeeded(), "A confirmed awake manual brightness choice resolves ownership")
+            check(f.backend.value == 0.4 && f.backend.writes.count == writes && f.store.record == nil,
+                  "Wake recovery preserves a real manual brightness adjustment instead of forcing the former baseline")
+        }
+        do {
             let f = Fixture(timeout: 0.03), original = f.backend.value
             f.backend.holdWrites = true
             let dim = Task { await f.service.setDimmed(true) }

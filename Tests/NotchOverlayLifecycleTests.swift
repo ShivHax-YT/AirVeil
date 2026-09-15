@@ -21,13 +21,20 @@ import SwiftUI
     var centerBusy = false
     var enabled = false
     var starting = false
+    var canRequestEnable = true
+    @Published var wearAirPodsPrompt = false
     var showWindow: (() -> Void)?
     var centerCalls = 0, refreshCalls = 0, enableCameraCalls = 0
+    var enableCalls = 0, cancelWearCalls = 0
     func calibrate() { centerCalls += 1 }
     func refreshCameraDirection() { refreshCalls += 1 }
     func enableCameraAssistance() { enableCameraCalls += 1 }
-    func pause() { enabled = false; cameraHeading.coach = .init() }
-    func enable() { enabled = true }
+    func pause() { enabled = false; wearAirPodsPrompt = false; cameraHeading.coach = .init() }
+    func enable() {
+        enableCalls += 1
+        if motion.isFresh { enabled = true } else { wearAirPodsPrompt = true }
+    }
+    func cancelWearWait() { cancelWearCalls += 1; pause() }
 }
 
 @main struct NotchOverlayLifecycleTests {
@@ -198,13 +205,93 @@ import SwiftUI
         try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         check(!panel.isVisible && controller.presentation.snapshot.phase == .idle,
               "Only the finished retraction clears the old visual snapshot")
+        let originalFrame = panel.frame
+        model.motion.isFresh = false
+        controller.showControls()
+        check(controller.presentation.canEnable, "Missing AirPods motion alone does not disable Enable blur")
+        model.canRequestEnable = false
+        controller.updateControls()
+        check(!controller.presentation.canEnable, "Notch enable readiness follows the model's permission/session gate")
+        model.canRequestEnable = true
+        controller.updateControls()
+        controller.presentation.toggleEffect()
+        await drain()
+        check(model.enableCalls == 1 && controller.presentation.wearAirPodsPrompt && controller.presentation.expanded,
+              "Enable blur without motion opens the model's wait surface")
+        check(!controller.presentation.controls && !controller.presentation.demo && panel.frame == originalFrame,
+              "Waiting morphs inside the existing panel instead of opening a separate window")
+        check(controller.presentation.contentWidth == 280 && controller.presentation.canopyWidth <= panel.frame.width,
+              "Wear illustration and button fit within the fixed panel")
+        controller.showControls()
+        controller.previewAnimation()
+        model.cameraHeading.coach = .init()
+        controller.updatePointerPosition(CGPoint(x: -20000, y: -20000))
+        await drain()
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
+        check(controller.presentation.expanded && controller.presentation.wearAirPodsPrompt && !controller.presentation.demo,
+              "Pointer exit, idle delivery, controls, and demo cannot replace the active wait")
+        model.cameraHeading.coach = .init(phase: .failure, title: "Old check", detail: "")
+        await drain()
+        check(controller.presentation.wearAirPodsPrompt,
+              "A previous camera result does not take priority over current removal waiting")
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        check(!controller.presentation.expanded, "Session sleep collapses the wait surface")
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        check(controller.presentation.expanded && controller.presentation.wearAirPodsPrompt,
+              "A still-active wait returns after wake without enabling blur itself")
+        model.wearAirPodsPrompt = false
+        model.cameraHeading.coach = .init(phase: .starting, title: "Checking direction", detail: "")
+        await drain()
+        check(!controller.presentation.wearAirPodsPrompt && controller.presentation.snapshot.phase == .starting && controller.presentation.expanded,
+              "Fresh return hands the same panel to the actual camera alignment state")
+        model.cameraHeading.coach = .init()
+        model.wearAirPodsPrompt = true
+        await drain()
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
+        check(controller.presentation.wearAirPodsPrompt && controller.presentation.expanded,
+              "Queued old idle or dismissal work cannot hide a new removal wait")
+        controller.presentation.turnOffFeature()
+        await drain()
+        check(model.cancelWearCalls == 1 && !model.wearAirPodsPrompt && !controller.presentation.expanded,
+              "Turn off feature delegates cancellation to the owner exactly once")
+        check(controller.presentation.wearAirPodsPrompt,
+              "Retraction retains the wear illustration instead of flashing an idle camera")
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
+        check(!panel.isVisible && !controller.presentation.wearAirPodsPrompt,
+              "Finished cancellation clears and hides the old waiting artwork")
+        controller.showControls()
+        controller.presentation.toggleEffect()
+        await drain()
+        check(model.enableCalls == 2 && controller.presentation.wearAirPodsPrompt,
+              "The ordinary Enable blur control can explicitly reenter waiting without motion")
+        controller.presentation.cancel()
+        await drain()
+        check(model.cancelWearCalls == 2, "Accessible Cancel while waiting uses the same cancellation owner")
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         check(!model.cameraHeading.camera.isRunning && model.cameraHeading.camera.previewImage == nil, "Lifecycle tests never start the camera")
         controller.shutdown()
         defaults.removeObject(forKey: NotchOverlayController.tutorialCompletionKey)
-        let firstUse = NotchOverlayController(model: AppModel(), defaults: defaults)
+        let firstUseModel = AppModel()
+        firstUseModel.wearAirPodsPrompt = true
+        let firstUse = NotchOverlayController(model: firstUseModel, defaults: defaults)
+        firstUse.showControls()
+        await drain()
+        check(firstUse.presentation.wearAirPodsPrompt && firstUse.presentation.tutorialStep == nil,
+              "An urgent first-use wear prompt does not start or complete the tutorial")
+        firstUseModel.wearAirPodsPrompt = false
+        await drain()
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         firstUse.showControls()
         check(firstUse.presentation.tutorialStep == .tracking && firstUse.presentation.expanded,
               "The very first notch appearance opens the tutorial")
+        firstUseModel.wearAirPodsPrompt = true
+        await drain()
+        check(firstUse.presentation.wearAirPodsPrompt && firstUse.presentation.tutorialStep == .tracking,
+              "A removal wait keeps an unfinished tutorial's place")
+        firstUse.presentation.turnOffFeature()
+        await drain()
+        check(!firstUse.presentation.wearAirPodsPrompt && firstUse.presentation.tutorialStep == .tracking && firstUse.presentation.expanded,
+              "Canceling removal returns to the pending tutorial without marking it complete")
         firstUse.updatePointerPosition(CGPoint(x: -20000, y: -20000))
         firstUse.presentation.cancel()
         await drain()

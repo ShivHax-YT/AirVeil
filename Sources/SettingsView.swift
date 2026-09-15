@@ -149,6 +149,8 @@ struct SettingsView: View {
     @ObservedObject var tour: SettingsTour
     var showPermissions: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var selectedSection: SettingsSection
+    var onTourTargetResolved: ((SettingsSection, SettingsTourStep, CGRect?, CGSize) -> Void)? = nil
     @State private var advanced = false
     @State private var advancedBeforeTour = false
     @State private var tourSimulation = true
@@ -163,32 +165,143 @@ struct SettingsView: View {
     private var simulation: Binding<Bool> {
         tour.isActive ? $tourSimulation : $model.simulate
     }
+    init(model: AppModel, tour: SettingsTour, showPermissions: (() -> Void)? = nil,
+         initialSection: SettingsSection = .preview,
+         onTourTargetResolved: ((SettingsSection, SettingsTourStep, CGRect?, CGSize) -> Void)? = nil) {
+        self.model = model; self.tour = tour; self.showPermissions = showPermissions
+        self.onTourTargetResolved = onTourTargetResolved
+        _selectedSection = State(initialValue: tour.step?.section ?? initialSection)
+    }
     private let accent = Color(red:0.18,green:0.43,blue:0.92)
     var body: some View {
-        ScrollViewReader { proxy in
         VStack(spacing: 0) {
-        ScrollView {
-            VStack(alignment:.leading,spacing:22) {
-                HStack(spacing:14) {
-                    Image(systemName:"circle.lefthalf.filled")
-                        .font(.system(size:30,weight:.medium)).foregroundStyle(.white)
-                        .frame(width:58,height:58).background(accent,in:RoundedRectangle(cornerRadius:17))
-                    VStack(alignment:.leading,spacing:4) {
-                        Text("AirVeil").font(.system(size:30,weight:.bold))
-                        Text("A screen that follows your attention.").font(.subheadline).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                header
+                TabView(selection: $selectedSection) {
+                    ForEach(SettingsSection.allCases) { section in
+                        sectionPage(section)
+                            .tabItem { Label(section.rawValue, systemImage: section.symbol) }
+                            .tag(section)
                     }
-                    Spacer()
-                    if !tour.isActive {
-                        if let showPermissions {
-                            Button("Permissions", action: showPermissions).controlSize(.large)
-                        }
-                        Button("Take a tour") { tour.replay() }.controlSize(.large)
-                    }
-                    Text(model.enabled ? "BLUR ON" : "BLUR PAUSED").font(.caption.weight(.bold))
-                        .foregroundStyle(model.enabled ? Color.green : Color.secondary)
-                        .padding(.horizontal,12).padding(.vertical,7)
-                        .background(.quaternary,in:Capsule())
-                }.tourTarget(.welcome)
+                }
+                .padding(.horizontal, 12)
+                .accessibilityIdentifier("settings-sections")
+                if !tour.isActive { LegalFooter().padding(.horizontal, 20).padding(.vertical, 10) }
+            }
+            .overlayPreferenceValue(TourAnchorKey.self) { anchors in
+                if let step = tour.step {
+                    GeometryReader { geometry in
+                        let rect = anchors[step].map { geometry[$0] }
+                        TourSpotlight(rect: rect).id(step)
+                            .onAppear { onTourTargetResolved?(selectedSection, step, rect, geometry.size) }
+                            .onChange(of: rect) { _, next in
+                                onTourTargetResolved?(selectedSection, step, next, geometry.size)
+                            }
+                    }.allowsHitTesting(false)
+                }
+            }
+            if tour.isActive {
+                SettingsTourCard(tour: tour, showHighlightedControl: tour.step?.section != selectedSection ? {
+                    if let section = tour.step?.section { selectedSection = section }
+                } : nil)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .onChange(of: tour.step) { old, step in
+            if old == nil, step != nil {
+                advancedBeforeTour = advanced
+                tourSimulation = true; tourPreviewYaw = 0
+            }
+            if step == .tuning { advanced = true }
+            if let step { selectedSection = step.section }
+            else { advanced = advancedBeforeTour }
+        }
+        .onChange(of: selectedSection) { old, _ in
+            if old == .appearance { model.stopHeadPreviewSync() }
+        }
+        .onDisappear { model.stopHeadPreviewSync() }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: tour.isActive)
+        .frame(minWidth: 740, idealWidth: 800, minHeight: 660, idealHeight: 850)
+        .onAppear { model.refreshPermission() }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 24, weight: .medium)).foregroundStyle(.white)
+                    .frame(width: 44, height: 44).background(accent, in: RoundedRectangle(cornerRadius: 13))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("AirVeil").font(.system(size: 22, weight: .semibold))
+                    Text(model.enabled ? "Blur is on" : "Blur is paused")
+                        .font(.caption).foregroundStyle(model.enabled ? Color.green : Color.secondary)
+                }
+            }.tourTarget(.welcome)
+            Spacer()
+            Group {
+                if model.enabled || model.starting {
+                    Button("Pause & clear screen") { model.pause() }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                } else { EnableEffectButton(presentation: model.presentation, model: model) }
+            }.tourTarget(.ready)
+            Menu {
+                if let showPermissions { Button("Permissions", action: showPermissions) }
+                Button("Take a tour") { tour.replay() }
+            } label: {
+                Image(systemName: "ellipsis.circle").font(.title3).frame(width: 32, height: 32)
+            }.menuStyle(.borderlessButton).fixedSize().help("Setup and tutorial")
+                .accessibilityLabel("Setup and tutorial")
+        }.padding(.horizontal, 24).padding(.vertical, 12)
+    }
+
+    private func sectionPage(_ section: SettingsSection) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                if selectedSection == section {
+                    VStack(alignment: .leading, spacing: 20) {
+                        sectionContent(section)
+                    }.padding(20).frame(maxWidth: 720).frame(maxWidth: .infinity)
+                }
+            }
+            .accessibilityIdentifier("settings-page-" + section.rawValue.lowercased())
+            .task(id: "\(selectedSection.rawValue)-\(tour.step?.rawValue ?? "none")") {
+                guard selectedSection == section, let step = tour.step, step.section == section else { return }
+                // Wait for the newly selected native tab to lay out its anchors.
+                await Task.yield()
+                try? await Task.sleep(nanoseconds: 30_000_000)
+                guard !Task.isCancelled else { return }
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(step, anchor: .center)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func sectionContent(_ section: SettingsSection) -> some View {
+        switch section {
+        case .preview:
+            previewCard
+            Text(model.message).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Blur affects everyone viewing a selected display. Tracking loss pauses the effect. Use the menu bar or the pause shortcut to clear the screen.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Text(model.pauseHint).font(.caption2).foregroundStyle(.secondary)
+        case .tracking:
+            HeadTrackingControls(presentation: model.presentation, model: model)
+                .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 20)).tourTarget(.tracking)
+            cameraCard
+        case .displays:
+            accessCard
+            displaysCard
+        case .appearance:
+            appearanceCard
+        case .power:
+            powerCards
+        }
+    }
+
+    @ViewBuilder private var previewCard: some View {
                 VStack(alignment:.leading,spacing:12) {
                     if tour.isActive {
                         HStack {
@@ -198,7 +311,7 @@ struct SettingsView: View {
                         }
                     } else { TrackingHeader(presentation:model.presentation) }
                     VeilPreview(model:model, simulationYaw: tour.isActive && simulating ? tourPreviewYaw : nil)
-                        .frame(height:tour.isActive ? 150 : 280).clipShape(RoundedRectangle(cornerRadius:14))
+                        .frame(height:tour.isActive ? 128 : 260).clipShape(RoundedRectangle(cornerRadius:14))
                         .overlay(RoundedRectangle(cornerRadius:14).stroke(.primary.opacity(0.08)))
                         .accessibilityLabel("Directional blur preview")
                     HStack {
@@ -223,9 +336,9 @@ struct SettingsView: View {
                     }
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.preview)
 
-                HStack(alignment:.top,spacing:16) {
-                    HeadTrackingControls(presentation:model.presentation,model:model).tourTarget(.tracking)
-                    Divider()
+    }
+
+    @ViewBuilder private var accessCard: some View {
                     VStack(alignment:.leading,spacing:10) {
                         Label("Live blur access",systemImage:"display").font(.headline)
                         Text(model.permissionGranted ? "Screen capture allowed. Frames stay on this Mac." : "Allow screen capture for live blur. Preview needs no permission.")
@@ -238,9 +351,10 @@ struct SettingsView: View {
                         Text("Screen Recording permission is only needed for live blur. AirPod removal, seated blackout and display off work without it.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                    }.frame(maxWidth:.infinity,alignment:.leading).tourTarget(.access)
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+                    }.frame(maxWidth:.infinity,alignment:.leading).padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.access)
+    }
 
+    @ViewBuilder private var cameraCard: some View {
                 VStack(alignment:.leading,spacing:12) {
                     Label("Remember screen direction with the camera",systemImage:"camera")
                         .font(.headline)
@@ -265,6 +379,9 @@ struct SettingsView: View {
                     }
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.camera)
 
+    }
+
+    @ViewBuilder private var displaysCard: some View {
                 VStack(alignment:.leading,spacing:12) {
                     VStack(alignment:.leading,spacing:12) {
                     HStack {
@@ -295,6 +412,38 @@ struct SettingsView: View {
                     }.tourTarget(.input)
                 }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
 
+    }
+
+    @ViewBuilder private var appearanceCard: some View {
+                VStack(alignment:.leading,spacing:16) {
+                    HStack {
+                        Text("Make it feel right").font(.headline)
+                        Spacer()
+                        Button("Reset defaults",systemImage:"arrow.counterclockwise") { model.resetDefaults() }.controlSize(.small)
+                    }
+                    Picker("Screen coverage",selection:$model.wholeScreen) {
+                        Text("Directional half").tag(false)
+                        Text("Whole-screen sweep").tag(true)
+                    }.pickerStyle(.segmented).accessibilityLabel("Screen coverage").tourTarget(.coverage)
+                    SyncedBlurOnsetDial(model: model, sync: model.headPreviewSync, compact: tour.isActive).tourTarget(.onset)
+                    setting("Fully obscured",value:$model.fullAngle,range:model.minimumFullAngle...70,unit:"°").tourTarget(.full)
+                    HStack {
+                        Toggle("Opaque cover",isOn:$model.opaque).toggleStyle(.switch)
+                        Spacer()
+                        Toggle("Invert direction",isOn:$model.inverted).toggleStyle(.switch)
+                    }.controlSize(.small).tourTarget(.appearance)
+                    DisclosureGroup("Fine-tune the animation",isExpanded:$advanced) {
+                        VStack(spacing:14) {
+                            setting("Blur strength",value:$model.blurPoints,range:8...64,unit:" pt")
+                            setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%")
+                            setting("Response",value:Binding(get:{model.response*1000},set:{model.response=$0/1000}),range:25...200,unit:" ms")
+                        }.padding(.top,14)
+                    }.font(.subheadline).tourTarget(.tuning)
+                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+
+    }
+
+    @ViewBuilder private var powerCards: some View {
                 VStack(alignment:.leading,spacing:12) {
                     VStack(alignment:.leading,spacing:12) {
                     Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
@@ -339,81 +488,8 @@ struct SettingsView: View {
 
                 EnergySettingsView(energy: model.energy, overlay: model.overlay).tourTarget(.energy)
 
-                VStack(alignment:.leading,spacing:16) {
-                    HStack {
-                        Text("Make it feel right").font(.headline)
-                        Spacer()
-                        Button("Reset defaults",systemImage:"arrow.counterclockwise") { model.resetDefaults() }.controlSize(.small)
-                    }
-                    Picker("Screen coverage",selection:$model.wholeScreen) {
-                        Text("Directional half").tag(false)
-                        Text("Whole-screen sweep").tag(true)
-                    }.pickerStyle(.segmented).accessibilityLabel("Screen coverage").tourTarget(.coverage)
-                    BlurOnsetDial(left: $model.leftOnset, right: $model.rightOnset).tourTarget(.onset)
-                    setting("Fully obscured",value:$model.fullAngle,range:model.minimumFullAngle...70,unit:"°").tourTarget(.full)
-                    HStack {
-                        Toggle("Opaque cover",isOn:$model.opaque).toggleStyle(.switch)
-                        Spacer()
-                        Toggle("Invert direction",isOn:$model.inverted).toggleStyle(.switch)
-                    }.controlSize(.small).tourTarget(.appearance)
-                    DisclosureGroup("Fine-tune the animation",isExpanded:$advanced) {
-                        VStack(spacing:14) {
-                            setting("Blur strength",value:$model.blurPoints,range:8...64,unit:" pt")
-                            setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%")
-                            setting("Response",value:Binding(get:{model.response*1000},set:{model.response=$0/1000}),range:25...200,unit:" ms")
-                        }.padding(.top,14)
-                    }.font(.subheadline).tourTarget(.tuning)
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
-
-                HStack(spacing:12) {
-                    Text(model.message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                    Spacer()
-                    if model.enabled || model.starting {
-                        Button("Pause & clear screen") { model.pause() }.buttonStyle(.borderedProminent).controlSize(.large)
-                    } else {
-                        EnableEffectButton(presentation:model.presentation,model:model)
-                    }
-                }.tourTarget(.ready)
-                HStack(alignment:.top) {
-                    Text("Blur affects everyone viewing a selected display. Tracking loss pauses the blur. Camera assistance needs a clear view of your face; manual mode needs Set center after an interrupted reference.")
-                    Spacer()
-                    Text(model.pauseHint).fixedSize()
-                }.font(.caption2).foregroundStyle(.secondary)
-                LegalFooter().padding(.top, 4).frame(maxWidth: .infinity)
-            }.padding(28).frame(maxWidth:800)
-        }
-        .overlayPreferenceValue(TourAnchorKey.self) { anchors in
-            if let step = tour.step {
-                GeometryReader { geometry in
-                    TourSpotlight(rect: anchors[step].map { geometry[$0] })
-                }.allowsHitTesting(false)
-            }
-        }
-        .clipped()
-        if tour.isActive { SettingsTourCard(tour: tour).transition(.move(edge: .bottom).combined(with: .opacity)) }
-        }
-        .onChange(of: tour.step) { old, step in
-            if old == nil, step != nil {
-                advancedBeforeTour = advanced
-                tourSimulation = true; tourPreviewYaw = 0
-            }
-            if step == .tuning { advanced = true }
-            if let step {
-                // Let disclosure/layout changes settle before resolving the target.
-                DispatchQueue.main.async {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { proxy.scrollTo(step, anchor: .center) }
-                }
-            } else { advanced = advancedBeforeTour }
-        }
-        .onAppear {
-            if let step = tour.step { proxy.scrollTo(step, anchor: .center) }
-        }
-        }
-        .background(Color(nsColor:.windowBackgroundColor))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: tour.isActive)
-        .frame(minWidth:740,idealWidth:800,minHeight:660,idealHeight:850)
-        .onAppear { model.refreshPermission() }
     }
+
     private func setting(_ title:String,value:Binding<Double>,range:ClosedRange<Double>,unit:String) -> some View {
         HStack {
             Text(title).font(.subheadline).frame(width:126,alignment:.leading)
@@ -421,5 +497,23 @@ struct SettingsView: View {
             Text(String(format:"%.0f",value.wrappedValue)+unit).font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary).frame(width:60,alignment:.trailing)
         }
+    }
+}
+
+
+/// Sensor telemetry updates this small control, not the entire Settings tree.
+private struct SyncedBlurOnsetDial: View {
+    let model: AppModel
+    @ObservedObject var sync: HeadPreviewSyncPresentation
+    var compact: Bool
+    var body: some View {
+        BlurOnsetDial(left: Binding(get: { model.leftOnset }, set: { model.leftOnset = $0 }),
+                      right: Binding(get: { model.rightOnset }, set: { model.rightOnset = $0 }),
+                      liveYaw: sync.snapshot.yaw, syncRequested: sync.snapshot.requested,
+                      syncStatus: sync.snapshot.status, compact: compact,
+                      toggleSync: {
+                          if sync.snapshot.requested { model.stopHeadPreviewSync() }
+                          else { model.startHeadPreviewSync() }
+                      })
     }
 }

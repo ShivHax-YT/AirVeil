@@ -78,6 +78,8 @@ enum DisplayDimmingError: LocalizedError, Equatable {
     @Published private(set) var status = "Display brightness is unchanged."
     @Published private(set) var lastError: String?
     var hasPendingRestore: Bool { record != nil }
+    /// Numeric state for explicitly enabled local diagnostics; no hardware read.
+    var restorationSnapshot: DisplayBrightnessRestoreRecord? { record }
     var keepsDisplayAwake: Bool { assertion != nil }
     var isSuspended: Bool { desired == .suspended }
     static let defaultTargetBrightness = 0.0
@@ -304,6 +306,11 @@ enum DisplayDimmingError: LocalizedError, Equatable {
             try validate(restored, matching: journal.displayID)
             guard matchesRequestedBrightness(restored.brightness, requested: journal.baseline) else { throw DisplayDimmingError.verificationFailed }
         }
+        // A lock/sleep notification can supersede the restore while the driver
+        // is completing its write. Its acknowledgement is not an awake-session
+        // verification: keep both the original dim and pending baseline in the
+        // journal so the next activation can safely verify either value again.
+        guard ticket == revision else { return false }
         try store.clear(); record = nil
         isDimmed = false; lastError = nil
         status = "Original display brightness restored."
@@ -433,11 +440,15 @@ private final class BuiltInBrightnessWorker: @unchecked Sendable {
     }
     func read(displayID: String?) throws -> DisplayBrightnessReading {
         let (display, stable) = try builtInDisplay(matching: displayID)
+        // A sleeping panel can return a cached or transitional value. It cannot
+        // establish a new baseline or prove a manual brightness override.
+        guard CGDisplayIsAsleep(display) == 0 else { throw DisplayDimmingError.displayAsleep }
         loadFramework()
         if let getter {
             var value: Float = 0
             let result = getter(display, &value)
             if result == 0 {
+                guard CGDisplayIsAsleep(display) == 0 else { throw DisplayDimmingError.displayAsleep }
                 privateDisplay = display
                 return DisplayBrightnessReading(displayID: stable, brightness: Double(value))
             }
@@ -448,6 +459,7 @@ private final class BuiltInBrightnessWorker: @unchecked Sendable {
         var value: Float = 0
         let result = IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &value)
         guard result == kIOReturnSuccess else { throw DisplayDimmingError.readFailed(result) }
+        guard CGDisplayIsAsleep(display) == 0 else { throw DisplayDimmingError.displayAsleep }
         return DisplayBrightnessReading(displayID: stable, brightness: Double(value))
     }
     func write(_ brightness: Double, displayID: String) throws -> DisplayBrightnessReading {

@@ -44,6 +44,7 @@ import CoreGraphics
     var status = "Fake brightness"
     var targets: [Double] = []
     var restores = 0
+    var recoveries = 0
     var suspends = 0
     var restoreSucceeds = true
     var dimGate: RemovalTestGate?
@@ -68,7 +69,7 @@ import CoreGraphics
         if restoreSucceeds { isDimmed = false; hasPendingRestore = false }
         return restoreSucceeds
     }
-    func recoverIfNeeded() async -> Bool { await restore() }
+    func recoverIfNeeded() async -> Bool { recoveries += 1; return await restore() }
     func suspendUntilActive() async -> Bool {
         revision += 1; suspends += 1; isBusy = false
         return true
@@ -98,6 +99,57 @@ import CoreGraphics
         })
     func begin(now: Double = 100, allowSleep: Bool = true) {
         coordinator.begin(reference: reference, now: now, allowSleepBeforePresence: allowSleep)
+    }
+}
+
+/// Uses the production journal/worker beneath the production coordinator. Only
+/// the physical drivers, persistence, camera, and sleep action are simulated.
+@MainActor private final class RemovalBrightnessDriver: DisplayBrightnessControlling {
+    var value = 0.8124999403953552
+    var writes: [Double] = []
+    var readFailure: DisplayDimmingError?
+    var writeGate: RemovalTestGate?
+    func read(displayID: String?) async throws -> DisplayBrightnessReading {
+        if let readFailure { throw readFailure }
+        return .init(displayID: "built-in-test", brightness: value)
+    }
+    func write(_ brightness: Double, displayID: String) async throws -> DisplayBrightnessReading {
+        writes.append(brightness)
+        if let writeGate { await writeGate.wait() }
+        value = brightness
+        return .init(displayID: "built-in-test", brightness: value)
+    }
+}
+
+@MainActor private final class RemovalBrightnessJournal: DisplayBrightnessRestoreStoring {
+    var record: DisplayBrightnessRestoreRecord?
+    var saved: [DisplayBrightnessRestoreRecord] = []
+    func load() throws -> DisplayBrightnessRestoreRecord? { record }
+    func save(_ record: DisplayBrightnessRestoreRecord) throws { self.record = record; saved.append(record) }
+    func clear() throws { record = nil }
+}
+
+@MainActor private final class RemovalIdleAssertion: DisplayIdleAssertionControlling {
+    var held = false
+    func acquire() throws -> UInt32 { held = true; return 1 }
+    func release(_ assertion: UInt32) { held = false }
+}
+
+@MainActor private final class RealDimmingRemovalFixture {
+    let presence = FakeRemovalPresence()
+    let driver = RemovalBrightnessDriver()
+    let journal = RemovalBrightnessJournal()
+    let assertion = RemovalIdleAssertion()
+    var sleeps = 0
+    lazy var dimmer = DisplayDimmingService(brightness: driver, store: journal, assertions: assertion,
+        timeout: 2, now: { 1234 })
+    lazy var coordinator = RemovalPresenceCoordinator(presence: presence, dimmer: dimmer,
+        prepareCamera: {}, requestDisplaySleep: { [weak self] in self?.sleeps += 1 })
+    func begin(now: Double, allowSleep: Bool = true) {
+        let reference = PresenceSeatReference(cameraID: "camera", configurationID: "fixed",
+            faceBounds: CGRect(x: 0.35, y: 0.45, width: 0.25, height: 0.25), captureHostTime: now - 1)
+        coordinator.begin(reference: reference, targetBrightness: 0.02, now: now,
+            allowSleepBeforePresence: allowSleep, allowUncertainSleep: false)
     }
 }
 
@@ -290,6 +342,96 @@ import CoreGraphics
             await settle()
             check(f.sleeps == 0 && f.presence.starts == 0 && !f.coordinator.isActive,
                   "A connection-only check without valid seat geometry never falls back to sleep")
+        }
+        do {
+            let f = RemovalFixture()
+            f.dimmer.restoreSucceeds = false; f.dimmer.hasPendingRestore = true
+            f.begin(); await settle()
+            check(f.presence.starts == 0 && f.prepares == 0 && f.coordinator.phase == .failed && !f.coordinator.isActive,
+                  "A failed previous brightness cleanup blocks the next camera/removal episode")
+            f.dimmer.restoreSucceeds = true
+            let recovered = await f.coordinator.recoverAfterActivation()
+            check(recovered && f.dimmer.recoveries == 1,
+                  "Confirmed activation uses the dimmer's explicit recovery entry point")
+        }
+        for rewearBeforeUnlock in [true, false] {
+            let f = RealDimmingRemovalFixture()
+            for (index, original) in [0.8124999403953552, 0.625, 0.4375].enumerated() {
+                let now = Double(200 + index * 20)
+                // Each completed cycle may start from a new manual awake choice.
+                f.driver.value = original
+                let firstSaved = f.journal.saved.count
+                f.begin(now: now); await settle()
+                f.presence.state = .present; f.coordinator.update(now: now + 1); await settle()
+                check(f.driver.value == 0.02 && f.journal.record?.baseline == original && f.assertion.held,
+                      "Every repeated seated-removal cycle retains its actual pre-dim brightness")
+                f.presence.state = .absent; f.coordinator.update(now: now + 2); await settle()
+                f.coordinator.suspend(); await settle()
+                let writesAtLock = f.driver.writes.count
+                check(f.sleeps == index + 1 && !f.assertion.held && f.dimmer.hasPendingRestore,
+                      "Departure sleeps once and keeps restoration ownership without an awake assertion")
+                if rewearBeforeUnlock {
+                    let inactiveRewear = await f.coordinator.finishForRewear()
+                    check(!inactiveRewear && f.driver.writes.count == writesAtLock && f.journal.record?.baseline == original,
+                          "AirPods returned before unlock cannot write brightness or discard the original")
+                }
+                let recovered = await f.coordinator.recoverAfterActivation()
+                check(recovered && f.driver.value == original && f.journal.record == nil,
+                      "Unlock restores the original independently of whether AirPods already returned")
+                if !rewearBeforeUnlock {
+                    // AppModel resumes a still-removed episode after unlock. A
+                    // fresh seated check can dim again before the later rewear.
+                    f.begin(now: now + 3, allowSleep: false); await settle()
+                    f.presence.state = .present; f.coordinator.update(now: now + 4); await settle()
+                    check(f.driver.value == 0.02 && f.journal.record?.baseline == original,
+                          "A resumed removal episode captures restored brightness, never its previous dim")
+                    let finished = await f.coordinator.finishForRewear()
+                    check(finished && f.driver.value == original && f.journal.record == nil,
+                          "AirPods returned after unlock restore the same original a second time")
+                }
+                check(f.coordinator.canResumeHeading && !f.dimmer.isBusy && !f.assertion.held &&
+                      f.journal.saved.dropFirst(firstSaved).allSatisfy { $0.baseline == original },
+                      "Both return orders complete each cycle without a dimmed baseline or stale ownership")
+            }
+        }
+        for failure in [DisplayDimmingError.displayAsleep, .readFailed(-1)] {
+            let f = RealDimmingRemovalFixture(), original = 0.8124999403953552
+            f.begin(now: 300); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 301); await settle()
+            f.presence.state = .absent; f.coordinator.update(now: 302); await settle()
+            f.coordinator.suspend(); await settle()
+            _ = await f.coordinator.finishForRewear()
+            f.driver.readFailure = failure
+            let failedRecovery = await f.coordinator.recoverAfterActivation()
+            check(!failedRecovery && f.coordinator.phase == .failed && !f.coordinator.canResumeHeading &&
+                  f.journal.record?.baseline == original,
+                  "An early wake read failure retains ownership and exposes retryable failure")
+            let starts = f.presence.starts
+            f.begin(now: 303); await settle()
+            check(f.presence.starts == starts && f.coordinator.phase == .failed && f.driver.value == 0.02,
+                  "A failed wake read cannot restart camera capture or record the dim as a new baseline")
+            f.driver.readFailure = nil
+            let recovered = await f.coordinator.recoverAfterActivation()
+            check(recovered && f.driver.value == original && !f.dimmer.hasPendingRestore,
+                  "A later awake retry completes the original restore after either failure")
+        }
+        do {
+            let f = RealDimmingRemovalFixture(), original = 0.8124999403953552
+            f.begin(now: 400); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 401); await settle()
+            let gate = RemovalTestGate(); f.driver.writeGate = gate
+            let rewear = Task { await f.coordinator.finishForRewear() }; await settle()
+            check(gate.waiters == 1 && f.journal.record?.pendingTarget == original,
+                  "A delayed restore journals the original before entering the driver")
+            f.coordinator.suspend(); await settle()
+            f.driver.writeGate = nil; gate.release()
+            _ = await rewear.value; await settle()
+            check(f.coordinator.phase == .suspended && f.journal.record?.baseline == original && !f.assertion.held,
+                  "A restore acknowledged after lock cannot clear its durable journal")
+            f.driver.value = 0.02
+            let recovered = await f.coordinator.recoverAfterActivation()
+            check(recovered && f.driver.value == original && f.journal.record == nil,
+                  "Wake verifies the final panel state and restores after a superseded driver acknowledgement")
         }
         print("PASS: \(checks) RemovalPresenceCoordinator checks with fake providers; no camera, brightness, assertion, or sleep access")
     }

@@ -2,6 +2,8 @@
 
 The macOS deliverable must satisfy the following checks before completion can be claimed.
 
+**Current acceptance:** the [build 24 sequence](../validation/SETTINGS-WEAR-AND-WAKE-0.15.0-24.md) adds repeated brightness recovery for both unlock/reinsert orders, tabbed Settings, Sync head, and wait/cancel/automatic-enable flows. Older sections below retain research history. Current camera checks require facing the camera within ±5° in one pass; they do not promise off-axis recovery or require a calibration turn. Public Core Motion cannot identify individual earbud wear. Capture excludes AirVeil's veil/notch/illumination windows while deliberately including its ordinary Settings window.
+
 | Requirement | Evidence required |
 |---|---|
 | Four research assignments before app implementation | Two sensor reports and two rendering/animation reports, all cited and reviewed |
