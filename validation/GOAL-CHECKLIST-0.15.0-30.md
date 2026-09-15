@@ -32,3 +32,9 @@ Full regression passed (`build/build30-regression.log`), including 419 AppModel,
 Installed diagnostics show active/unlocked, steady motion, completed camera alignment, seat ready, both cameras off, no pending brightness restoration, Dim/Lock on, and the user-selected 1% target preserved (`build/validation/build30-after-install.json`). The new seated retest records `build/validation/build30-seated-recheck-cycle1.jsonl`; physical success is not yet claimed.
 
 DMG SHA-256: `1e37b2b7444e3c72fd83663a807edc06fde142a69c34d6b5c359698e23773eb2`. Executable SHA-256: `f6053603ec11604bd9fcd62c82f02dbb3763c0c6111efd5bd001724671ad9054`. No push or public release.
+
+## First installed seated trace
+
+`build/validation/build30-seated-recheck-cycle1.jsonl` records steady motion loss at 1789494057.309524, seated dimming at 1789494061.31054, and fresh return motion with brightness restored and the journal cleared at 1789494101.310039. Approximately 40 seconds remained classified occupied at the 1% target, with zero display-sleep requests. The return snapshot is `build/validation/build30-seated-cycle1-return.json`. This is runtime evidence, pending the wearer's visible-result confirmation.
+
+Neither measured low light nor neutral seat recheck triggered in this attempt because the camera continued seeing the occupant. It does not establish the new announcement/restoration sequence or automatic departure coverage.
