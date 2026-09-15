@@ -38,3 +38,11 @@ DMG SHA-256: `1e37b2b7444e3c72fd83663a807edc06fde142a69c34d6b5c359698e23773eb2`.
 `build/validation/build30-seated-recheck-cycle1.jsonl` records steady motion loss at 1789494057.309524, seated dimming at 1789494061.31054, and fresh return motion with brightness restored and the journal cleared at 1789494101.310039. Approximately 40 seconds remained classified occupied at the 1% target, with zero display-sleep requests. The return snapshot is `build/validation/build30-seated-cycle1-return.json`. This is runtime evidence, pending the wearer's visible-result confirmation.
 
 Neither measured low light nor neutral seat recheck triggered in this attempt because the camera continued seeing the occupant. It does not establish the new announcement/restoration sequence or automatic departure coverage.
+
+## Wearer confirmation and Off persistence
+
+The wearer confirmed the seated behavior: the wear reminder appeared, the screen dimmed about one second later, remained dim for roughly a minute, and restored when the AirPods were worn or Turn off feature was selected. This accepts seated dimming and both restoration actions; it does not exercise low-light/neutral recheck or departure locking.
+
+Following the wearer's Off action, `build30-user-off-before-relaunch.json` records paused state with both cameras off and brightness restored. AirVeil quit normally through its menu; `pgrep -x AirVeil` returned no process. A LaunchServices restart produced a new PID89913 and a new launch event while remaining paused, with no cameras or dim journal (`build30-user-off-after-relaunch.json`). This establishes Off persistence across normal relaunch. The explicit notch re-enable/return sequence is now pending in `build30-off-relaunch-notch-enable.jsonl`.
+
+The wearer confirmed direct notch Enable displayed the wear reminder. `build30-direct-notch-waiting.json` confirms the reminder visible, automatic pause cleared by explicit Enable, motion absent, both cameras off, blur disabled, and brightness unchanged. The five-minute `build30-off-relaunch-notch-enable.jsonl` recording completed in that waiting state with no camera alignment or return event. Later diagnostics show the app paused again; no cause is inferred. The physical return/alignment/automatic-blur portion awaits the wearer response.
