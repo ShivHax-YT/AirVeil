@@ -1841,6 +1841,168 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                   "No-journal recovery preserves feature-off and starts no camera or desktop effect")
             model.shutdown()
         }
+        do {
+            let active: [String: Any] = [kCGSessionOnConsoleKey as String: true, kCGSessionLoginDoneKey as String: true]
+            check(SessionLockEvidence.read(active) == .unlocked,
+                  "The observed active-console schema with absent lock key is valid unlocked evidence")
+            var explicit = active; explicit["CGSSessionScreenIsLocked"] = false
+            check(SessionLockEvidence.read(explicit) == .unlocked, "An explicit false lock flag is valid unlocked evidence")
+            explicit["CGSSessionScreenIsLocked"] = true
+            check(SessionLockEvidence.read(explicit) == .locked, "An explicit lock flag remains authoritative suspension evidence")
+            for malformed: Any in ["false", NSNull(), 0, 1, 2, NSNumber(value: 0), NSNumber(value: 1), NSNumber(value: 0.0)] {
+                explicit["CGSSessionScreenIsLocked"] = malformed
+                check(SessionLockEvidence.read(explicit) == .unavailable,
+                      "A malformed present lock value is unavailable rather than an inferred unlock")
+            }
+            check(SessionLockEvidence.read(nil) == .unavailable && SessionLockEvidence.read([:]) == .unavailable,
+                  "A missing session dictionary or flags cannot establish an unlocked session")
+            var missing = active; missing.removeValue(forKey: kCGSessionLoginDoneKey as String)
+            check(SessionLockEvidence.read(missing) == .unavailable, "An absent login-done flag cannot clear a lock")
+            missing = active; missing[kCGSessionOnConsoleKey as String] = NSNumber(value: 1)
+            check(SessionLockEvidence.read(missing) == .unavailable, "A numeric console flag is not accepted as Boolean session evidence")
+            missing = active; missing[kCGSessionOnConsoleKey as String] = false
+            check(SessionLockEvidence.read(missing) == .locked, "An off-console session remains inactive even without a lock key")
+        }
+        do {
+            let model = makeModel()
+            var time = 100.0, reads = 0
+            model.sessionStateClock = { time }
+            model.sessionLockEvidence = { reads += 1; return .unlocked }
+            useCamera(model); model.enable(); await drainTasks()
+            model.handleScreenLock(false)
+            model.handleScreenLock(true)
+            check(!model.enabled && !model.cameraHeading.sessionActive && model.sessionDiagnosticState["screenLocked"] == true,
+                  "A delayed or real lock hint still clears blur and disables camera work immediately")
+            for value in [100.0, 100.5, 101, 101.99] { time = value; model.reconcileSessionLockState() }
+            check(reads == 0 && model.sessionDiagnosticState["screenLocked"] == true,
+                  "A transient unlocked query at the notification boundary cannot bypass the two-second quiet interval")
+            for value in [102.0, 102.25, 102.5, 102.75] { time = value; model.reconcileSessionLockState() }
+            for _ in 0..<20 { model.reconcileSessionLockState() }
+            check(reads == 4 && model.sessionDiagnosticState["screenLocked"] == true,
+                  "Four samples and repeated same-time ticks cannot falsely complete unlocked confirmation")
+            time = 103; model.reconcileSessionLockState(); await drainTasks()
+            check(model.sessionDiagnosticState["active"] == true && reads == 5 && model.cameraHeading.sessionActive,
+                  "Five independent unlocked samples over one second reconcile the stale app lock gate")
+            check(model.recentSessionEvents.last?["source"] as? String == "screen-state-reconciled",
+                  "A bounded diagnostic event distinguishes app-state reconciliation from a macOS unlock notification")
+            let events = model.recentSessionEvents.count, restores = model.dimming.restoreCalls
+            for value in [104.0, 105, 110] { time = value; model.reconcileSessionLockState() }
+            check(model.recentSessionEvents.count == events && model.dimming.restoreCalls == restores && reads == 5,
+                  "A corrected active session does not repeatedly query, restore brightness, or append reconciliation events")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            var time = 100.0
+            var evidence = SessionLockEvidence.unlocked
+            model.sessionStateClock = { time }; model.sessionLockEvidence = { evidence }
+            model.handleScreenLock(true); await drainTasks()
+            for value in [102.0, 102.25] { time = value; model.reconcileSessionLockState() }
+            evidence = .unavailable; time = 102.5; model.reconcileSessionLockState()
+            evidence = .unlocked
+            for value in [102.75, 103, 103.25, 103.5] { time = value; model.reconcileSessionLockState() }
+            check(model.sessionDiagnosticState["screenLocked"] == true,
+                  "Unavailable session evidence resets the consecutive-unlocked proof")
+            evidence = .locked; time = 103.75; model.reconcileSessionLockState()
+            evidence = .unlocked
+            for value in [104.0, 105, 105.74] { time = value; model.reconcileSessionLockState() }
+            check(model.sessionDiagnosticState["screenLocked"] == true,
+                  "A newly observed lock resets the quiet interval before any later unlocked confirmation")
+            for value in [105.75, 106, 106.25, 106.5] { time = value; model.reconcileSessionLockState() }
+            time = 110; model.reconcileSessionLockState()
+            check(model.sessionDiagnosticState["screenLocked"] == true,
+                  "A long polling gap cannot count as continuous unlocked evidence")
+            for value in [110.25, 110.5, 110.75, 111] { time = value; model.reconcileSessionLockState() }
+            await drainTasks()
+            check(model.sessionDiagnosticState["active"] == true,
+                  "A complete later stable sequence can recover after transient and unavailable results")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            var time = 100.0
+            model.sessionStateClock = { time }; model.sessionLockEvidence = { .unlocked }
+            model.handleScreenLock(true); await drainTasks()
+            for value in [102.0, 102.25, 102.5, 102.75] { time = value; model.reconcileSessionLockState() }
+            model.handleScreenLock(true)
+            time = 103; model.reconcileSessionLockState()
+            check(model.sessionDiagnosticState["screenLocked"] == true,
+                  "A second delayed lock hint invalidates an almost-complete unlocked proof")
+            for value in [104.75, 105, 105.25, 105.5, 105.75] { time = value; model.reconcileSessionLockState() }
+            await drainTasks()
+            check(model.sessionDiagnosticState["active"] == true,
+                  "Stable current session evidence can recover after repeated delayed lock hints stop")
+            model.shutdown()
+        }
+        for inactivity in ["screen", "system", "session"] {
+            let model = makeModel()
+            var time = 100.0, reads = 0
+            model.sessionStateClock = { time }; model.sessionLockEvidence = { reads += 1; return .unlocked }
+            model.handleScreenLock(true)
+            switch inactivity {
+            case "screen": model.handleWorkspaceEvent(NSWorkspace.screensDidSleepNotification)
+            case "system": model.handleWorkspaceEvent(NSWorkspace.willSleepNotification)
+            default: model.handleWorkspaceEvent(NSWorkspace.sessionDidResignActiveNotification)
+            }
+            for value in [102.0, 102.25, 102.5, 102.75, 103, 110] { time = value; model.reconcileSessionLockState() }
+            check(reads == 0 && model.sessionDiagnosticState["active"] == false,
+                  "\(inactivity): independent unlocked evidence cannot bypass an inactive workspace flag")
+            switch inactivity {
+            case "screen": model.handleWorkspaceEvent(NSWorkspace.screensDidWakeNotification)
+            case "system": model.handleWorkspaceEvent(NSWorkspace.didWakeNotification)
+            default: model.handleWorkspaceEvent(NSWorkspace.sessionDidBecomeActiveNotification)
+            }
+            check(model.sessionDiagnosticState["screenLocked"] == true,
+                  "\(inactivity): one instantaneous unlocked query on a workspace event cannot erase the latched lock")
+            for value in [112.0, 112.25, 112.5, 112.75, 113] { time = value; model.reconcileSessionLockState() }
+            await drainTasks()
+            check(model.sessionDiagnosticState["active"] == true,
+                  "\(inactivity): recovery is possible only after every workspace flag and unlocked confirmation agree")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            var time = 100.0
+            model.sessionStateClock = { time }; model.sessionLockEvidence = { .unlocked }
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            model.handleScreenLock(true); await drainTasks()
+            model.dimming.holdRestore = true
+            freshWear(model)
+            for value in [102.0, 102.25, 102.5, 102.75, 103] { time = value; model.reconcileSessionLockState() }
+            await drainTasks()
+            check(model.sessionDiagnosticState["active"] == true && model.dimming.hasPendingRestore &&
+                  !model.cameraHeading.sessionActive && !model.presence.isRunning && !model.enabled,
+                  "Reconciled session state still waits for owned brightness restoration before any camera or blur resumes")
+            time = 103.1; model.handleScreenLock(true); await drainTasks()
+            model.dimming.releaseRestore(); await drainTasks()
+            check(model.sessionDiagnosticState["screenLocked"] == true && model.dimming.hasPendingRestore &&
+                  !model.cameraHeading.sessionActive && !model.presence.isRunning,
+                  "A real lock during reconciled brightness recovery defeats its late acknowledgement")
+            for value in [105.1, 105.35, 105.6, 105.85, 106.1] { time = value; model.reconcileSessionLockState() }
+            await drainTasks()
+            check(!model.dimming.hasPendingRestore && model.removalPresence.canResumeHeading && model.cameraHeading.sessionActive,
+                  "A later independent stable session proof retries the original brightness barrier safely")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            var time = 100.0
+            model.sessionStateClock = { time }; model.sessionLockEvidence = { .unlocked }
+            model.cancelWearWait(); await drainTasks()
+            model.handleScreenLock(true); await drainTasks()
+            for value in [102.0, 102.25, 102.5, 102.75, 103] { time = value; model.reconcileSessionLockState() }
+            await drainTasks()
+            check(model.sessionDiagnosticState["active"] == true && model.automaticFeaturesPaused &&
+                  !model.cameraHeading.sessionActive && !model.presence.isRunning && !model.enabled,
+                  "Repairing stale session state preserves the user's explicit Turn off choice")
+            model.handleScreenLock(true); model.shutdown()
+            time = 106
+            for _ in 0..<8 { model.reconcileSessionLockState(); time += 0.25 }
+            check(model.sessionDiagnosticState["screenLocked"] == true && !model.cameraHeading.sessionActive,
+                  "Shutdown prevents cached-state reconciliation from reactivating any work")
+        }
         for returnFirst in [true, false] {
             let model = makeModel()
             var now = ProcessInfo.processInfo.systemUptime

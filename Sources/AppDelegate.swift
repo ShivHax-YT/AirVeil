@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = AppModel()
         model.sessionLockState = Self.isScreenLocked
+        model.sessionLockEvidence = Self.readSessionLockEvidence
         let lockCenter = DistributedNotificationCenter.default()
         for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
             lockObservers.append(lockCenter.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] notification in
@@ -215,10 +216,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool { showSettings(); return true }
     private static func isScreenLocked() -> Bool {
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
-        guard session[kCGSessionOnConsoleKey as String] as? Bool == true,
-              session[kCGSessionLoginDoneKey as String] as? Bool == true else { return true }
-        return session["CGSSessionScreenIsLocked"] as? Bool ?? false
+        readSessionLockEvidence() != .unlocked
+    }
+    private static func readSessionLockEvidence() -> SessionLockEvidence {
+        SessionLockEvidence.read(CGSessionCopyCurrentDictionary() as? [String: Any])
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }

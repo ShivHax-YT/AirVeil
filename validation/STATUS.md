@@ -1,6 +1,10 @@
 # AirVeil validation status
 
-## Current work — 0.15.0 build 28
+## Current work — 0.15.0 build 29
+
+Build 29 is installed and verified after a synchronized probe found a stale internal lock flag while macOS was unlocked. Lock hints still pause immediately; stable valid session evidence now corrects stale state through the existing brightness recovery barrier. Full regression passes, including 415 lifecycle checks. See the [current goal checklist](GOAL-CHECKLIST-0.15.0-29.md) for evidence and remaining physical acceptance.
+
+## Build 28 controls and guidance
 
 Build 28 is installed with separate dim/lock controls, a dismiss-only wear reminder, and a low-light explanation followed by one-time brightness restoration and continued seat monitoring. Full regression and native UI checks pass; new physical low-light/dismissal acceptance remains pending. See [current goal checklist](GOAL-CHECKLIST-0.15.0-28.md).
 

@@ -5,6 +5,29 @@ import QuartzCore
 import ScreenCaptureKit
 import CoreMedia
 
+/// Only the session flags needed for lifecycle safety. The observed unlocked
+/// WindowServer schema omits the lock key; other missing/malformed flags are
+/// unavailable evidence, never a reason to reactivate capture.
+enum SessionLockEvidence: Equatable {
+    case locked, unlocked, unavailable
+
+    static func read(_ session: [String: Any]?) -> SessionLockEvidence {
+        guard let session,
+              let onConsole = boolean(session[kCGSessionOnConsoleKey as String]),
+              let loginDone = boolean(session[kCGSessionLoginDoneKey as String]) else { return .unavailable }
+        guard onConsole && loginDone else { return .locked }
+        guard let value = session["CGSSessionScreenIsLocked"] else { return .unlocked }
+        guard let locked = boolean(value) else { return .unavailable }
+        return locked ? .locked : .unlocked
+    }
+
+    private static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+}
+
 @MainActor
 final class AppModel: NSObject, ObservableObject {
     let motion = MotionService()
@@ -49,6 +72,12 @@ final class AppModel: NSObject, ObservableObject {
     private var resumePresenceEvent: UInt64?
     private var screenLocked = false
     var sessionLockState: () -> Bool = { false }
+    var sessionLockEvidence: () -> SessionLockEvidence = { .unavailable }
+    var sessionStateClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    private var lastLockHintTime: TimeInterval?
+    private var lastLockEvidenceTime: TimeInterval?
+    private var unlockedEvidenceSince: TimeInterval?
+    private var unlockedEvidenceCount = 0
     @Published var dimWhilePresent = false { didSet { updateRemovalPolicy(); persist() } }
     @Published var removalBrightness = 0.0 {
         didSet { if !loading { removalPresence.updateTarget(removalBrightness); persist() } }
@@ -280,6 +309,7 @@ final class AppModel: NSObject, ObservableObject {
         installClock()
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.reconcileSessionLockState()
                 self?.checkAirPodsRemoval()
                 self?.checkReferenceRecovery()
                 self?.refreshPresentation()
@@ -619,7 +649,11 @@ final class AppModel: NSObject, ObservableObject {
         case NSWorkspace.sessionDidBecomeActiveNotification: sessionActive = true
         default: return
         }
-        screenLocked = sessionLockState()
+        // Workspace events can confirm suspension, but a single transient
+        // unlocked query must not erase a newer distributed lock hint.
+        screenLocked = screenLocked || sessionLockState()
+        resetLockEvidence()
+        if screenLocked { lastLockHintTime = sessionStateClock() }
         recordSessionEvent(name.rawValue)
         if isShuttingDown {
             if !isMacSessionActive { cameraHeading.setSessionActive(false); removalPresence.suspend() }
@@ -634,6 +668,8 @@ final class AppModel: NSObject, ObservableObject {
     func handleScreenLock(_ locked: Bool) {
         let wasActive = isMacSessionActive
         screenLocked = locked
+        resetLockEvidence()
+        lastLockHintTime = locked ? sessionStateClock() : nil
         recordSessionEvent(locked ? "screen-lock" : "screen-unlock")
         if isShuttingDown {
             if !isMacSessionActive { cameraHeading.setSessionActive(false); removalPresence.suspend() }
@@ -644,8 +680,58 @@ final class AppModel: NSObject, ObservableObject {
         }
         else { cameraHeading.setSessionActive(false); suspend() }
     }
+
+    /// Distributed lock hints stop work immediately, but can arrive after the
+    /// actual unlock. Correct only the cached gate after independently stable
+    /// unlocked evidence; this never sends a macOS unlock or wake action.
+    func reconcileSessionLockState() {
+        guard !isShuttingDown, screenLocked, systemAwake, screensAwake, sessionActive else {
+            resetLockEvidence()
+            return
+        }
+        let now = sessionStateClock()
+        guard now.isFinite, now >= 0 else { resetLockEvidence(); lastLockHintTime = nil; return }
+        guard let hint = lastLockHintTime, hint.isFinite, now >= hint else {
+            resetLockEvidence(); lastLockHintTime = now
+            return
+        }
+        // A real lock wins even when the session query briefly still reports
+        // its previous unlocked value at the notification boundary.
+        guard now - hint >= 2 else { resetLockEvidence(); return }
+        if let previous = lastLockEvidenceTime {
+            guard now >= previous else { resetLockEvidence(); lastLockHintTime = now; return }
+            guard now - previous >= 0.25 - 0.000001 else { return }
+            if now - previous > 0.75 { unlockedEvidenceSince = nil; unlockedEvidenceCount = 0 }
+        }
+        lastLockEvidenceTime = now
+        switch sessionLockEvidence() {
+        case .locked:
+            unlockedEvidenceSince = nil; unlockedEvidenceCount = 0
+            lastLockHintTime = now
+        case .unavailable:
+            unlockedEvidenceSince = nil; unlockedEvidenceCount = 0
+        case .unlocked:
+            if unlockedEvidenceSince == nil { unlockedEvidenceSince = now }
+            unlockedEvidenceCount += 1
+            guard let since = unlockedEvidenceSince, unlockedEvidenceCount >= 5,
+                  now - since >= 1 - 0.000001 else { return }
+            screenLocked = false
+            resetLockEvidence(); lastLockHintTime = nil
+            recordSessionEvent("screen-state-reconciled")
+            // Owned brightness and wake stabilization still gate every camera
+            // or desktop-effect restart through the ordinary activation path.
+            recoverRemovalAfterActivation()
+        }
+    }
+
+    private func resetLockEvidence() {
+        lastLockEvidenceTime = nil; unlockedEvidenceSince = nil; unlockedEvidenceCount = 0
+    }
+
     func prepareAfterLaunch() {
         screenLocked = sessionLockState()
+        resetLockEvidence()
+        lastLockHintTime = screenLocked ? sessionStateClock() : nil
         recordSessionEvent("launch")
         if isShuttingDown {
             if !isMacSessionActive { cameraHeading.setSessionActive(false); removalPresence.suspend() }
