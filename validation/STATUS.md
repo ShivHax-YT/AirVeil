@@ -1,6 +1,10 @@
 # AirVeil validation status
 
-## Current work — 0.15.0 build 30
+## Current work — 0.15.0 build 31
+
+Build 31 is installed with Enable blur as the primary notch action and Set center to the right. Focused native checks and release/package verification pass. The wearer confirmed the full direct-notch waiting/alignment/automatic-blur flow; the saved trace covers waiting only. See [whole-task checklist](GOAL-CHECKLIST-0.15.0-31.md) for completed and remaining acceptance, including automatic departure, low-light recheck, repeated recovery cycles, and manual tutorial dragging.
+
+## Build 30 foreground checks
 
 Build 30 is installed with full regression and package verification passing. It addresses the confirmed seated false-lock path with foreground-region quality checks and brightness restoration followed by fresh evidence before departure decisions. The physical retest is in progress; no claim that heuristic camera visibility guarantees detection. See [current checklist](GOAL-CHECKLIST-0.15.0-30.md). × was confirmed to dismiss presentation while monitoring continues.
 

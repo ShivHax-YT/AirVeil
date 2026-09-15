@@ -836,7 +836,7 @@ final class AppModel: NSObject, ObservableObject {
         pause()
         cameraHeading.setSessionActive(false)
         setRemovalStatus("Automatic checks are paused. Enable blur to resume.")
-        message = "Blur and camera checks are off. Restoring your previous brightness."
+        message = "Blur and camera checks are paused. Enable blur to resume."
         updateWearAirPodsPrompt()
     }
 

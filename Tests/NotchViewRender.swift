@@ -108,6 +108,16 @@ import SwiftUI
         p.animationTime = 1
         p.controls = true
         try render("controls", p, camera, destination)
+        for name in ["paused", "enabled", "waiting", "camera-setup", "unavailable"] {
+            let controls = NotchOverlayPresentation()
+            controls.expanded = true; controls.controls = true
+            controls.cameraEnabled = name != "camera-setup"
+            controls.canCenter = name == "paused" || name == "enabled"
+            controls.enabled = name == "enabled"
+            controls.canTurnOffFeature = name == "waiting"
+            controls.canEnable = name != "unavailable"
+            try render("controls-\(name)", controls, camera, destination)
+        }
         p.topInset = 0; p.controls = false; p.snapshot = states[1].1
         try render("external-display", p, camera, destination)
         p.topInset = 32; p.demo = false
@@ -124,7 +134,7 @@ import SwiftUI
         p.topInset = 32; p.demo = false; p.snapshot = states[2].1
         try render("edge-light-controls", p, lightCamera, destination)
         lightCamera.stop()
-        print("Rendered \(states.count + 32) notch states at 2x plus AirPods and brightness motion fixtures without camera capture")
+        print("Rendered \(states.count + 37) notch states at 2x plus AirPods and brightness motion fixtures without camera capture")
     }
     @discardableResult
     @MainActor static func render(_ name: String, _ p: NotchOverlayPresentation, _ camera: CameraAnchorService, _ destination: URL) throws -> NSBitmapImageRep {

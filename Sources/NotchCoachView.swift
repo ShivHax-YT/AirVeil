@@ -85,7 +85,7 @@ enum NotchTutorialStep: Int, CaseIterable {
     var contentHeight: CGFloat {
         if wearAirPodsPrompt || brightnessRecovery != .none { return 280 }
         if tutorialStep != nil { return 360 }
-        if controls { return 118 }
+        if controls { return 130 }
         switch snapshot.phase {
         case .success: return 154
         case .lighting: return 190
@@ -411,15 +411,25 @@ struct NotchCanopy: Shape {
                     .accessibilityLabel("Open AirVeil settings")
             }
             HStack(spacing: 10) {
-                Button(action: presentation.center) {
-                    Text(presentation.cameraEnabled ? "Set center" : "Set up camera")
-                        .font(.system(size: 12, weight: .medium)).frame(maxWidth: .infinity).frame(height: 32)
+                Button(action: presentation.toggleEffect) {
+                    Text(presentation.canTurnOffFeature ? "Turn off feature" : (presentation.enabled ? "Pause" : "Enable blur"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity).frame(height: 44)
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain).background(.white.opacity(0.14), in: Capsule())
+                .disabled(!presentation.canTurnOffFeature && !presentation.enabled && !presentation.canEnable)
+                .accessibilityIdentifier("notch-toggle-blur")
+                Button(action: presentation.center) {
+                    Text(presentation.cameraEnabled ? "Set center" : "Set up camera")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .padding(.horizontal, 8).frame(height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).fixedSize(horizontal: true, vertical: false)
                 .disabled(presentation.cameraEnabled && !presentation.canCenter)
-                Button(presentation.canTurnOffFeature ? "Turn off feature" : (presentation.enabled ? "Pause" : "Enable blur"), action: presentation.toggleEffect)
-                    .buttonStyle(NotchTextButton())
-                    .disabled(!presentation.canTurnOffFeature && !presentation.enabled && !presentation.canEnable)
+                .accessibilityIdentifier("notch-set-center")
             }
         }
         .padding(.horizontal, 24).padding(.vertical, 18)
