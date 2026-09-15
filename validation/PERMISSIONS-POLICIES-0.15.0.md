@@ -1,20 +1,20 @@
 # Permissions, policies, and release validation — 0.15.0
 
-Reviewed September 14, 2026. Source version **0.15.0, build 20**. This record separates automated evidence, live launch observations, and remaining acceptance.
+Reviewed September 14, 2026. Initial candidate **0.15.0, build 20**; the later **build 21** visual correction is recorded separately below. This record separates automated evidence, live launch observations, and remaining acceptance.
 
 ## Implemented
 
 - Permission cards precede the Settings tour: Camera, Screen Recording, and Head Tracking. The access action requires reviewing the details; every permission can be declined. Saved progress and explicit choices do not substitute for live macOS authorization. See [PermissionOnboarding.swift](../Sources/PermissionOnboarding.swift), [PermissionOnboardingProvider.swift](../Sources/PermissionOnboardingProvider.swift), and [PermissionOnboardingView.swift](../Sources/PermissionOnboardingView.swift).
 - [AirVeilSetupView.swift](../Sources/AirVeilSetupView.swift) and [AppDelegate.swift](../Sources/AppDelegate.swift) gate normal startup and transition from permissions into the interactive tour. Camera/screen setup does not start a live effect; the explicit motion request may briefly run and stop a motion session.
 - [LegalDocuments.swift](../Sources/LegalDocuments.swift) opens the three policies from bundled Markdown in native sheets before permissions and from Settings. [Resources/Legal](../Resources/Legal) is canonical. External reference/contact links open only when selected.
-- The final visual source uses native `glassEffect` on macOS 26, a material fallback on macOS 14/15, and a solid surface with Reduce Transparency. Inactive side cards remain dimmed, blurred, noninteractive, and hidden from accessibility. [PermissionStarfieldBackground.swift](../Sources/PermissionStarfieldBackground.swift) adds 44 deterministic white stars, an 18 fps maximum requested animation cadence, and one short meteor every 18 seconds. Reduce Motion removes the timeline; an AppKit window-visibility observer also suspends it while hidden, occluded, minimized, or inactive. The native-glass choice follows the user's latest request and supersedes the earlier standard-material preference in the [onboarding research](../research/ONBOARDING-CONSENT-ACCESSIBILITY-2026-09-14.md).
+- The initial build 20 visual source added native `glassEffect` on macOS 26, a material fallback on macOS 14/15, and a solid surface with Reduce Transparency. Inactive side cards were dimmed, blurred, noninteractive, and hidden from accessibility. Its 44-star background used an 18 fps requested cadence and an 18-second meteor interval, but also paused when AirVeil lacked focus; build 21 corrects that behavior below. The native-glass choice supersedes the earlier standard-material preference in the [onboarding research](../research/ONBOARDING-CONSENT-ACCESSIBILITY-2026-09-14.md).
 - The both-AirPods workflow uses public motion loss rather than private Bluetooth ear metadata. Camera-assisted seated dimming restores owned brightness when motion returns. Unknown/unavailable presence does not request sleep; automatic display management with camera assistance or seated dimming off can request sleep directly. The [removal validation record](AIRPODS-REMOVAL-2026-09-14.md) contains the detailed implementation and physical evidence.
 
 ## Automated and artifact evidence
 
 The stored [regression log](../build/permission-dimming-regression.log) records passing motion, camera, AppModel, brightness/restoration, presence, capture, input, and actual 1×/2× GPU checks. Examples include 15 wear-policy checks, 51 MotionService lifecycle checks, 278 AppModel/removal checks, and 106 brightness/ownership checks. Device providers are injected in lifecycle tests; these passes do not actuate real camera, brightness, or display sleep. The log is a saved run, not evidence that every later UI edit was included in it.
 
-Permission policy checks were run separately: [test-permission-onboarding.sh](../scripts/test-permission-onboarding.sh) passed **29** fake-provider checks for review/decline choices, persistence, actual-grant gating, cancellation, and stale callbacks. The subsequent visual changes do not change that controller. The final frozen native-glass/starfield source, including the own-window observer and 2.1-second meteor, passed [test-permission-ui.sh](../scripts/test-permission-ui.sh): **20** native permission-card renders and **6** real scroll-to-end gates at regular/compact sizes, with unavailable/denied states, no warnings, and no OS prompts or sensors. Final outputs are under [build/permission-previews](../build/permission-previews). Results were observed in the agent turn; no dedicated final UI log was retained.
+Permission policy checks were run separately: [test-permission-onboarding.sh](../scripts/test-permission-onboarding.sh) passed **29** fake-provider checks for review/decline choices, persistence, actual-grant gating, cancellation, and stale callbacks. The subsequent visual changes do not change that controller. Build 20's native-glass/starfield source passed [test-permission-ui.sh](../scripts/test-permission-ui.sh): **20** native permission-card renders and **6** real scroll-to-end gates at regular/compact sizes, with unavailable/denied states, no warnings, and no OS prompts or sensors. Results were observed in the agent turn; no dedicated final UI log was retained. [build/permission-previews](../build/permission-previews) is regenerated by each run and now represents the most recent revision.
 
 The native render helper's `cacheDisplay` omits the system glass background and some composited card offsets. Its PNGs can show black text over black despite the live glass layer. Representative outputs were inspected, but these captures cannot establish the actual material, text contrast, stack depth, twinkle, or transition quality. Passing the scroll gates remains valid and independent of that compositing limitation. The starfield component passed a Swift 6 typecheck targeting macOS 14; its lifecycle/observer cleanup was independently reviewed, without a runtime energy benchmark.
 
@@ -30,7 +30,7 @@ A direct launch of AirVeil's executable through the automation host caused macOS
 
 Live inspection of the installed app verified that the Privacy Policy footer opens a native sheet containing the actual bundled sections and public contact. **Done** had initial keyboard focus, and Escape closed the sheet cleanly back to the Camera card. Diagnostics still showed setup active, direction/presence cameras off, and no fresh motion. No permission was requested by opening the policy. Tab produced no observable accessibility-tree change, so full keyboard navigation and VoiceOver acceptance are not claimed.
 
-Live screenshot capture through Computer Use failed with error **3812**. Neither accessibility-tree inspection nor the limited render captures substitutes for the user's visual acceptance of the latest glass/starfield update; that feedback remains pending. Physical seated dimming and restoration at the user's 2% target were separately confirmed; departure sleep/lock, a physical 0% run, and complete direction recovery retain the limits recorded in the removal validation document.
+Live screenshot capture through Computer Use failed with error **3812**. Neither accessibility-tree inspection nor the limited render captures substitutes for visual acceptance: the user's later review found side-card alignment, focus-ring, and starfield issues, addressed in build 21 below. Physical seated dimming and restoration at the user's 2% target were confirmed on build 20; departure sleep/lock, a physical 0% run, and complete direction recovery retain the limits recorded in the removal validation document. The build 21 visual correction does not change that sensor code or reclassify the earlier physical evidence.
 
 ## Policy and distribution audit
 
@@ -38,13 +38,71 @@ The source audit found local image/motion processing, native saved preferences a
 
 [build.sh](../scripts/build.sh) requires all three nonempty policies and copies them into the signed bundle. Default `AIRVEIL_RELEASE` builds write `build/AirVeil.app`; `--development` writes `build/development/AirVeil.app`. Both preview menu entries and their selector are guarded by `AIRVEIL_DEVELOPMENT`; the inspected release binary contained neither the preview menu label nor selector. [package-dmg.sh](../scripts/package-dmg.sh) rebuilds and packages only the default output, with an Applications shortcut and installation notes. It produces a DMG/checksum but does not publish a release. Final DMG verification/publication is recorded separately; development signing is not Apple notarization.
 
-## Final installer and installed preview
+## Build 20 installer and installed preview — superseded
 
-The final Liquid Glass and starfield source was built and packaged successfully in `build/starfield-package-0.15.0.log`. The DMG was mounted read-only: strict signature verification passed, all three policies matched their canonical source, both developer preview strings were absent, and the packaged executable matched the built and installed executable byte for byte. The installed app was reopened through LaunchServices, and its Camera permission card and policy controls were verified through accessibility. Visual feedback remains pending because native screenshot capture still fails.
+The build 20 Liquid Glass and starfield source was built and packaged successfully in `build/starfield-package-0.15.0.log`. The DMG was mounted read-only: strict signature verification passed, all three policies matched their canonical source, both developer preview strings were absent, and the packaged executable matched the built and installed executable byte for byte. The installed app was reopened through LaunchServices, and its Camera permission card and policy controls were verified through accessibility. These are historical build 20 checks, not acceptance of the later build 21 correction.
 
 - Installer: `AirVeil-0.15.0-apple-silicon.dmg`
 - SHA-256: `b5d7bb48b21a71d82cd90da361ffd74fa43bed2cf18cbc84a723b68e7677251f`
 - App executable SHA-256: `06295b3d450743bffd8afe72209072719c55c256dde157da3177866d26b3661c`
 - Machine-readable local evidence: `build/validation/release-0.15.0.json`.
 
-The earlier installer is retained under `build/releases/iterations/before-starfield/`; it is not the final artifact. No GitHub release has been published by this packaging operation.
+The pre-starfield installer was retained under `build/releases/iterations/before-starfield/`. Build 20 also requires replacement for the later visual correction. No GitHub release was published by this packaging operation.
+
+## Build 21 visual correction and native visibility evidence
+
+The user's live review identified uneven side-card bottoms, insufficient background-card blur, a blue details focus rectangle, and hard-to-see or motionless stars. [PermissionOnboardingView.swift](../Sources/PermissionOnboardingView.swift) now uses a shared bottom baseline with bottom-anchored perspective, stronger uniform side-card blur, and `focusEffectDisabled()` on the details scroll view while retaining keyboard focusability.
+
+[PermissionStarfieldBackground.swift](../Sources/PermissionStarfieldBackground.swift) now animates whenever its own window is visible, unminimized, and unoccluded, even while another app has focus. Stars are brighter, 1–2 points across, with less blur; the first meteor begins near 1.5 seconds, then every 12 seconds in exposed outer lanes. Hidden windows and Reduce Motion still use static artwork. Production honors the system setting; optional internal observation/override inputs exist only to make the harness measurable without changing macOS preferences.
+
+The new [native starfield lifecycle harness](../Tests/PermissionStarfieldLifecycleTests.swift), run with `bash scripts/test-starfield-lifecycle.sh`, passed against the frozen build 21 source. A real, visible, unoccluded, nonactivating window with `NSApp.isActive == false` produced **22 timeline ticks and 5,193 changed generated pixel bytes over 1.2 seconds**. Injecting the Reduce Motion input stopped ticks and produced identical pixels. Hiding the window stopped ticks; reopening resumed without taking focus; closing stopped ticks. The helper exited successfully and closed its generated-art window. It used no sensors, desktop capture, or app preferences. Evidence: [run log](../build/starfield-lifecycle-0.15.0-21.log) and [generated frame samples](../build/starfield-previews).
+
+The generated `visible-b.png` was also inspected and shows white stars and a short meteor in the exposed left lane. This proves the actual inactive-visible animation path and hide/close lifecycle, rather than merely checking the implementation's condition. It does not establish whole-card material, final side-card alignment, meteor visibility through glass, full keyboard/VoiceOver acceptance, or measured energy savings.
+
+The final build 21 permission-card run passed **20 native renders and 6 real scroll-to-end gates** after the bottom-alignment and focus-effect changes. Its retained [run log](../build/permission-ui-0.15.0-21.log) records success with fake providers and no OS prompts or sensors. The previously described native-glass/composited-offset capture limitations still apply; these counts are not a claim that all 20 images received visual acceptance.
+
+## Build 21 installer and installed preview
+
+The corrected source built and packaged successfully in [build/card-alignment-package-0.15.0-21.log](../build/card-alignment-package-0.15.0-21.log). The release operator verified strict signatures, matching DMG/build/installed executables, source-matching bundled policies, and exclusion of developer preview commands. Normal LaunchServices launch reopened the installed app to the Camera permission card, verified through accessibility. The user's final visual acceptance remains pending.
+
+- Installer: `AirVeil-0.15.0-apple-silicon.dmg`, version **0.15.0**, build **21**.
+- DMG SHA-256: `6e8c09c1503b54739ea2ce48c224b07647973116ac747b61600fa120f9d2295a`.
+- App executable SHA-256: `7c1c8fd7684295b87340988f8fe688d99cbcfcbf04166ccb736e4c2d2d141012`.
+- Machine-readable local evidence: [build/validation/release-0.15.0-build21.json](../build/validation/release-0.15.0-build21.json).
+
+These build 21 values supersede the build 20 installer values above. Packaging and source-branch publication do not themselves publish a GitHub release; no new GitHub release is claimed by this record.
+
+
+## Build 22 background follow-up — superseded
+
+Build 22 scaled the tiny star density to the full permission window and moved short meteor streaks into the exposed header band. Optional local diagnostics count background ticks only when `--diagnostics` is explicitly supplied. The installed app's count advanced when its preview was raised; later paired samples while computer-control work continued did not advance. The user subsequently confirmed that the tiny stars were visible. These observations do not establish uninterrupted rendering while occluded.
+
+The native full-stage harness passed all six Camera/Screen/Head Tracking cases at 800×850 and 740×660, with 26–27 timeline ticks and 138–312 changed exposed-header pixel bytes. Earlier standalone lifecycle runs passed visible/inactive ticking, Reduce Motion, hide/resume, and close. One repeat stopped at a three-tick resume timeout before reaching full-stage checks. That failed attempt is retained; its cause was not established. An added phase-span assertion was never reached and was removed, so no meteor-length pass is claimed. The six-case success was observed in the agent tool output; the current `build/starfield-fullstage-0.15.0-22.log` records the later failed standalone retry and must not be cited as a passing full-stage log. The native glass capture limitation described above still applies.
+
+Build 22's package and installed app passed strict signature, byte identity, policy identity, and developer-preview exclusion checks, recorded in `build/validation/release-0.15.0-build22.json`. The DMG SHA-256 was `33a6c46bb665db1fa9db9726685d36200ae081f08411a8bab3b7c051cf43ebd7`. It is preserved under `build/releases/iterations/build-22/`.
+
+## Build 23 notch and background pacing
+
+The supplied 2.727-second reference video was inspected at 12 frame times. Its black backing stays attached to the hardware notch, expands and retracts in roughly 0.4 seconds, and keeps rounded lower corners. The moving phone perspective prevents reliable side-width measurement. The user's requested symmetric side expansion is therefore an adaptation of the reference, not a pixel-exact recreation.
+
+`NotchCanopy` now expands the filled black silhouette through the hardware band as well as downward. A separate canopy width adds 12 points around each side of the existing compact content; the camera circle, motion rail, face-check glyph, and coordinator remain unchanged. Opening and retraction use a 0.56-second easing curve, and the controller waits for retraction before hiding its panel. The wider decorative band remains click-through outside the existing content region. Reduce Motion retains the short fade.
+
+Meteors now repeat every 4.5 seconds, with the first beginning about one second after the background appears. Individual stars fade fully on/off at independently staggered 1.8–4-second periods. Star size, subdued white styling, hidden-window lifecycle, and the static Reduce Motion presentation are retained. Swift 6/macOS 14 typechecking passed for this pacing change. The user confirmed visibility on build 22 before requesting the faster cadence; that is not visual acceptance of build 23.
+
+
+The final targeted notch suite passed **18 screen-geometry checks, 95 native lifecycle/mask checks, 27 rendered states at 2×, and two Face light renders**. Rendered screen-edge widths at the six reveal stages were **180, 188, 199, 216, 230, and 236 points**. Actual mask tests verify simultaneous downward growth, symmetry, preserved content bounds, nonactivating presentation, cancellation, and delayed-close races. Sensors and display illumination stayed off in these fixtures. Root review of the new generated opening and success frames confirmed the attached wider surround around the retained camera/rail/smile artwork. Evidence: `build/notch-expansion-0.15.0-23.log`.
+
+Three earlier attempts identified overstrict new fixture assumptions: rounded unnotched corners need not retain every old corner pixel; exact opposite boundary points have different path-inclusion rules; and camera content can cover a center-column black-pixel probe. Those assertions were corrected without changing production, and the final complete run passed. Fixture failures now exit cleanly after cleanup instead of triggering a crash dialog. The failed-attempt logs remain local evidence.
+
+A 5.5-second, 30 fps generated video samples the actual canopy and smile artwork with fake camera data. Its content fades and state-layout transitions are labeled approximations. It is a design preview, not a live sensor recording: `build/notch-reference-2026-09-13/airveil-generated-canopy-preview.mp4`.
+
+## Build 23 installer and installed app
+
+The final source built and packaged in `build/notch-expansion-package-0.15.0-23.log`. The prior build 22 DMG was preserved. Build 23 was installed only after a normal app quit, with the prior installed app retained in a timestamped local backup. The DMG was mounted read-only; strict signatures passed, the built/packaged/installed executable hashes matched, all bundled policies matched source, and both developer preview menu strings were absent. The installed app was reopened normally through LaunchServices.
+
+- Version **0.15.0**, build **23**.
+- DMG SHA-256: `5bb5f53cd59936830d5e95233c67c3b805653e1102642dfb25ecc2375388dc38`.
+- Executable SHA-256: `071c17fe1b8d6ce4a0987f5d69f227b71160a9fc7e280858c4c0346b079e6477`.
+- Machine-readable record: `build/validation/release-0.15.0-build23.json`.
+
+These are artifact and source checks. User acceptance of the latest motion styling and the separate physical limits above remain distinct. No source-branch push or local packaging operation itself publishes a GitHub release.

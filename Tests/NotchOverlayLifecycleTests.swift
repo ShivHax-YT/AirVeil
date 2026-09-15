@@ -42,16 +42,23 @@ import SwiftUI
         let controller = NotchOverlayController(model: model, defaults: defaults)
         defer { controller.shutdown() }
         var checks = 0
+        func fail(_ message: String) -> Never {
+            FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8))
+            controller.shutdown()
+            for window in app.windows { window.close() }
+            defaults.removePersistentDomain(forName: suite)
+            exit(EXIT_FAILURE)
+        }
         func check(_ result: Bool, _ message: String) {
             checks += 1
-            if !result { fatalError(message) }
+            if !result { fail(message) }
         }
         // Combine delivers on the main queue, matching production.
         func drain() async { try? await Task.sleep(nanoseconds: 30_000_000) }
         await drain()
         guard let panel = app.windows.first(where: { $0.title == "AirVeil Notch Coach" }),
               let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main else {
-            fatalError("Native panel and screen must exist")
+            fail("Native panel and screen must exist")
         }
         check(panel.styleMask.contains(.nonactivatingPanel) && !panel.canBecomeKey && !panel.canBecomeMain,
               "The notch cannot take keyboard focus")
@@ -63,17 +70,71 @@ import SwiftUI
         if screen.safeAreaInsets.top > 0 {
             check(panel.frame.maxY == screen.frame.maxY, "Panel attaches flush to actual notch top")
         }
-        // Every intermediate reveal keeps the hardware region exactly cutout-wide.
-        // Outside shoulders and rounded lower corners must remain click-through.
-        for amount in [0.0, 0.15, 0.5, 1.0] {
-            let silhouette = NotchCanopy(hardwareWidth: 180, topInset: 32, bodyWidth: 212, bodyHeight: 190, reveal: amount)
-                .path(in: CGRect(x: 0, y: 0, width: 360, height: 292))
-            check(!silhouette.contains(CGPoint(x: 85, y: 10)) && !silhouette.contains(CGPoint(x: 275, y: 10)),
-                  "Animation must never cover menu-bar content outside the hardware cutout")
-            check(silhouette.contains(CGPoint(x: 180, y: 16)), "Stem stays joined to physical notch throughout reveal")
-            check(!silhouette.contains(CGPoint(x: 74, y: 221)), "Rounded lower corners stay transparent")
+        // Inspect the real mask's occupied pixels, rather than repeating its
+        // interpolation formula. The attached screen-edge region expands too.
+        let canvas = CGRect(x: 0, y: 0, width: 360, height: 412)
+        for topInset in [0.0, 32.0] {
+            var previous: Path?
+            for amount in [0.0, 0.15, 0.35, 0.65, 0.9, 1.0] {
+                let silhouette = NotchCanopy(hardwareWidth: 180, topInset: topInset,
+                    bodyWidth: 236, bodyHeight: 190, reveal: amount).path(in: canvas)
+                let bounds = silhouette.boundingRect
+                if amount > 0 || topInset > 0 {
+                    check(abs(bounds.midX - canvas.midX) < 0.001 && bounds.minY == 0,
+                          "Expansion stays centered and attached to the top")
+                    check(canvas.contains(bounds), "The complete silhouette stays inside its native panel")
+                }
+                var symmetric = true, retainsPrevious = true
+                // Avoid exact integral edge points: CGPath containment includes
+                // one boundary side and excludes the opposite boundary side.
+                for y in stride(from: 2.25, through: 410.25, by: 4) {
+                    for x in stride(from: 2.25, through: 178.25, by: 4) {
+                        let left = CGPoint(x: x, y: y), right = CGPoint(x: 360 - x, y: y)
+                        symmetric = symmetric && (silhouette.contains(left) == silhouette.contains(right))
+                        for point in [left, right] where previous?.contains(point) == true {
+                            retainsPrevious = retainsPrevious && silhouette.contains(point)
+                        }
+                    }
+                }
+                check(symmetric, "Left and right edges expand symmetrically at every reveal")
+                if topInset > 0 {
+                    check(retainsPrevious, "Attached-notch opening never removes previously revealed mask area")
+                }
+                // The external-display fallback also rounds its top corners;
+                // that changing radius can move individual corner pixels even
+                // while its overall silhouette grows in both directions.
+                if let previous, amount > 0.15 {
+                    check(bounds.width > previous.boundingRect.width && bounds.maxY > previous.boundingRect.maxY,
+                          "Each later keyframe grows both sideways and downward")
+                }
+                if topInset > 0 {
+                    check(silhouette.contains(CGPoint(x: 180, y: 8)), "The center remains joined to the physical notch")
+                    if amount == 0 {
+                        check(bounds.width == 180 && bounds.height == 32,
+                              "Collapsed silhouette occupies only the hardware notch bounds")
+                    } else if amount == 1 {
+                        check(silhouette.contains(CGPoint(x: 82, y: 8)) && silhouette.contains(CGPoint(x: 278, y: 8)),
+                              "The screen-edge band visibly grows left and right beyond the cutout")
+                    }
+                }
+                previous = silhouette
+            }
         }
         check(controller.presentation.contentWidth < 250, "Camera coach uses the compact vertical silhouette")
+        check(controller.presentation.canopyWidth > controller.presentation.contentWidth,
+              "The wider black surround preserves the existing camera and rail layout width")
+        for phase in [NotchCoachPhase.seeking, .lighting, .failure, .success] {
+            let presentation = NotchOverlayPresentation()
+            presentation.snapshot = .init(phase: phase, title: "Fixture", detail: "")
+            let mask = NotchCanopy(hardwareWidth: presentation.hardwareWidth, topInset: presentation.topInset,
+                bodyWidth: presentation.canopyWidth, bodyHeight: presentation.contentHeight).path(in: canvas)
+            let halfWidth = presentation.contentWidth / 2 - 16
+            let interior = [CGPoint(x: 180 - halfWidth, y: presentation.topInset + 14),
+                            CGPoint(x: 180 + halfWidth, y: presentation.topInset + 14),
+                            CGPoint(x: 180 - halfWidth, y: presentation.topInset + presentation.contentHeight - 16),
+                            CGPoint(x: 180 + halfWidth, y: presentation.topInset + presentation.contentHeight - 16)]
+            check(interior.allSatisfy { mask.contains($0) }, "Expanded \(phase) mask contains padded camera/rail/glyph bounds")
+        }
         model.cameraHeading.coach = .init(phase: .lighting, title: "Light too low", detail: "Face light starts off", issue: .lowLight)
         await drain()
         controller.presentation.toggleAssistLight()
@@ -112,6 +173,7 @@ import SwiftUI
         controller.showControls()
         check(controller.presentation.controls && controller.presentation.expanded, "Controls remain available after canceled preview and wake")
         check(controller.presentation.contentWidth == 360, "Only disclosed controls use the wider body")
+        check(controller.presentation.canopyWidth == 360, "Controls fit the fixed native panel without extra width")
         model.cameraHeading.coach = .init(phase: .holding, title: "Hold", detail: "", progress: 0.4)
         await drain()
         check(!controller.presentation.controls && !controller.presentation.demo, "Real calibration takes ownership of the panel")
@@ -128,12 +190,12 @@ import SwiftUI
               "Retraction keeps the green smile instead of flashing an idle camera")
         model.cameraHeading.coach = .init(phase: .offCenter, title: "Look ahead", detail: "", issue: .pose)
         await drain()
-        try? await Task.sleep(nanoseconds: 550_000_000)
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         check(controller.presentation.expanded && controller.presentation.snapshot.phase == .offCenter,
               "An old dismissal cannot clear or hide a newer live check")
         model.cameraHeading.coach = .init()
         await drain()
-        try? await Task.sleep(nanoseconds: 550_000_000)
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         check(!panel.isVisible && controller.presentation.snapshot.phase == .idle,
               "Only the finished retraction clears the old visual snapshot")
         check(!model.cameraHeading.camera.isRunning && model.cameraHeading.camera.previewImage == nil, "Lifecycle tests never start the camera")
@@ -146,7 +208,7 @@ import SwiftUI
         firstUse.updatePointerPosition(CGPoint(x: -20000, y: -20000))
         firstUse.presentation.cancel()
         await drain()
-        try? await Task.sleep(nanoseconds: 600_000_000)
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         check(firstUse.presentation.expanded && firstUse.presentation.tutorialStep != nil,
               "Pointer exit, cancel, idle delivery and delayed dismissal cannot end the tutorial")
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)

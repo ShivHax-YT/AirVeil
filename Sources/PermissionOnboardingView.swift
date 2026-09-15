@@ -3,6 +3,7 @@ import AppKit
 
 struct PermissionOnboardingView: View {
     @ObservedObject var onboarding: PermissionOnboarding
+    var onBackgroundAnimationTick: ((TimeInterval) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AccessibilityFocusState private var headingFocused: Bool
     private var transition: Animation? { reduceMotion ? nil : .spring(response: 0.90, dampingFraction: 0.90) }
@@ -33,7 +34,7 @@ struct PermissionOnboardingView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
-        .background(PermissionStarfieldBackground())
+        .background(PermissionStarfieldBackground(onAnimationTick: onBackgroundAnimationTick))
         .environment(\.colorScheme, .dark)
         .tint(.white)
         .frame(minWidth: 740, idealWidth: 800, minHeight: 660, idealHeight: 850)
@@ -62,6 +63,9 @@ struct PermissionOnboardingView: View {
         let rank = max(0, past ? activeIndex - index - 1 : index - activeIndex - 1)
         let offset = selected ? 0 : (past ? -1.0 : 1.0) * (width / 2 + 28 + Double(rank) * 32)
         let depthScale = max(0.72, 0.90 - Double(rank) * 0.08)
+        let sideHeight = height * 0.72
+        let sharedBottom = 8 + sideHeight * 0.90 / 2
+        let sideOffsetY = sharedBottom - sideHeight * depthScale / 2
         return Group {
             if selected {
                 PermissionConsentCard(onboarding: onboarding, permission: permission)
@@ -79,13 +83,15 @@ struct PermissionOnboardingView: View {
                 .modifier(PermissionGlassSurface())
             }
         }
-        .frame(width: selected ? width : 216, height: selected ? height : height * 0.72)
-        .scaleEffect(selected ? 1 : depthScale)
+        .frame(width: selected ? width : 216, height: selected ? height : sideHeight)
+        // Rotate around the bottom before scaling so perspective cannot tilt
+        // that edge; compensate each depth scale against one shared baseline.
         .rotation3DEffect(.degrees(reduceMotion || selected ? 0 : (past ? -1 : 1) * (12 + Double(rank) * 2)),
-                          axis: (x: 0, y: 1, z: 0), perspective: 0.28)
-        .offset(x: offset, y: selected ? 0 : 8 + Double(rank) * 24)
+                          axis: (x: 0, y: 1, z: 0), anchor: .bottom, perspective: 0.28)
+        .scaleEffect(selected ? 1 : depthScale)
+        .offset(x: offset, y: selected ? 0 : sideOffsetY)
         .opacity(selected ? 1 : (onboarding.phase == .welcome ? 0.34 : max(0.30, 0.46 - Double(rank) * 0.07)))
-        .blur(radius: selected ? 0 : (onboarding.phase == .welcome ? 3.0 : 2.4) + Double(rank) * 0.3)
+        .blur(radius: selected ? 0 : (onboarding.phase == .welcome ? 4.5 : 4.0))
         .zIndex(selected ? 10 : Double(3 - rank))
         .allowsHitTesting(selected)
         .accessibilityHidden(!selected)
@@ -248,7 +254,7 @@ private struct PermissionConsentCard: View {
                         }.padding(.trailing, 8).padding(.bottom, 2)
                     }
                     .coordinateSpace(name: permission.rawValue)
-                    .focusable().focused($detailsFocused)
+                    .focusable().focused($detailsFocused).focusEffectDisabled()
                     .accessibilityLabel("\(permission.title) permission details")
                     .accessibilityHint("Scroll to the end to enable Allow. You can choose to continue without access at any time.")
                     .onPreferenceChange(PermissionEndPositionKey.self) { bottom in

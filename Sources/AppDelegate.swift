@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var hotKey: EventHotKeyRef?
     private var hotHandler: EventHandlerRef?
     private var diagnosticTimer: Timer?
+    private var permissionBackgroundTickCount = 0
+    private var permissionBackgroundElapsed: TimeInterval = 0
     private var lockObservers: [NSObjectProtocol] = []
     private var terminationPending = false
     private var globalPauseActivations = 0
@@ -78,7 +80,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1200,height:900)
         window = AirVeilSettingsWindow(contentRect:NSRect(x:0,y:0,width:800,height:min(850,screen.height-70)))
         window.delegate = self
-        window.contentView = NSHostingView(rootView:AirVeilSetupView(model:model,tour:tour,onboarding:onboarding))
+        var backgroundTick: ((TimeInterval) -> Void)?
+        if CommandLine.arguments.contains("--diagnostics") {
+            backgroundTick = { [weak self] elapsed in
+                guard let self else { return }
+                permissionBackgroundTickCount += 1
+                permissionBackgroundElapsed = elapsed
+            }
+        }
+        window.contentView = NSHostingView(rootView:AirVeilSetupView(model:model,tour:tour,onboarding:onboarding,
+                                                                   onBackgroundAnimationTick:backgroundTick))
         window.center()
         model.overlay.registerSettingsWindow(window)
         model.showWindow = { [weak self] in self?.showSettings() }
@@ -244,6 +255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func writeDiagnostics(_ path:String) {
         let snapshot:[String:Any] = ["timestamp":Date().timeIntervalSince1970,
             "permissionSetupActive":onboarding.isActive,
+            "permissionBackgroundTickCount":permissionBackgroundTickCount,
+            "permissionBackgroundElapsed":permissionBackgroundElapsed,
             "motionAllowedBySetup":model.motionAccessAllowedByOnboarding,
             "tutorialActive":tour.isActive,
             "build":Bundle.main.object(forInfoDictionaryKey:"CFBundleVersion") as? String ?? "unknown",

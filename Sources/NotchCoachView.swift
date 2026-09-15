@@ -22,6 +22,7 @@ enum NotchTutorialStep: Int, CaseIterable {
 }
 
 @MainActor final class NotchOverlayPresentation: ObservableObject {
+    static let expansionDuration: TimeInterval = 0.56
     @Published var snapshot = NotchCoachSnapshot()
     @Published var expanded = false
     @Published var controls = false
@@ -45,6 +46,8 @@ enum NotchTutorialStep: Int, CaseIterable {
     var toggleAssistLight: () -> Void = {}
     var contentHeightChanged: (CGFloat) -> Void = { _ in }
     var contentWidth: CGFloat { tutorialStep != nil || controls ? 360 : min(248, max(212, hardwareWidth + 32)) }
+    // Grow the black surround without resizing the camera, motion rail, or glyph.
+    var canopyWidth: CGFloat { tutorialStep != nil || controls ? contentWidth : min(360, contentWidth + 24) }
     var contentHeight: CGFloat {
         if tutorialStep != nil { return 360 }
         if controls { return 118 }
@@ -57,8 +60,8 @@ enum NotchTutorialStep: Int, CaseIterable {
     }
 }
 
-/// A fixed hardware stem and a growing rounded body. The mask changes shape;
-/// camera pixels and the glyph are never squashed to simulate an opening.
+/// One attached silhouette grows from the hardware cutout in all three
+/// directions. The mask changes shape; camera pixels and the glyph keep their size.
 struct NotchCanopy: Shape {
     var hardwareWidth: CGFloat
     var topInset: CGFloat
@@ -75,27 +78,20 @@ struct NotchCanopy: Shape {
         let height = max(0, bodyHeight * amount)
         let left = rect.midX - width / 2, right = rect.midX + width / 2
         let bottom = topInset + height
-        let r = min(28, height / 2, width / 4)
+        let r = min(28, (topInset + height) / 2, width / 4)
         guard topInset > 0 else {
             return Path(roundedRect: CGRect(x: left, y: 0, width: width, height: height), cornerRadius: r)
         }
-        let stemLeft = rect.midX - hardwareWidth / 2, stemRight = rect.midX + hardwareWidth / 2
-        let shoulder = min(7, max(0, (width - hardwareWidth) / 4))
+        // The outer sides widen through the menu band too. A fixed-width stem
+        // here would make the animation look like a panel dropping from the notch.
         var path = Path()
-        path.move(to: CGPoint(x: stemLeft, y: 0))
-        path.addLine(to: CGPoint(x: stemRight, y: 0))
-        path.addLine(to: CGPoint(x: stemRight, y: topInset - shoulder))
-        path.addQuadCurve(to: CGPoint(x: stemRight + shoulder, y: topInset), control: CGPoint(x: stemRight, y: topInset))
-        path.addLine(to: CGPoint(x: right - min(r, shoulder), y: topInset))
-        path.addQuadCurve(to: CGPoint(x: right, y: topInset + min(r, shoulder)), control: CGPoint(x: right, y: topInset))
+        path.move(to: CGPoint(x: left, y: 0))
+        path.addLine(to: CGPoint(x: right, y: 0))
         path.addLine(to: CGPoint(x: right, y: bottom - r))
         path.addQuadCurve(to: CGPoint(x: right - r, y: bottom), control: CGPoint(x: right, y: bottom))
         path.addLine(to: CGPoint(x: left + r, y: bottom))
         path.addQuadCurve(to: CGPoint(x: left, y: bottom - r), control: CGPoint(x: left, y: bottom))
-        path.addLine(to: CGPoint(x: left, y: topInset + min(r, shoulder)))
-        path.addQuadCurve(to: CGPoint(x: left + min(r, shoulder), y: topInset), control: CGPoint(x: left, y: topInset))
-        path.addLine(to: CGPoint(x: stemLeft - shoulder, y: topInset))
-        path.addQuadCurve(to: CGPoint(x: stemLeft, y: topInset - shoulder), control: CGPoint(x: stemLeft, y: topInset))
+        path.addLine(to: CGPoint(x: left, y: 0))
         path.closeSubpath()
         return path
     }
@@ -116,14 +112,14 @@ struct NotchCanopy: Shape {
         return .init(red: 0.78, green: 0.83, blue: 0.90)
     }
     private var expansion: Animation {
-        reduceMotion ? .easeInOut(duration: 0.16) : .timingCurve(0.22, 0.80, 0.24, 1, duration: 0.46)
+        reduceMotion ? .easeInOut(duration: 0.16) : .timingCurve(0.22, 0.80, 0.24, 1, duration: NotchOverlayPresentation.expansionDuration)
     }
     private var morph: Animation {
         reduceMotion ? .easeInOut(duration: 0.16) : .spring(response: 0.40, dampingFraction: 0.9)
     }
     private var shape: NotchCanopy {
         .init(hardwareWidth: presentation.hardwareWidth, topInset: presentation.topInset,
-              bodyWidth: presentation.contentWidth, bodyHeight: presentation.contentHeight,
+              bodyWidth: presentation.canopyWidth, bodyHeight: presentation.contentHeight,
               reveal: presentation.revealProgress ?? (reduceMotion || presentation.expanded ? 1 : 0))
     }
     var body: some View {
@@ -156,6 +152,7 @@ struct NotchCanopy: Shape {
         .animation(expansion, value: presentation.expanded)
         .animation(morph, value: presentation.contentHeight)
         .animation(morph, value: presentation.contentWidth)
+        .animation(morph, value: presentation.canopyWidth)
         .animation(.easeInOut(duration: reduceMotion ? 0.16 : 0.22), value: snapshot.phase)
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)

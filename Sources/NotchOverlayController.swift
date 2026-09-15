@@ -200,7 +200,7 @@ private final class NotchPanel: NSPanel {
             self.clearDismissedSnapshot()
         }
         closeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.50, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + NotchOverlayPresentation.expansionDuration + 0.04, execute: work)
     }
     private func clearDismissedSnapshot() {
         guard !presentation.expanded, !presentation.demo,
@@ -223,7 +223,7 @@ private final class NotchPanel: NSPanel {
         let local = CGPoint(x: point.x - panel.frame.minX, y: panel.frame.maxY - point.y)
         let bounds = CGRect(x: 0, y: 0, width: panel.frame.width, height: geometry.topInset + contentHeight)
         return NotchCanopy(hardwareWidth: geometry.hardwareWidth, topInset: geometry.topInset,
-                           bodyWidth: presentation.contentWidth, bodyHeight: contentHeight).path(in: bounds).contains(local)
+                           bodyWidth: presentation.canopyWidth, bodyHeight: contentHeight).path(in: bounds).contains(local)
     }
     private func pointerMoved() { updatePointerPosition(NSEvent.mouseLocation) }
     func updatePointerPosition(_ point: CGPoint) {
