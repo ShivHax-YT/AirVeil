@@ -58,6 +58,7 @@ struct VeilDisplayInfo {
     }
     func releaseStop() { holdStop = false; continuation?.resume(); continuation = nil }
     func refresh() {}
+    func recheckAfterBrightnessRestore() { state = .unknown }
 }
 
 @MainActor final class DisplayDimmingService: ObservableObject {
@@ -1184,6 +1185,16 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
                 }
                 model.presence.state = .absent
                 model.checkAirPodsRemoval(now: now + 4); await drainTasks()
+                if dim && lock {
+                    check(model.displaySleep.requests == 0,
+                          "Dimmed foreground loss waits for brightness and a fresh seat check before locking")
+                    try? await Task.sleep(nanoseconds: 1_350_000_000)
+                    await drainTasks()
+                    check(!model.dimming.hasPendingRestore && model.presence.state == .unknown,
+                          "Brightness restoration discards the old absence before a new departure decision")
+                    model.presence.state = .absent
+                    model.checkAirPodsRemoval(now: now + 5.5); await drainTasks()
+                }
                 check(model.displaySleep.requests == (lock ? 1 : 0),
                       "dim=\(dim), lock=\(lock): confirmed departure obeys only the lock toggle")
                 if !lock {
@@ -1643,10 +1654,15 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.dimming.isDimmed && model.dimming.dimTargets == [0.15],
                   "Confirmed seated removal uses the user's saved brightness target")
             model.presence.state = .unknown
-            model.checkAirPodsRemoval(now: now + 4)
-            model.checkAirPodsRemoval(now: now + 11.9); await drainTasks()
+            model.checkAirPodsRemoval(now: now + 4); await drainTasks()
             check(model.dimming.isDimmed && model.displaySleep.requests == 0,
-                  "Brief darkness preserves the dim target while camera assistance has time to recover")
+                  "Foreground loss announces the brightness recheck before changing the display")
+            try? await Task.sleep(nanoseconds: 1_350_000_000)
+            await drainTasks()
+            check(!model.dimming.isDimmed && model.presence.isRunning && model.displaySleep.requests == 0,
+                  "The recheck restores brightness while preserving seat capture")
+            model.checkAirPodsRemoval(now: now + 11.9); await drainTasks()
+            check(model.presence.isRunning, "Uncertain restored-light capture retains its bounded grace period")
             model.checkAirPodsRemoval(now: now + 12.1); await drainTasks()
             check(!model.dimming.isDimmed && !model.presence.isRunning && model.displaySleep.requests == 0,
                   "Sustained uncertain presence restores brightness and stops the camera without locking")

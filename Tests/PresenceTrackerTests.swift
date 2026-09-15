@@ -13,10 +13,12 @@ import CoreGraphics
         let side = PresenceBody(bounds: CGRect(x: 0.72, y: 0.1, width: 0.27, height: 0.75), confidence: 0.99)
         let background = PresenceBody(bounds: CGRect(x: 0.43, y: 0.45, width: 0.14, height: 0.3), confidence: 0.99)
         func frame(_ time: Double, bodies: [PresenceBody], faces: [CGRect] = [], usable: Bool = true,
-                   camera: String = "builtin", config: String = "fixed-vga", dark: Bool = false) -> PresenceObservation {
+                   camera: String = "builtin", config: String = "fixed-vga", dark: Bool = false,
+                   quality: PresenceFrameQuality? = PresenceFrameQuality(globalMean: 0.4, seatMean: 0.35,
+                    seatDarkFraction: 0.05, seatContrast: 0.2, seatClippedFraction: 0, sampleCount: 192)) -> PresenceObservation {
             PresenceObservation(cameraID: camera, configurationID: config, captureHostTime: time,
                 receiptHostTime: time + 0.02, bodies: bodies, faces: faces, analysisUsable: usable,
-                needsLightAssistance: dark)
+                needsLightAssistance: dark, frameQuality: quality)
         }
         for posture in ["front", "profile", "back"] {
             var tracker = PresenceTracker(reference: reference)
@@ -130,6 +132,49 @@ import CoreGraphics
             check(tracker.snapshot.state == .unknown && tracker.snapshot.status.contains("framing"), "Changed camera framing invalidates the reference")
         }
         check(PresenceTracker.isReferenceUsable(reference, now: 8 * 60 * 60), "An unchanged seat reference remains useful hours into the current wear session")
+        for ambiguous in [
+            PresenceBody(bounds: seated.bounds, confidence: 0.45),
+            PresenceBody(bounds: CGRect(x: 0.4, y: 0.52, width: 0.2, height: 0.25), confidence: 0.95)
+        ] {
+            var tracker = PresenceTracker(reference: reference)
+            for i in 0..<10 { let t = 130 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: [ambiguous]), now: t + 0.02) }
+            check(tracker.snapshot.state == .unknown,
+                  "A visible nearby human rejected for confidence or foreground size cannot become an empty seat")
+        }
+        do {
+            var tracker = PresenceTracker(reference: reference)
+            let smallerFace = CGRect(x: 0.43, y: 0.63, width: 0.14, height: 0.14)
+            for i in 0..<10 { let t = 140 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: [], faces: [smallerFace]), now: t + 0.02) }
+            check(tracker.snapshot.state == .unknown, "A nearby face smaller than the reference remains uncertain rather than absent")
+        }
+        for quality in [
+            PresenceFrameQuality(globalMean: 0.8, seatMean: 0.02, seatDarkFraction: 1, seatContrast: 0.01, seatClippedFraction: 0, sampleCount: 192),
+            PresenceFrameQuality(globalMean: 0.8, seatMean: 0.4, seatDarkFraction: 0, seatContrast: 0, seatClippedFraction: 0, sampleCount: 192)
+        ] {
+            var tracker = PresenceTracker(reference: reference)
+            for i in 0..<10 { let t = 150 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: [], quality: quality), now: t + 0.02) }
+            check(tracker.snapshot.state == .unknown && tracker.snapshot.isLowLight == quality.needsLight,
+                  "Bright global exposure cannot prove absence when calibrated seat quality is dark or ambiguous")
+        }
+        do {
+            var tracker = PresenceTracker(reference: reference)
+            for i in 0..<7 { let t = 160 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: []), now: t + 0.02) }
+            check(tracker.snapshot.state == .absent, "A genuinely analyzable initial empty seat remains detectable without a prior present frame")
+            tracker.recheckAfterBrightnessRestore(after: 163)
+            for t in [161.0, 162.8, 163] { _ = tracker.observe(frame(t, bodies: []), now: 163.02) }
+            check(tracker.snapshot.state == .unknown, "Pre-restore and cutoff-equal frames cannot reuse a latched absence")
+            for t in [163.1, 163.5, 163.9, 164.3] { _ = tracker.observe(frame(t, bodies: []), now: t + 0.02) }
+            check(tracker.snapshot.state == .unknown, "Post-restore absence must complete a new hold interval")
+            _ = tracker.observe(frame(164.7, bodies: []), now: 164.72)
+            check(tracker.snapshot.state == .absent, "Fresh reliable post-restore empty-seat frames can confirm departure")
+        }
+        do {
+            var tracker = PresenceTracker(reference: reference)
+            _ = tracker.observe(frame(170, bodies: [], config: "changed"), now: 170.02)
+            tracker.recheckAfterBrightnessRestore(after: 171)
+            for i in 0..<7 { let t = 171.1 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: []), now: t + 0.02) }
+            check(tracker.snapshot.state == .unknown, "Brightness restoration cannot repair a changed camera configuration")
+        }
         print("PASS: \(checks) anonymous presence geometry checks; synthetic observations only")
     }
 }

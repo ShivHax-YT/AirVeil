@@ -62,6 +62,7 @@ private final class NotchPanel: NSPanel {
             self.receive(self.model.cameraHeading.coach)
         }.store(in: &subscriptions)
         model.removalPresence.$lowLightRecoveryState
+            .combineLatest(model.removalPresence.$recoveryReason)
             .receive(on: DispatchQueue.main).sink { [weak self] _ in
                 guard let self else { return }
                 self.receive(self.model.cameraHeading.coach)
@@ -189,6 +190,7 @@ private final class NotchPanel: NSPanel {
             guard !recoveryNoticeDismissed else { return }
             demoTask?.cancel(); presentation.demo = false
             presentation.controls = false; presentation.wearAirPodsPrompt = false
+            presentation.brightnessRecoveryReason = NotchBrightnessRecoveryReason(rawValue: model.removalPresence.recoveryReason.rawValue) ?? .seatRecheck
             presentation.brightnessRecovery = recoveryStage
             updateControls(); show()
             return

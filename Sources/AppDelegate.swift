@@ -283,6 +283,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             "presenceState":model.presence.state.rawValue,"presenceCameraRunning":model.presence.isRunning,
             "presenceAssistLightOn":model.presence.isAssistLightOn,
             "presenceLowLight":model.presence.isLowLight,
+            "presenceQuality":model.presence.qualityDiagnostics,
+            "brightnessRecoveryReason":model.removalPresence.recoveryReason.rawValue,
             "lowLightRecoveryState":model.removalPresence.lowLightRecoveryState.rawValue,
             "presenceStatus":model.presence.status,"displayDimmed":model.dimming.isDimmed,
             "brightnessRestorePending":model.dimming.hasPendingRestore,"brightnessStatus":model.dimming.status,

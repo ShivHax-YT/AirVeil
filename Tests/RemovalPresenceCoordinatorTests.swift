@@ -17,6 +17,7 @@ import CoreGraphics
     var status = "Presence uncertain"
     var starts = 0
     var stops = 0
+    var rechecks = 0
     var running = false
     var failStart = false
     var startGate: RemovalTestGate?
@@ -36,6 +37,9 @@ import CoreGraphics
         if let stopGate { await stopGate.wait() }
     }
     func refresh() {}
+    func recheckAfterBrightnessRestore() {
+        rechecks += 1; state = .unknown; isLowLight = false
+    }
 }
 
 @MainActor private final class FakeRemovalDimmer: RemovalPresenceDimming {
@@ -204,14 +208,17 @@ import CoreGraphics
             check(f.dimmer.targets == [0, 0.1], "Repeated target values do not overwrite the dim baseline")
             f.presence.state = .unknown
             f.coordinator.update(now: 102); f.coordinator.update(now: 109); await settle()
-            check(f.sleeps == 0 && f.dimmer.isDimmed, "Brief uncertain presence keeps the existing dim without sleeping")
+            check(f.sleeps == 0 && !f.dimmer.isDimmed && f.presence.rechecks == 1 &&
+                  f.coordinator.recoveryReason == .seatRecheck,
+                  "Untyped foreground loss restores the dim once and requests new evidence without claiming darkness")
             f.presence.state = .present; f.coordinator.update(now: 109.5)
             f.presence.state = .unknown; f.coordinator.update(now: 110); f.coordinator.update(now: 117.9)
             check(f.sleeps == 0, "Fresh presence resets the bounded uncertainty interval")
             f.coordinator.update(now: 118); await settle()
-            check(f.sleeps == 1 && f.coordinator.phase == .sleeping, "Sustained unknown invokes the explicit bounded fallback")
+            check(f.sleeps == 0 && !f.coordinator.isActive,
+                  "Persistent untyped uncertainty after restored brightness ends safely without guessing absence")
             f.coordinator.update(now: 130); await settle()
-            check(f.sleeps == 1 && !f.presence.running, "An episode sleeps once and stops its camera")
+            check(f.sleeps == 0 && !f.presence.running, "Ended uncertainty cannot later replay an automatic sleep")
         }
         do {
             let f = RemovalFixture(); f.begin(); await settle()
@@ -220,18 +227,25 @@ import CoreGraphics
             check(f.dimmer.targets == [0] && f.sleeps == 0,
                   "Zero brightness for an occupied seat never invokes display sleep")
             f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
-            check(f.sleeps == 1 && f.dimmer.suspends == 1 && f.dimmer.restores == restores && f.dimmer.hasPendingRestore,
-                  "Leaving the blacked-out seat releases idle protection without flashing original brightness before sleep")
+            check(f.sleeps == 0 && f.dimmer.restores == restores + 1 && !f.dimmer.hasPendingRestore &&
+                  f.presence.rechecks == 1 && f.presence.state == .unknown,
+                  "Apparent departure under dimming restores brightness and clears the old absence before any lock")
+            f.coordinator.update(now: 102.5); await settle()
+            check(f.sleeps == 0, "The previously latched dim-view absence cannot survive restoration")
+            f.presence.state = .absent; f.coordinator.update(now: 103); await settle()
+            check(f.sleeps == 1 && f.dimmer.suspends == 1 && !f.dimmer.hasPendingRestore,
+                  "Fresh absence at restored brightness can request display sleep once")
             let restored = await f.coordinator.recoverAfterActivation()
-            check(restored && f.dimmer.restores == restores + 1 && !f.dimmer.hasPendingRestore,
-                  "Only a verified active session restores the retained blackout baseline after departure")
+            check(restored && !f.dimmer.hasPendingRestore,
+                  "Active recovery after verified departure does not recreate a dim journal")
         }
         do {
             let f = RemovalFixture(); f.sleepFails = true; f.begin(); await settle()
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             let restores = f.dimmer.restores
             f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
-            check(f.sleeps == 1 && f.coordinator.phase == .failed && f.dimmer.restores == restores + 1 && !f.dimmer.isDimmed,
+            f.presence.state = .absent; f.coordinator.update(now: 103); await settle()
+            check(f.sleeps == 1 && f.coordinator.phase == .failed && f.dimmer.restores == restores + 2 && !f.dimmer.isDimmed,
                   "Failed display sleep restores an active user's brightness instead of stranding the panel at zero")
         }
         do {
@@ -278,6 +292,22 @@ import CoreGraphics
         }
         do {
             let f = RemovalFixture(); f.begin(); await settle()
+            let dim = RemovalTestGate(); f.dimmer.dimGate = dim
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            check(dim.waiters == 1 && f.dimmer.isBusy && f.dimmer.hasPendingRestore,
+                  "The in-flight dim fixture has pending owned brightness work")
+            f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
+            check(f.sleeps == 0 && f.presence.rechecks == 1 && !f.dimmer.hasPendingRestore,
+                  "Foreground loss during an in-flight dim restores before accepting absence")
+            dim.release(); f.dimmer.dimGate = nil; await settle()
+            check(!f.dimmer.isDimmed && f.sleeps == 0 && f.coordinator.lowLightRecoveryState == .monitoring,
+                  "The superseded dim acknowledgement cannot redim or lock after the seat recheck")
+            f.presence.state = .present; f.coordinator.update(now: 103); await settle()
+            check(f.dimmer.targets == [0], "A recovered seated occupant does not start another dim in the same episode")
+            _ = await f.coordinator.finishForRewear()
+        }
+        do {
+            let f = RemovalFixture(); f.begin(); await settle()
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             let gate = RemovalTestGate(); f.presence.stopGate = gate
             let oldStops = f.presence.stops
@@ -294,6 +324,7 @@ import CoreGraphics
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             let gate = RemovalTestGate(); f.presence.stopGate = gate
             f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
+            f.presence.state = .absent; f.coordinator.update(now: 103); await settle()
             check(f.sleeps == 0, "Security sleep waits for presence capture cleanup")
             let rewear = Task { await f.coordinator.finishForRewear() }; await settle()
             gate.release(); f.presence.stopGate = nil
@@ -305,7 +336,8 @@ import CoreGraphics
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             f.dimmer.restoreSucceeds = false
             f.presence.state = .absent; f.coordinator.update(now: 102); await settle()
-            check(f.sleeps == 1, "Restore failure must not disable the existing security sleep action")
+            check(f.sleeps == 0 && f.coordinator.phase == .failed,
+                  "A failed brightness recheck never locks based on the unreliable dim-view absence")
             let finished = await f.coordinator.finishForRewear()
             check(!finished && !f.coordinator.canResumeHeading, "Restore failure prevents dependent heading resumption")
             f.dimmer.restoreSucceeds = true
@@ -319,6 +351,7 @@ import CoreGraphics
             f.begin(now: 110, allowSleep: false); await settle()
             f.presence.state = .present; f.coordinator.update(now: 111); await settle()
             f.presence.state = .absent; f.coordinator.update(now: 113); await settle()
+            f.presence.state = .absent; f.coordinator.update(now: 114); await settle()
             check(f.sleeps == 1, "A fresh seated observation rearms departure after manual wake")
         }
         do {
@@ -390,11 +423,10 @@ import CoreGraphics
                 f.presence.state = .present; f.coordinator.update(now: now + 1); await settle()
                 check(f.driver.value == 0.02 && f.journal.record?.baseline == original && f.assertion.held,
                       "Every repeated seated-removal cycle retains its actual pre-dim brightness")
-                f.presence.state = .absent; f.coordinator.update(now: now + 2); await settle()
                 f.coordinator.suspend(); await settle()
                 let writesAtLock = f.driver.writes.count
-                check(f.sleeps == index + 1 && !f.assertion.held && f.dimmer.hasPendingRestore,
-                      "Departure sleeps once and keeps restoration ownership without an awake assertion")
+                check(f.sleeps == 0 && !f.assertion.held && f.dimmer.hasPendingRestore,
+                      "Manual lock or sleep keeps restoration ownership without an awake assertion")
                 if rewearBeforeUnlock {
                     let inactiveRewear = await f.coordinator.finishForRewear()
                     check(!inactiveRewear && f.driver.writes.count == writesAtLock && f.journal.record?.baseline == original,
@@ -432,16 +464,25 @@ import CoreGraphics
                   "The low-light explanation is visible before any brightness restoration begins")
             check(f.presence.running && f.presence.stops == stops && !f.coordinator.canResumeHeading,
                   "The announcement preserves camera continuity and excludes simultaneous head tracking")
+            f.presence.state = .absent; f.coordinator.update(now: 102.1); await settle()
+            check(f.sleeps == 0 && f.presence.rechecks == 0 && f.coordinator.lowLightRecoveryState == .announcing,
+                  "A latched absence arriving during the explanation cannot bypass brightness restoration")
             f.coordinator.updateTarget(0.3); f.coordinator.updatePolicy(allowDimming: true, allowLock: true)
             check(f.dimmer.targets == [0] && f.announcements == 1,
                   "Target and unchanged policy updates cannot restart dimming during the notice")
             f.announcementGate = nil; notice.release(); await settle()
             check(f.coordinator.lowLightRecoveryState == .restoring && restoration.waiters == 1 && f.presence.running,
                   "The restoring state waits for the actual brightness driver while the camera remains running")
+            f.coordinator.update(now: 102.2); await settle()
+            check(f.sleeps == 0 && f.presence.rechecks == 0,
+                  "Absence stays blocked until the brightness driver acknowledges restoration")
             restoration.release(); f.dimmer.restoreGate = nil; await settle()
             check(f.coordinator.lowLightRecoveryState == .monitoring && !f.dimmer.hasPendingRestore &&
                   f.presence.running && f.presence.stops == stops,
                   "Only successful restoration switches to continuous monitoring without a camera restart")
+            check(f.presence.rechecks == 1 && f.presence.state == .unknown && !f.presence.isLowLight,
+                  "Verified restoration invalidates old absence and darkness before the next captured observation")
+            f.presence.isLowLight = true
             for time in [103.0, 111, 160, 220] { f.coordinator.update(now: time); await settle() }
             check(f.coordinator.isActive && f.presence.running && f.sleeps == 0 &&
                   f.dimmer.restores == initialRestores + 1,
@@ -455,11 +496,11 @@ import CoreGraphics
             check(f.sleeps == 1 && !f.presence.running && f.coordinator.lowLightRecoveryState == .none,
                   "Confirmed absence can still lock after low-light recovery and clears the notch presentation")
         }
-        for ending in ["rewear", "off", "suspend"] {
+        for (ending, measuredDarkness) in ["rewear", "off", "suspend"].flatMap({ ending in [true, false].map { (ending, $0) } }) {
             let f = RemovalFixture(); f.begin(); await settle()
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             let notice = RemovalTestGate(); f.announcementGate = notice
-            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.presence.state = .unknown; f.presence.isLowLight = measuredDarkness
             f.coordinator.update(now: 102); await settle()
             check(f.coordinator.lowLightRecoveryState == .announcing, "\(ending) fixture reaches the explanation before restoration")
             if ending == "rewear" { _ = await f.coordinator.finishForRewear() }
@@ -471,11 +512,11 @@ import CoreGraphics
                   f.dimmer.restores == restores && f.sleeps == 0,
                   "\(ending) invalidates a held notice so its late completion cannot restore or restart capture")
         }
-        for ending in ["rewear", "off", "suspend"] {
+        for (ending, measuredDarkness) in ["rewear", "off", "suspend"].flatMap({ ending in [true, false].map { (ending, $0) } }) {
             let f = RemovalFixture(); f.begin(); await settle()
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             let restoration = RemovalTestGate(); f.dimmer.restoreGate = restoration
-            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.presence.state = .unknown; f.presence.isLowLight = measuredDarkness
             f.coordinator.update(now: 102); await settle()
             check(f.coordinator.lowLightRecoveryState == .restoring && restoration.waiters == 1,
                   "\(ending) fixture reaches an outstanding brightness restoration")
@@ -497,9 +538,9 @@ import CoreGraphics
                   "Darkness without an owned dim cannot announce or restore somebody else's brightness")
             f.presence.state = .present; f.presence.isLowLight = false
             f.coordinator.update(now: 102); await settle()
-            f.presence.state = .unknown
+            f.presence.state = .unknown; f.dimmer.hasPendingRestore = false
             f.coordinator.update(now: 103); await settle()
-            check(f.announcements == 0, "Untyped framing, stale-frame, or capture uncertainty cannot trigger low-light recovery")
+            check(f.announcements == 0, "Untyped uncertainty without restore ownership cannot change brightness")
             f.presence.isLowLight = true; f.dimmer.hasPendingRestore = false
             f.coordinator.update(now: 104); await settle()
             check(f.announcements == 0, "A dimmed flag without restoration ownership cannot change brightness")
@@ -559,8 +600,8 @@ import CoreGraphics
             let f = RemovalFixture(); f.begin(allowLock: false); await settle()
             f.presence.state = .present; f.coordinator.update(now: 101); await settle()
             f.presence.state = .absent; f.coordinator.update(now: 103); await settle()
-            check(f.dimmer.isDimmed && f.sleeps == 0 && f.presence.running,
-                  "Dim-only monitoring never locks on confirmed absence")
+            check(!f.dimmer.isDimmed && f.sleeps == 0 && f.presence.running,
+                  "Dim-only monitoring restores for a seat recheck and never locks on apparent absence")
             _ = await f.coordinator.finishForRewear()
         }
         do {
@@ -605,6 +646,7 @@ import CoreGraphics
             check(f.driver.value == baseline && f.journal.record == nil && !f.assertion.held &&
                   f.presence.running && f.presence.stops == stops && f.coordinator.lowLightRecoveryState == .monitoring,
                   "Production dimmer restores the exact baseline and releases its assertion without stopping the camera")
+            f.presence.isLowLight = true
             for time in [454.0, 463, 490] { f.coordinator.update(now: time); await settle() }
             f.presence.isLowLight = false; f.presence.state = .present
             f.coordinator.update(now: 491); f.coordinator.updateTarget(0.3); await settle()
@@ -646,7 +688,6 @@ import CoreGraphics
             let f = RealDimmingRemovalFixture(), original = 0.8124999403953552
             f.begin(now: 300); await settle()
             f.presence.state = .present; f.coordinator.update(now: 301); await settle()
-            f.presence.state = .absent; f.coordinator.update(now: 302); await settle()
             f.coordinator.suspend(); await settle()
             _ = await f.coordinator.finishForRewear()
             f.driver.readFailure = failure

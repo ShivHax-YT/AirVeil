@@ -6,8 +6,10 @@ import SwiftUI
 // No motion, permission request, camera capture, power action, or preference writes.
 @MainActor final class StubMotion { var isFresh = true }
 enum LowLightRecoveryState: String { case none, announcing, restoring, monitoring }
+enum PresenceBrightnessRecoveryReason: String { case lowLight, seatRecheck }
 @MainActor final class StubRemovalCoordinator: ObservableObject {
     @Published var lowLightRecoveryState: LowLightRecoveryState = .none
+    @Published var recoveryReason: PresenceBrightnessRecoveryReason = .lowLight
 }
 @MainActor final class StubCoordinator: ObservableObject {
     @Published var coach = NotchCoachSnapshot()
@@ -280,6 +282,9 @@ enum LowLightRecoveryState: String { case none, announcing, restoring, monitorin
         await drain()
         check(controller.presentation.brightnessRecovery == .announcing && controller.presentation.expanded && !controller.presentation.wearAirPodsPrompt,
               "A necessary low-light explanation can bypass a dismissed wear reminder")
+        check(controller.presentation.brightnessRecoveryReason == .lowLight &&
+              controller.presentation.brightnessRecoveryReason.title(for: .announcing) == "Too dark to check",
+              "Measured low light retains the explanation of why brightness changes")
         model.removalPresence.lowLightRecoveryState = .restoring
         await drain()
         check(controller.presentation.brightnessRecovery == .restoring,
@@ -312,10 +317,20 @@ enum LowLightRecoveryState: String { case none, announcing, restoring, monitorin
         model.cameraHeading.coach = .init()
         model.wearAirPodsPrompt = true
         await drain()
+        model.removalPresence.recoveryReason = .seatRecheck
         model.removalPresence.lowLightRecoveryState = .announcing
         await drain()
+        check(controller.presentation.brightnessRecoveryReason == .seatRecheck &&
+              controller.presentation.brightnessRecoveryReason.title(for: .announcing) == "Rechecking your seat",
+              "Foreground loss uses a neutral reason when darkness has not been measured")
+        for stage in [NotchBrightnessRecoveryStage.announcing, .restoring, .restored, .monitoring] {
+            check(!controller.presentation.brightnessRecoveryReason.detail(for: stage).contains("dark"),
+                  "The entire neutral recovery sequence avoids an unmeasured darkness claim")
+        }
         model.removalPresence.lowLightRecoveryState = .monitoring
         await drain()
+        check(controller.presentation.brightnessRecovery == .restored && controller.presentation.brightnessRecoveryReason == .seatRecheck,
+              "Successful seat recheck restoration retains its reason through the completion notice")
         model.removalPresence.lowLightRecoveryState = .none
         model.wearAirPodsPrompt = false
         await drain()

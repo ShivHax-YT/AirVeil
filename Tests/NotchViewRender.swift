@@ -79,21 +79,24 @@ import SwiftUI
         let staticB = try renderStaticWearGlyph(time: 6, name: "wear-reduced-motion-b", destination: destination)
         renderRequire(staticA == staticB, "Reduced-motion AirPods artwork must remain identical across times")
         p.wearAirPodsPrompt = false
-        for stage in [NotchBrightnessRecoveryStage.announcing, .restoring, .restored, .monitoring] {
-            let recovery = NotchOverlayPresentation()
-            recovery.expanded = true; recovery.brightnessRecovery = stage
-            recovery.animationTime = 0.75
-            let frame = try render("brightness-\(stage.rawValue)", recovery, camera, destination)
-            let button = frame.colorAt(x: 160, y: 528)?.usingColorSpace(.deviceRGB)
-            renderRequire((button?.redComponent ?? 0) > 0.8,
-                          "Every brightness stage must retain the visible Turn off feature button")
-            let closeVisible = (92..<132).contains { y in
-                (566..<606).contains { x in
-                    (frame.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)?.redComponent ?? 0) > 0.55
+        for reason in [NotchBrightnessRecoveryReason.lowLight, .seatRecheck] {
+            for stage in [NotchBrightnessRecoveryStage.announcing, .restoring, .restored, .monitoring] {
+                let recovery = NotchOverlayPresentation()
+                recovery.expanded = true; recovery.brightnessRecovery = stage
+                recovery.brightnessRecoveryReason = reason; recovery.animationTime = 0.75
+                let prefix = reason == .lowLight ? "brightness" : "seat-recheck"
+                let frame = try render("\(prefix)-\(stage.rawValue)", recovery, camera, destination)
+                let button = frame.colorAt(x: 160, y: 528)?.usingColorSpace(.deviceRGB)
+                renderRequire((button?.redComponent ?? 0) > 0.8,
+                              "Every brightness stage must retain the visible Turn off feature button")
+                let closeVisible = (92..<132).contains { y in
+                    (566..<606).contains { x in
+                        (frame.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)?.redComponent ?? 0) > 0.55
+                    }
                 }
+                renderRequire(closeVisible,
+                              "Every brightness stage must keep the dismiss control visible")
             }
-            renderRequire(closeVisible,
-                          "Every brightness stage must keep the dismiss control visible")
         }
         let recoveryMovingA = try renderRecoveryGlyph(time: 0, moving: true, name: "brightness-moving-a", destination: destination)
         let recoveryMovingB = try renderRecoveryGlyph(time: 0.5, moving: true, name: "brightness-moving-b", destination: destination)
@@ -121,7 +124,7 @@ import SwiftUI
         p.topInset = 32; p.demo = false; p.snapshot = states[2].1
         try render("edge-light-controls", p, lightCamera, destination)
         lightCamera.stop()
-        print("Rendered \(states.count + 28) notch states at 2x plus AirPods and brightness motion fixtures without camera capture")
+        print("Rendered \(states.count + 32) notch states at 2x plus AirPods and brightness motion fixtures without camera capture")
     }
     @discardableResult
     @MainActor static func render(_ name: String, _ p: NotchOverlayPresentation, _ camera: CameraAnchorService, _ destination: URL) throws -> NSBitmapImageRep {

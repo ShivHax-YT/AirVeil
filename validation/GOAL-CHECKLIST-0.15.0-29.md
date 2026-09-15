@@ -34,3 +34,14 @@ Independent Lock/Dim switches, low-light guidance, and reminder dismissal are im
 - Executable SHA-256: `d545981fdbe7eef377d8ebc1805ab0a381374776711d430a7c89d7f0f51a3194`.
 
 No public release or push was made. Physical acceptance remains pending.
+
+## Physical test after build 29
+
+The wearer confirmed both AirPods in and Dim enabled. Fresh diagnostics showed steady motion, a finished camera check, and a valid seat reference. The selected dim target was 1%. `build/validation/build29-low-light-cycle1.jsonl` captures the test.
+
+- Two automatic display-sleep requests occurred while the wearer reports remaining seated. The first preceded any seated confirmation or dimming; the second followed seated confirmation and a 100% → 1% dim. Both are false-lock failures, not accepted departure coverage.
+- `presenceLowLight` stayed false, so the requested low-light recovery animation was not exercised. The current whole-frame mean threshold cannot establish that the foreground seat is analyzable.
+- A later seated attempt dimmed and restored on AirPods return, confirmed by the wearer.
+- The wearer dismissed × while AirPods remained out. Monitoring continued and the screen dimmed, as requested. The trace later shows fresh motion, restored brightness, and the journal cleared; the wearer clarified this was not a failure after reinsertion. × remains presentation-only.
+
+Further physical testing is held while false-lock handling is corrected.

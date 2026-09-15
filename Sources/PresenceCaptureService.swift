@@ -35,6 +35,7 @@ enum PresenceCaptureError: LocalizedError {
     @Published private(set) var isRunning = false
     @Published private(set) var isAssistLightOn = false
     @Published private(set) var isLowLight = false
+    private(set) var qualityDiagnostics: [String: Any] = [:]
     private let capture: any PresenceCapturing
     private let faceLight: any FaceLighting
     private let now: () -> Double
@@ -48,6 +49,8 @@ enum PresenceCaptureError: LocalizedError {
     private var lastLightCapture: Double?
     private var lightAttempted = false
     private var lightDeadline: Double?
+    private var illuminationCaptureCutoff: Double?
+    private var diagnosticCaptureTime: Double?
 
     convenience init() {
         self.init(capture: SystemPresenceCapture())
@@ -63,6 +66,7 @@ enum PresenceCaptureError: LocalizedError {
         let ticket = generation
         watchdog?.cancel(); watchdog = nil
         stopAssistLight(); lowLightFrames = 0; lastLightCapture = nil; lightAttempted = false
+        illuminationCaptureCutoff = nil; diagnosticCaptureTime = nil; qualityDiagnostics = [:]
         isRunning = false; tracker = nil
         publish(PresenceSnapshot(status: "Starting the presence check."))
         await stopCapture()
@@ -93,7 +97,9 @@ enum PresenceCaptureError: LocalizedError {
         do {
             try await capture.start(reference: reference, onObservation: { [weak self] observation in
                 guard let self, self.generation == ticket, self.isRunning else { return }
+                if let cutoff = self.illuminationCaptureCutoff, observation.captureHostTime <= cutoff { return }
                 self.receivedFrame = true
+                self.updateQualityDiagnostics(observation, reference: reference)
                 if observation.cameraID == reference.cameraID,
                    observation.configurationID == reference.configurationID {
                     self.considerAssistLight(observation)
@@ -115,6 +121,7 @@ enum PresenceCaptureError: LocalizedError {
         generation &+= 1
         watchdog?.cancel(); watchdog = nil
         stopAssistLight()
+        qualityDiagnostics["fresh"] = false; qualityDiagnostics["decision"] = "stopped"
         isRunning = false; tracker = nil; receivedFrame = false
         publish(PresenceSnapshot(status: "Presence camera is off."))
         await stopCapture()
@@ -141,7 +148,52 @@ enum PresenceCaptureError: LocalizedError {
     func refresh() {
         if let lightDeadline, now() >= lightDeadline { stopAssistLight() }
         guard isRunning, let snapshot = tracker?.tick(now: now()) else { return }
+        if let captured = diagnosticCaptureTime, now() - captured > PresenceTracker.frameFreshness {
+            qualityDiagnostics["fresh"] = false; qualityDiagnostics["decision"] = "stale"
+        }
         publish(snapshot)
+    }
+
+    /// Called only after the brightness driver verifies restoration. Keep the
+    /// same camera and seat track, but discard every queued pre-restore frame.
+    func recheckAfterBrightnessRestore() {
+        guard isRunning else { return }
+        let cutoff = now()
+        guard cutoff.isFinite, cutoff >= 0 else { return }
+        illuminationCaptureCutoff = cutoff
+        tracker?.recheckAfterBrightnessRestore(after: cutoff)
+        stopAssistLight()
+        qualityDiagnostics["fresh"] = false; qualityDiagnostics["decision"] = "awaiting-restored-light"
+        if let snapshot = tracker?.snapshot { publish(snapshot) }
+    }
+
+    private func updateQualityDiagnostics(_ observation: PresenceObservation, reference: PresenceSeatReference) {
+        let time = now()
+        guard observation.cameraID == reference.cameraID, observation.configurationID == reference.configurationID,
+              observation.captureHostTime.isFinite, observation.receiptHostTime.isFinite,
+              observation.captureHostTime >= 0, observation.captureHostTime <= observation.receiptHostTime,
+              observation.receiptHostTime <= time, time - observation.captureHostTime <= PresenceTracker.frameFreshness,
+              diagnosticCaptureTime.map({ observation.captureHostTime > $0 }) ?? true else {
+            qualityDiagnostics["fresh"] = false; qualityDiagnostics["decision"] = "stale-or-mismatched"
+            return
+        }
+        diagnosticCaptureTime = observation.captureHostTime
+        let quality = observation.frameQuality
+        func number(_ value: Double?) -> Any {
+            guard let value, value.isFinite else { return NSNull() }
+            return value
+        }
+        qualityDiagnostics = ["fresh": true, "decision": quality?.decision ?? "unavailable",
+            "globalMean": number(quality?.globalMean),
+            "seatMean": number(quality?.seatMean),
+            "seatDarkFraction": number(quality?.seatDarkFraction),
+            "seatContrast": number(quality?.seatContrast),
+            "seatClippedFraction": number(quality?.seatClippedFraction),
+            "sampleCount": quality?.sampleCount as Any? ?? NSNull(),
+            "bodyCount": observation.bodies.count, "faceCount": observation.faces.count,
+            "uncertainFaceCount": observation.uncertainFaces.count,
+            "maximumBodyConfidence": observation.bodies.map(\.confidence).filter(\.isFinite).max() as Any? ?? NSNull(),
+            "maximumFaceConfidence": number(observation.maximumFaceConfidence)]
     }
 
     private func considerAssistLight(_ observation: PresenceObservation) {
@@ -318,32 +370,64 @@ private final class PresenceCaptureWorker: NSObject, AVCaptureVideoDataOutputSam
         do {
             try VNImageRequestHandler(cvPixelBuffer: pixels, orientation: .up, options: [:]).perform([bodies, faces])
             guard !isCancelled else { return }
-            let dark = Self.isVeryDark(pixels)
+            let quality = PresenceImageQuality.measure(pixels, faceBounds: reference.faceBounds)
             onObservation(PresenceObservation(cameraID: reference.cameraID, configurationID: configurationID,
                 captureHostTime: captured, receiptHostTime: receipt,
                 bodies: (bodies.results ?? []).map { PresenceBody(bounds: $0.boundingBox, confidence: Double($0.confidence)) },
                 faces: (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox),
-                analysisUsable: dark == false, needsLightAssistance: dark == true))
+                analysisUsable: quality?.supportsAbsence == true, needsLightAssistance: quality?.needsLight == true,
+                frameQuality: quality,
+                uncertainFaces: (faces.results ?? []).filter { $0.confidence >= 0.3 && $0.confidence < 0.6 }.map(\.boundingBox),
+                maximumFaceConfidence: (faces.results ?? []).map { Double($0.confidence) }.max()))
         } catch {
             fail("Human-body analysis could not complete.")
         }
     }
-    private static func isVeryDark(_ pixels: CVPixelBuffer) -> Bool? {
-        guard CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return nil }
+}
+
+/// Sparse numeric measurements only; no frames or image crops are retained.
+enum PresenceImageQuality {
+    static func measure(_ pixels: CVPixelBuffer, faceBounds: CGRect) -> PresenceFrameQuality? {
+        let format = CVPixelBufferGetPixelFormatType(pixels)
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+              [faceBounds.minX, faceBounds.minY, faceBounds.width, faceBounds.height].allSatisfy(\.isFinite),
+              faceBounds.width > 0, faceBounds.height > 0,
+              CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
         guard CVPixelBufferGetPlaneCount(pixels) > 0, let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return nil }
         let width = CVPixelBufferGetWidthOfPlane(pixels, 0), height = CVPixelBufferGetHeightOfPlane(pixels, 0)
         guard width > 0, height > 0 else { return nil }
         let stride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
+        guard stride >= width else { return nil }
         let bytes = base.assumingMemoryBound(to: UInt8.self)
-        let fullRange = CVPixelBufferGetPixelFormatType(pixels) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        var total = 0.0, count = 0.0
-        for y in Swift.stride(from: 0, to: height, by: max(1, height / 12)) {
-            for x in Swift.stride(from: 0, to: width, by: max(1, width / 16)) {
-                total += max(0, fullRange ? Double(bytes[y * stride + x]) / 255 : (Double(bytes[y * stride + x]) - 16) / 219)
-                count += 1
+        let fullRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        func samples(in bounds: CGRect) -> [Double] {
+            let region = bounds.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            guard !region.isNull, !region.isEmpty else { return [] }
+            let x0 = max(0, Int(floor(region.minX * Double(width))))
+            let x1 = min(width, Int(ceil(region.maxX * Double(width))))
+            // Vision rectangles use a bottom-left origin; camera pixels are top-left.
+            let y0 = max(0, Int(floor((1 - region.maxY) * Double(height))))
+            let y1 = min(height, Int(ceil((1 - region.minY) * Double(height))))
+            var values: [Double] = []
+            for y in Swift.stride(from: y0, to: y1, by: max(1, (y1 - y0) / 12)) {
+                for x in Swift.stride(from: x0, to: x1, by: max(1, (x1 - x0) / 16)) {
+                    let raw = Double(bytes[y * stride + x])
+                    values.append(min(1, max(0, fullRange ? raw / 255 : (raw - 16) / 219)))
+                }
             }
+            return values
         }
-        return count > 0 ? total / count < 0.04 : nil
+        let global = samples(in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        let region = CGRect(x: faceBounds.midX - faceBounds.width * 0.9,
+                            y: faceBounds.minY - faceBounds.height * 1.4,
+                            width: faceBounds.width * 1.8, height: faceBounds.height * 2.6)
+        let seat = samples(in: region).sorted()
+        guard !global.isEmpty, !seat.isEmpty else { return nil }
+        return PresenceFrameQuality(globalMean: global.reduce(0, +) / Double(global.count),
+            seatMean: seat.reduce(0, +) / Double(seat.count),
+            seatDarkFraction: Double(seat.filter { $0 < 0.04 }.count) / Double(seat.count),
+            seatContrast: seat[Int(Double(seat.count - 1) * 0.9)] - seat[Int(Double(seat.count - 1) * 0.1)],
+            seatClippedFraction: Double(seat.filter { $0 > 0.98 }.count) / Double(seat.count), sampleCount: seat.count)
     }
 }

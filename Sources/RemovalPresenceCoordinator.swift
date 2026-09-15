@@ -8,6 +8,9 @@ import Combine
     func start(reference: PresenceSeatReference) async throws
     func stop() async
     func refresh()
+    /// Discard observations from before a brightness change without restarting
+    /// capture. The next decision must use newly captured seat evidence.
+    func recheckAfterBrightnessRestore()
 }
 
 extension RemovalPresenceMonitoring {
@@ -36,6 +39,10 @@ enum LowLightRecoveryState: String, Equatable {
     case none, announcing, restoring, monitoring
 }
 
+enum PresenceBrightnessRecoveryReason: String, Equatable {
+    case lowLight, seatRecheck
+}
+
 /// Owns one debounced removal episode. Geometry confirms occupancy, never
 /// identity. The caller owns removal detection, lock state, and camera handoff.
 @MainActor final class RemovalPresenceCoordinator: ObservableObject {
@@ -44,6 +51,7 @@ enum LowLightRecoveryState: String, Equatable {
     @Published private(set) var isBusy = false
     @Published private(set) var phase: RemovalPresencePhase = .idle
     @Published private(set) var lowLightRecoveryState: LowLightRecoveryState = .none
+    @Published private(set) var recoveryReason: PresenceBrightnessRecoveryReason = .lowLight
 
     var canResumeHeading: Bool {
         !isActive && !isBusy && !inactive && phase != .sleeping &&
@@ -78,6 +86,7 @@ enum LowLightRecoveryState: String, Equatable {
     private var allowsUncertainSleep = true
     private var allowsLock = true
     private var dimSuppressedForLowLight = false
+    private var brightnessRestoreInFlight = false
     private var episodeReference: PresenceSeatReference?
 
     convenience init(prepareCamera: @escaping @MainActor () async -> Void,
@@ -160,6 +169,16 @@ enum LowLightRecoveryState: String, Equatable {
         lastTime = now
         if presenceStarted { presence.refresh() }
         let state: PresenceState = presenceStarted ? presence.state : .unknown
+        // A dimmed camera view cannot establish departure safely: dimming may
+        // have hidden the occupant even when full-frame luminance looks usable.
+        // Restore once, then discard all pre-restore evidence before accepting
+        // absence. This also blocks stale absence during the notice/driver wait.
+        guard !brightnessRestoreInFlight else { return }
+        if presenceStarted, state != .present, !dimSuppressedForLowLight,
+           dimmer.hasPendingRestore || (dimTask != nil && isBusy) {
+            restoreWhileMonitoring(reason: presence.isLowLight ? .lowLight : .seatRecheck)
+            return
+        }
         switch state {
         case .present:
             departureArmed = true; unknownSince = nil
@@ -180,18 +199,10 @@ enum LowLightRecoveryState: String, Equatable {
             if departureArmed { sleepOnce(reason: "The foreground seat is empty. Turning off the display.") }
             else { finishWithoutSleep(reason: "Automatic removal sleep remains paused until fresh seated presence or another wear session.") }
         case .unknown:
-            if presenceStarted && presence.isLowLight {
-                if allowsDimming && !dimSuppressedForLowLight && dimmer.isDimmed &&
-                    dimmer.hasPendingRestore && !dimmer.isBusy {
-                    restoreWhileMonitoring(announceLowLight: true)
-                    return
-                }
-                if lowLightRecoveryState == .announcing || lowLightRecoveryState == .restoring { return }
-                if lowLightRecoveryState == .monitoring {
-                    unknownSince = nil; phase = .uncertain
-                    status = "Brightness is restored. The camera is still checking the seat in low light."
-                    return
-                }
+            if dimSuppressedForLowLight && presenceStarted && presence.isLowLight {
+                unknownSince = nil; phase = .uncertain
+                status = "Brightness is restored. The camera is still checking the seat in low light."
+                return
             }
             guard lowLightRecoveryState != .announcing, lowLightRecoveryState != .restoring else { return }
             if unknownSince == nil { unknownSince = now }
@@ -200,8 +211,8 @@ enum LowLightRecoveryState: String, Equatable {
                 if presenceStarted { status = presence.status }
             }
             guard let unknownSince, now - unknownSince >= unknownGrace else { return }
-            if allowsLock && departureArmed && allowsUncertainSleep { sleepOnce(reason: "Presence could not be confirmed within the grace period. Using the existing display-sleep action.") }
-            else if !allowsUncertainSleep { finishWithoutSleep(reason: "Presence could not be confirmed. The check ended and any dimmed brightness was restored.") }
+            if allowsLock && departureArmed && allowsUncertainSleep && !dimSuppressedForLowLight { sleepOnce(reason: "Presence could not be confirmed within the grace period. Using the existing display-sleep action.") }
+            else if !allowsUncertainSleep || dimSuppressedForLowLight { finishWithoutSleep(reason: "Presence could not be confirmed. The check ended and any dimmed brightness was restored.") }
             else { finishWithoutSleep(reason: "Presence remains uncertain. Automatic removal sleep stays paused after manual wake.") }
         }
     }
@@ -234,28 +245,31 @@ enum LowLightRecoveryState: String, Equatable {
         guard dimChanged else { return }
         if !allowDimming {
             if dimmer.isDimmed || dimmer.hasPendingRestore || dimmer.isBusy || dimTask != nil {
-                restoreWhileMonitoring(announceLowLight: false)
+                restoreWhileMonitoring(reason: nil)
             }
         } else if presenceStarted && presence.state == .present && !dimSuppressedForLowLight {
             requestDim(target)
         }
     }
 
-    private func restoreWhileMonitoring(announceLowLight: Bool) {
+    private func restoreWhileMonitoring(reason: PresenceBrightnessRecoveryReason?) {
         dimRevision &+= 1
         let revision = dimRevision, ticket = generation
         dimTask?.cancel()
-        if announceLowLight { dimSuppressedForLowLight = true }
-        lowLightRecoveryState = announceLowLight ? .announcing : .none
-        status = announceLowLight ? "Too dark to check. Restoring brightness." : "Restoring brightness while the seat check continues."
+        if let reason { dimSuppressedForLowLight = true; recoveryReason = reason }
+        brightnessRestoreInFlight = true
+        lowLightRecoveryState = reason != nil ? .announcing : .none
+        status = reason == .lowLight ? "Too dark to check. Restoring brightness."
+            : reason == .seatRecheck ? "Rechecking your seat. Restoring brightness."
+            : "Restoring brightness while the seat check continues."
         isBusy = true; restorationConfirmed = false
         dimTask = Task { [weak self] in
             guard let self else { return }
-            if announceLowLight {
+            if reason != nil {
                 do { try await lowLightAnnouncementDelay() } catch { return }
             }
             guard current(ticket), dimRevision == revision, !Task.isCancelled else { return }
-            if announceLowLight { lowLightRecoveryState = .restoring }
+            if reason != nil { lowLightRecoveryState = .restoring }
             let restored = await dimmer.restore()
             guard current(ticket), dimRevision == revision else { return }
             guard restored, !dimmer.hasPendingRestore, !dimmer.isBusy else {
@@ -268,9 +282,11 @@ enum LowLightRecoveryState: String, Equatable {
                 finishCleanup(restored: false, suspended: false)
                 return
             }
+            presence.recheckAfterBrightnessRestore()
+            brightnessRestoreInFlight = false
             restorationConfirmed = true; isBusy = false; dimError = nil; dimTask = nil
             lowLightRecoveryState = dimSuppressedForLowLight ? .monitoring : .none
-            unknownSince = nil
+            unknownSince = lastTime
             status = "Brightness is restored. The camera is still checking the seat."
         }
     }
@@ -382,6 +398,8 @@ enum LowLightRecoveryState: String, Equatable {
         startTask?.cancel(); startTask = nil
         dimTask?.cancel(); dimTask = nil
         lowLightRecoveryState = .none
+        recoveryReason = .lowLight
+        brightnessRestoreInFlight = false
         presenceStarted = false
         return generation
     }

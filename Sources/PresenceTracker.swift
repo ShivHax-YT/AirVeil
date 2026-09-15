@@ -16,6 +16,33 @@ struct PresenceBody: Equatable, Sendable {
     let confidence: Double
 }
 
+/// Visibility of the calibrated seat region, not proof that a person left.
+/// Global image brightness is diagnostic only: a bright background must not
+/// make a dark or featureless foreground count as reliable empty-seat evidence.
+struct PresenceFrameQuality: Equatable, Sendable {
+    let globalMean: Double
+    let seatMean: Double
+    let seatDarkFraction: Double
+    let seatContrast: Double
+    let seatClippedFraction: Double
+    let sampleCount: Int
+
+    var isValid: Bool {
+        sampleCount >= 48 && [globalMean, seatMean, seatDarkFraction, seatContrast, seatClippedFraction]
+            .allSatisfy { $0.isFinite && (0...1).contains($0) }
+    }
+    var needsLight: Bool { isValid && (seatMean < 0.04 || seatDarkFraction > 0.5) }
+    var supportsAbsence: Bool {
+        isValid && !needsLight && seatContrast >= 0.04 && seatClippedFraction < 0.8
+    }
+    var decision: String {
+        guard isValid else { return "unavailable" }
+        if needsLight { return "dark-seat" }
+        if seatClippedFraction >= 0.8 { return "clipped-seat" }
+        return seatContrast < 0.04 ? "low-detail-seat" : "usable-seat"
+    }
+}
+
 struct PresenceObservation: Equatable, Sendable {
     let cameraID: String
     let configurationID: String
@@ -25,6 +52,9 @@ struct PresenceObservation: Equatable, Sendable {
     let faces: [CGRect]
     var analysisUsable = true
     var needsLightAssistance = false
+    var frameQuality: PresenceFrameQuality?
+    var uncertainFaces: [CGRect] = []
+    var maximumFaceConfidence: Double?
 }
 
 enum PresenceState: String, Equatable, Sendable { case unknown, present, absent }
@@ -62,6 +92,18 @@ struct PresenceTracker {
     private(set) var snapshot = PresenceSnapshot()
 
     init(reference: PresenceSeatReference) { self.reference = reference }
+
+    /// Keep capture and spatial continuity, but never reuse empty-seat evidence
+    /// collected before the display's lighting was restored. Framing failures
+    /// remain invalid; changing brightness cannot fix camera geometry.
+    mutating func recheckAfterBrightnessRestore(after cutoff: Double) {
+        guard cutoff.isFinite, cutoff >= 0 else { return }
+        absenceLatched = false
+        candidate = nil; candidateStarted = nil; candidateCount = 0
+        missingSince = nil; missingFrames = 0
+        lastCapture = cutoff; lastReceipt = nil
+        snapshot = PresenceSnapshot(status: "Checking the seat after brightness restoration.")
+    }
 
     static func isReferenceUsable(_ reference: PresenceSeatReference, now: Double) -> Bool {
         !reference.cameraID.isEmpty && !reference.configurationID.isEmpty &&
@@ -112,11 +154,18 @@ struct PresenceTracker {
                 abs(face.midX - saved.midX) <= max(0.1, saved.width * 0.7) &&
                 abs(face.midY - saved.midY) <= max(0.1, saved.height * 0.7)
         }
-        if !observation.analysisUsable, plausible.isEmpty, foregroundFaces.isEmpty {
+        if plausible.isEmpty, foregroundFaces.isEmpty,
+           !observation.analysisUsable || observation.frameQuality?.supportsAbsence != true {
             candidate = nil; candidateCount = 0; candidateStarted = nil
             missingSince = nil; missingFrames = 0
             snapshot = PresenceSnapshot(status: "The camera cannot reliably check the foreground seat in this view.",
-                isLowLight: observation.needsLightAssistance)
+                isLowLight: observation.needsLightAssistance || observation.frameQuality?.needsLight == true)
+            return snapshot
+        }
+        if plausible.isEmpty, foregroundFaces.isEmpty, hasAmbiguousForeground(in: observation) {
+            candidate = nil; candidateCount = 0; candidateStarted = nil
+            missingSince = nil; missingFrames = 0
+            snapshot = PresenceSnapshot(status: "Human evidence near the foreground seat is uncertain. Continuing the check.")
             return snapshot
         }
         // Never silently select a different member of an overlapping crowd.
@@ -187,6 +236,25 @@ struct PresenceTracker {
         let face = reference.faceBounds
         return bounds.width >= face.width * 1.15 && bounds.height >= face.height * 1.25 &&
             bounds.width * bounds.height >= max(0.08, face.width * face.height * 3)
+    }
+
+    /// A nearby human that fails the stricter presence/continuity thresholds
+    /// is not an empty seat. Clearly small background and side detections stay
+    /// outside this ambiguity gate; it never adopts a different occupant.
+    private func hasAmbiguousForeground(in observation: PresenceObservation) -> Bool {
+        let face = reference.faceBounds
+        let nearFace = (observation.faces + observation.uncertainFaces).contains { bounds in
+            Self.usableRect(bounds) && bounds.width >= face.width * 0.5 && bounds.height >= face.height * 0.5 &&
+                abs(bounds.midX - face.midX) <= max(0.15, face.width) &&
+                abs(bounds.midY - face.midY) <= max(0.15, face.height)
+        }
+        return nearFace || observation.bodies.contains { body in
+            let bounds = body.bounds
+            return body.confidence.isFinite && (0.3...1).contains(body.confidence) && Self.usableRect(bounds) &&
+                bounds.width >= face.width * 0.8 && bounds.height >= face.height &&
+                abs(bounds.midX - face.midX) <= max(0.15, face.width) &&
+                bounds.minY < face.maxY && bounds.maxY >= face.minY
+        }
     }
 
     private func matchesSeat(_ bounds: CGRect) -> Bool {

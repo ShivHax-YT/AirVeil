@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreVideo
 
 @MainActor private final class FakePresenceCapture: PresenceCapturing {
     var isAuthorized = true
@@ -36,7 +37,9 @@ import CoreGraphics
         let bodies = occupied ? [PresenceBody(bounds: CGRect(x: 0.25, y: 0.05, width: 0.5, height: 0.8), confidence: 0.95)] : []
         capture.observations[handler ?? capture.observations.count - 1](PresenceObservation(cameraID: "builtin",
             configurationID: "fixed-vga", captureHostTime: time - 0.02, receiptHostTime: time, bodies: bodies, faces: [],
-            analysisUsable: !dark, needsLightAssistance: dark))
+            analysisUsable: !dark, needsLightAssistance: dark,
+            frameQuality: PresenceFrameQuality(globalMean: dark ? 0.01 : 0.4, seatMean: dark ? 0.01 : 0.35,
+                seatDarkFraction: dark ? 1 : 0.05, seatContrast: 0.2, seatClippedFraction: 0, sampleCount: 192)))
         time += 0.34
     }
 }
@@ -158,6 +161,76 @@ import CoreGraphics
             f.capture.failures[0]("Camera interrupted"); await settle()
             check(!f.service.isLowLight && !f.service.isRunning,
                   "Capture failure clears low light instead of treating a failed provider as darkness")
+        }
+        do {
+            let f = PresenceFixture(); try await f.service.start(reference: f.reference)
+            for _ in 0..<7 { f.frame(occupied: false) }
+            check(f.service.state == .absent, "Fresh reliable empty-seat frames establish an initial absence before rechecking")
+            let starts = f.capture.starts, stops = f.capture.stops, cutoff = f.time
+            f.service.recheckAfterBrightnessRestore()
+            check(f.service.state == .unknown && f.service.isRunning && f.capture.starts == starts && f.capture.stops == stops,
+                  "Brightness recheck clears absence without restarting or stopping the camera")
+            f.time = cutoff - 0.1
+            f.frame(occupied: false, dark: true)
+            check(f.service.state == .unknown && !f.service.isLowLight,
+                  "A queued dark frame captured before restoration cannot replace the fresh recheck state")
+            f.time = cutoff + 0.04
+            for _ in 0..<4 { f.frame(occupied: false) }
+            check(f.service.state == .unknown, "New post-restore frames cannot skip the full absence hold")
+            for _ in 0..<3 { f.frame(occupied: false) }
+            check(f.service.state == .absent && f.service.qualityDiagnostics["decision"] as? String == "usable-seat",
+                  "New reliable post-restore frames eventually confirm absence with numeric quality diagnostics")
+            check(f.service.qualityDiagnostics["seatMean"] as? Double == 0.35 && f.service.qualityDiagnostics["bodyCount"] as? Int == 0,
+                  "Opt-in diagnostics expose numeric quality and detection counts without images or coordinates")
+            await f.service.stop()
+        }
+        do {
+            let f = PresenceFixture(); try await f.service.start(reference: f.reference)
+            f.capture.observations[0](PresenceObservation(cameraID: "builtin", configurationID: "fixed-vga",
+                captureHostTime: f.time - 0.02, receiptHostTime: f.time, bodies: [], faces: [],
+                frameQuality: PresenceFrameQuality(globalMean: .nan, seatMean: .infinity,
+                    seatDarkFraction: .nan, seatContrast: -.infinity, seatClippedFraction: .nan, sampleCount: 192),
+                maximumFaceConfidence: .nan))
+            check(f.service.state == .unknown && !f.service.isLowLight,
+                  "Malformed quality cannot establish absence or measured darkness")
+            let diagnostics = f.service.qualityDiagnostics
+            check(diagnostics["decision"] as? String == "unavailable" && diagnostics["seatMean"] is NSNull &&
+                  diagnostics["maximumFaceConfidence"] is NSNull && JSONSerialization.isValidJSONObject(diagnostics),
+                  "Nonfinite measurement diagnostics remain JSON-safe and explicitly unavailable")
+            await f.service.stop()
+        }
+        do {
+            func buffer(_ level: (Int, Int) -> UInt8) -> CVPixelBuffer {
+                var output: CVPixelBuffer?
+                let result = CVPixelBufferCreate(kCFAllocatorDefault, 320, 240,
+                    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, nil, &output)
+                precondition(result == kCVReturnSuccess && output != nil)
+                let pixels = output!
+                precondition(CVPixelBufferLockBaseAddress(pixels, []) == kCVReturnSuccess)
+                let bytes = CVPixelBufferGetBaseAddressOfPlane(pixels, 0)!.assumingMemoryBound(to: UInt8.self)
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
+                for y in 0..<240 { for x in 0..<320 { bytes[y * stride + x] = level(x, y) } }
+                CVPixelBufferUnlockBaseAddress(pixels, [])
+                return pixels
+            }
+            let face = CGRect(x: 0.4, y: 0.6, width: 0.2, height: 0.2)
+            // The seat rectangle extends from Vision y0.32 to0.84, which maps
+            // to pixel rows38...164 because the camera origin is top-left.
+            let darkSeat = buffer { x, y in (95...225).contains(x) && (30...172).contains(y) ? 3 : 220 }
+            let dark = PresenceImageQuality.measure(darkSeat, faceBounds: face)!
+            check(dark.globalMean > 0.4 && dark.seatMean < 0.04 && dark.needsLight && !dark.supportsAbsence,
+                  "A bright background cannot hide a dark calibrated foreground region")
+            let flat = PresenceImageQuality.measure(buffer { _, _ in 120 }, faceBounds: face)!
+            check(!flat.needsLight && !flat.supportsAbsence && flat.decision == "low-detail-seat",
+                  "A lit but featureless seat view stays uncertain instead of claiming reliable analysis")
+            let detailed = PresenceImageQuality.measure(buffer { x, y in (x + y).isMultiple(of: 3) ? 70 : 170 }, faceBounds: face)!
+            check(detailed.supportsAbsence && detailed.seatContrast > 0.3,
+                  "Well-lit detailed seat pixels can support normal empty-seat evidence")
+            let clipped = PresenceImageQuality.measure(buffer { _, _ in 255 }, faceBounds: face)!
+            check(!clipped.supportsAbsence && clipped.decision == "clipped-seat",
+                  "A washed-out foreground is not usable absence evidence")
+            check(PresenceImageQuality.measure(darkSeat, faceBounds: .zero) == nil,
+                  "Missing seat geometry produces unavailable quality rather than global-only inference")
         }
         print("PASS: \(checks) presence capture lifecycle checks; injected capture and light only")
     }

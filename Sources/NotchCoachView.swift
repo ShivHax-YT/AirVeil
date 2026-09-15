@@ -5,6 +5,26 @@ enum NotchBrightnessRecoveryStage: String, Equatable {
     case none, announcing, restoring, restored, monitoring
 }
 
+enum NotchBrightnessRecoveryReason: String {
+    case lowLight, seatRecheck
+
+    func title(for stage: NotchBrightnessRecoveryStage) -> String {
+        if stage == .monitoring { return "Checking your seat" }
+        if stage == .restored { return "Brightness restored" }
+        return self == .lowLight ? "Too dark to check" : "Rechecking your seat"
+    }
+
+    func detail(for stage: NotchBrightnessRecoveryStage) -> String {
+        if stage == .monitoring { return "Brightness restored.\nKeeping your seat in view." }
+        if stage == .restored {
+            return self == .lowLight ? "It was too dark at the dimmed level.\nYour seat check will continue."
+                : "Checking again to confirm\nwhether you are still seated."
+        }
+        return self == .lowLight ? "Restoring your display brightness\nso the camera can check your seat."
+            : "Restoring brightness to confirm\nwhether you are still seated."
+    }
+}
+
 enum NotchTutorialStep: Int, CaseIterable {
     case tracking, center, light, controls
     var title: String {
@@ -33,6 +53,7 @@ enum NotchTutorialStep: Int, CaseIterable {
     @Published var demo = false
     @Published var wearAirPodsPrompt = false
     @Published var brightnessRecovery: NotchBrightnessRecoveryStage = .none
+    @Published var brightnessRecoveryReason: NotchBrightnessRecoveryReason = .lowLight
     @Published var tutorialStep: NotchTutorialStep?
     var endTutorial: () -> Void = {}
     @Published var topInset: CGFloat = 32
@@ -232,8 +253,6 @@ struct NotchCanopy: Shape {
             .accessibilityHint("Restores brightness and turns off blur and camera checks until you enable them again.")
     }
     private var brightnessRecoveryContent: some View {
-        let monitoring = presentation.brightnessRecovery == .monitoring
-        let restored = presentation.brightnessRecovery == .restored
         return VStack(spacing: 12) {
             TimelineView(.animation(minimumInterval: 1.0 / 30,
                                     paused: reduceMotion || !presentation.expanded || presentation.animationTime != nil)) { context in
@@ -243,12 +262,10 @@ struct NotchCanopy: Shape {
             }
             .accessibilityHidden(true)
             VStack(spacing: 6) {
-                Text(monitoring ? "Checking your seat" : (restored ? "Brightness restored" : "Too dark to check"))
+                Text(presentation.brightnessRecoveryReason.title(for: presentation.brightnessRecovery))
                     .font(.system(size: 16, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
-                Text(monitoring ? "Brightness restored.\nKeeping your seat in view."
-                     : (restored ? "It was too dark at the dimmed level.\nYour seat check will continue."
-                        : "Restoring your display brightness\nso the camera can check your seat."))
+                Text(presentation.brightnessRecoveryReason.detail(for: presentation.brightnessRecovery))
                     .font(.system(size: 11)).foregroundStyle(.white.opacity(0.72))
             }
             .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)

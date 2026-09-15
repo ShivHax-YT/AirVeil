@@ -1,6 +1,10 @@
 # AirVeil validation status
 
-## Current work — 0.15.0 build 29
+## Current work — 0.15.0 build 30
+
+Build 30 is installed with full regression and package verification passing. It addresses the confirmed seated false-lock path with foreground-region quality checks and brightness restoration followed by fresh evidence before departure decisions. The physical retest is in progress; no claim that heuristic camera visibility guarantees detection. See [current checklist](GOAL-CHECKLIST-0.15.0-30.md). × was confirmed to dismiss presentation while monitoring continues.
+
+## Build 29 session recovery
 
 Build 29 is installed and verified after a synchronized probe found a stale internal lock flag while macOS was unlocked. Lock hints still pause immediately; stable valid session evidence now corrects stale state through the existing brightness recovery barrier. Full regression passes, including 415 lifecycle checks. See the [current goal checklist](GOAL-CHECKLIST-0.15.0-29.md) for evidence and remaining physical acceptance.
 
