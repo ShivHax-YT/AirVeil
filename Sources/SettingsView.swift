@@ -348,7 +348,7 @@ struct SettingsView: View {
                                 model.requestScreenPermission()
                             }.controlSize(.large).disabled(model.checkingAccess)
                         }
-                        Text("Screen Recording permission is only needed for live blur. AirPod removal, seated blackout and display off work without it.")
+                        Text("Screen Recording permission is only needed for live blur. AirPods removal checks use Camera and Head Tracking permissions.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                     }.frame(maxWidth:.infinity,alignment:.leading).padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.access)
@@ -446,16 +446,23 @@ struct SettingsView: View {
     @ViewBuilder private var powerCards: some View {
                 VStack(alignment:.leading,spacing:12) {
                     VStack(alignment:.leading,spacing:12) {
-                    Label("When you take off your AirPods",systemImage:"moon.zzz").font(.headline)
-                    Toggle("Automatically manage displays when both AirPods are removed",isOn:$model.sleepDisplaysOnRemoval)
+                    Label("When you remove both AirPods",systemImage:"airpodspro").font(.headline)
+                    Text("Choose what happens after the camera checks your seat.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    Toggle("Lock when I leave",isOn:$model.sleepDisplaysOnRemoval)
                         .toggleStyle(.switch).controlSize(.small)
+                        .accessibilityIdentifier("lock-on-removal")
+                    Text("Turn off displays when the camera confirms your seat is empty. On by default.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text(model.removalStatus).font(.caption).foregroundStyle(.secondary)
                     }.tourTarget(.removal)
-                    if model.sleepDisplaysOnRemoval || tour.step == .seated {
                         VStack(alignment:.leading,spacing:12) {
-                        AirPodsWearStatus(motion: model.motion)
-                        Toggle("Dim while I am still seated", isOn: $model.dimWhilePresent)
+                        Divider()
+                        Toggle("Dim while I stay seated", isOn: $model.dimWhilePresent)
                             .toggleStyle(.switch).controlSize(.small)
+                            .accessibilityIdentifier("dim-on-removal")
+                        Text("Lower the built-in display's brightness while your seat is occupied. Off until you turn it on.")
+                            .font(.caption).foregroundStyle(.secondary)
                         if model.dimWhilePresent || tour.step == .seated {
                             HStack {
                                 Text("Screen brightness while seated")
@@ -465,21 +472,24 @@ struct SettingsView: View {
                                 Text("\(Int((model.removalBrightness * 100).rounded()))%")
                                     .monospacedDigit().frame(width: 38, alignment: .trailing)
                             }
-                            Text(!model.sleepDisplaysOnRemoval || !model.dimWhilePresent
-                                ? "Choose a brightness, then enable automatic display management and seated dimming to apply it."
+                            Text(!model.dimWhilePresent
+                                ? "Choose a brightness, then turn on Dim while I stay seated to apply it."
                                 : model.cameraHeading.isEnabled
                                 ? (model.presenceReady ? "Your seat is ready. Turning away is fine. At 0%, the display goes black without locking. Put your AirPods back in to restore brightness when motion resumes." : "Use Set center once to remember your seat before removing AirPods.")
                                 : "Enable camera assistance and use Set center to check your seat.")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("While your seat is confirmed and the display is dimmed, the built-in camera keeps checking. Images are not recorded or used to identify you. Confirmed absence turns displays off; an uncertain check ends and restores brightness. Only the built-in display is dimmed.")
+                            Text("If dimming makes the camera view too dark, AirVeil explains why, restores your brightness, and keeps checking your seat. It will not dim again during that removal check.")
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                         }.tourTarget(.seated)
-                    }
+                    Divider()
+                    AirPodsWearStatus(motion: model.motion)
+                    Text("Both options need camera assistance and a saved center. With both off, AirPods removal does not start seat checks. Camera images stay on this Mac and are not recorded or used to identify you.")
+                        .font(.caption2).foregroundStyle(.secondary)
                     Text("Keep Automatic Ear Detection on. After tracking is established, removing both AirPods can trigger a check when motion stops for a sustained period or disconnects. AirVeil cannot identify individual earbuds. Tracking interruptions pause blur; use Refresh direction if an automatic check cannot restore it.")
                         .font(.caption2).foregroundStyle(.secondary)
                     HStack(alignment:.top) {
-                        Text("To require a password when the displays wake, set Require password to Immediately in your Mac’s Lock Screen settings.")
+                        Text("macOS controls locking after displays turn off. Set Require password to Immediately in Lock Screen settings to lock as soon as you leave.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Spacer()
                         Button("Lock Screen settings") { model.openLockScreenSettings() }

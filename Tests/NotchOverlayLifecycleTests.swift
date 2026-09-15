@@ -5,6 +5,10 @@ import SwiftUI
 // The actual native controller/view run against a fake application boundary.
 // No motion, permission request, camera capture, power action, or preference writes.
 @MainActor final class StubMotion { var isFresh = true }
+enum LowLightRecoveryState: String { case none, announcing, restoring, monitoring }
+@MainActor final class StubRemovalCoordinator: ObservableObject {
+    @Published var lowLightRecoveryState: LowLightRecoveryState = .none
+}
 @MainActor final class StubCoordinator: ObservableObject {
     @Published var coach = NotchCoachSnapshot()
     let camera = CameraAnchorService()
@@ -18,6 +22,7 @@ import SwiftUI
 @MainActor final class AppModel {
     let motion = StubMotion()
     let cameraHeading = StubCoordinator()
+    let removalPresence = StubRemovalCoordinator()
     var centerBusy = false
     var enabled = false
     var starting = false
@@ -29,7 +34,7 @@ import SwiftUI
     func calibrate() { centerCalls += 1 }
     func refreshCameraDirection() { refreshCalls += 1 }
     func enableCameraAssistance() { enableCameraCalls += 1 }
-    func pause() { enabled = false; wearAirPodsPrompt = false; cameraHeading.coach = .init() }
+    func pause() { enabled = false; wearAirPodsPrompt = false; removalPresence.lowLightRecoveryState = .none; cameraHeading.coach = .init() }
     func enable() {
         enableCalls += 1
         if motion.isFresh { enabled = true } else { wearAirPodsPrompt = true }
@@ -239,6 +244,26 @@ import SwiftUI
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
         check(controller.presentation.expanded && controller.presentation.wearAirPodsPrompt,
               "A still-active wait returns after wake without enabling blur itself")
+        controller.presentation.dismissReminder()
+        await drain()
+        check(model.wearAirPodsPrompt && !controller.presentation.expanded && model.cancelWearCalls == 0,
+              "Dismiss retracts only the wear reminder and never calls the feature cancellation owner")
+        model.cameraHeading.coach = .init()
+        await drain()
+        try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
+        check(!panel.isVisible && model.wearAirPodsPrompt,
+              "Ordinary callbacks cannot reopen the dismissed reminder during the same episode")
+        controller.showControls()
+        check(controller.presentation.controls && controller.presentation.expanded && controller.presentation.canTurnOffFeature,
+              "Explicit controls remain accessible after dismissal and expose Turn off feature")
+        model.cameraHeading.coach = .init()
+        await drain()
+        check(controller.presentation.controls && controller.presentation.expanded,
+              "Repeated wait events do not replace deliberately reopened controls")
+        controller.updatePointerPosition(CGPoint(x: -20000, y: -20000))
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        check(!controller.presentation.expanded, "Sleep and wake do not clear dismissal for the same reminder episode")
         model.wearAirPodsPrompt = false
         model.cameraHeading.coach = .init(phase: .starting, title: "Checking direction", detail: "")
         await drain()
@@ -249,7 +274,56 @@ import SwiftUI
         await drain()
         try? await Task.sleep(for: .seconds(NotchOverlayPresentation.expansionDuration + 0.15))
         check(controller.presentation.wearAirPodsPrompt && controller.presentation.expanded,
-              "Queued old idle or dismissal work cannot hide a new removal wait")
+              "A new removal episode resets dismissal; old dismissal work cannot hide its wait")
+        controller.presentation.dismissReminder()
+        model.removalPresence.lowLightRecoveryState = .announcing
+        await drain()
+        check(controller.presentation.brightnessRecovery == .announcing && controller.presentation.expanded && !controller.presentation.wearAirPodsPrompt,
+              "A necessary low-light explanation can bypass a dismissed wear reminder")
+        model.removalPresence.lowLightRecoveryState = .restoring
+        await drain()
+        check(controller.presentation.brightnessRecovery == .restoring,
+              "Restoring uses future-tense guidance rather than claiming brightness has returned")
+        model.removalPresence.lowLightRecoveryState = .monitoring
+        await drain()
+        check(controller.presentation.brightnessRecovery == .restored,
+              "Successful restore first presents the readable brightness-restored reason")
+        model.cameraHeading.coach = .init()
+        await drain()
+        try? await Task.sleep(for: .seconds(2.08))
+        check(controller.presentation.brightnessRecovery == .monitoring && controller.presentation.expanded,
+              "After the completion notice the same panel switches to the ongoing seat-camera visual")
+        controller.presentation.dismissReminder()
+        await drain()
+        check(!controller.presentation.expanded && model.removalPresence.lowLightRecoveryState == .monitoring && model.cancelWearCalls == 0,
+              "Dismissing the camera-check visual keeps actual monitoring and settings active")
+        model.removalPresence.lowLightRecoveryState = .monitoring
+        await drain()
+        check(!controller.presentation.expanded, "Repeated monitoring publications cannot undo dismissal")
+        controller.showControls()
+        check(controller.presentation.controls && controller.presentation.canTurnOffFeature,
+              "Monitoring still offers ordinary controls and Off after its notice is dismissed")
+        model.removalPresence.lowLightRecoveryState = .none
+        model.wearAirPodsPrompt = false
+        model.cameraHeading.coach = .init(phase: .starting, title: "Checking direction", detail: "")
+        await drain()
+        check(controller.presentation.expanded && controller.presentation.brightnessRecovery == .none && controller.presentation.snapshot.phase == .starting,
+              "AirPods return replaces a dismissed seat check with the genuine heading camera coach")
+        model.cameraHeading.coach = .init()
+        model.wearAirPodsPrompt = true
+        await drain()
+        model.removalPresence.lowLightRecoveryState = .announcing
+        await drain()
+        model.removalPresence.lowLightRecoveryState = .monitoring
+        await drain()
+        model.removalPresence.lowLightRecoveryState = .none
+        model.wearAirPodsPrompt = false
+        await drain()
+        try? await Task.sleep(for: .seconds(2.1))
+        check(!controller.presentation.expanded && controller.presentation.brightnessRecovery == .none,
+              "Stopped camera work cancels delayed completion so no stale camera notice reopens")
+        model.wearAirPodsPrompt = true
+        await drain()
         controller.presentation.turnOffFeature()
         await drain()
         check(model.cancelWearCalls == 1 && !model.wearAirPodsPrompt && !controller.presentation.expanded,

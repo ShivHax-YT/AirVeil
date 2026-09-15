@@ -2,11 +2,11 @@
 
 ## Scope and status
 
-This records **0.15.0 builds 24–27** on 15 September 2026. Turn off feature, the Settings wait/alignment/automatic-blur flow, and the moving head/arc/readout have wearer-confirmed results below. Build 26 is **not accepted for post-lock brightness recovery**: one reported success restored its journal before a separate lock and therefore did not test retained wake ownership; the subsequent unlock-before-return test reproduced a failure after creating a new dim journal during wake. Build 27's settling and post-wake ownership changes passed the full automated regression suite and were packaged, installed, and verified. Both physical brightness return orders and repeated cycles remain pending at this checkpoint.
+This records **0.15.0 builds 24–27** on 15 September 2026. Turn off feature, the Settings wait/alignment/automatic-blur flow, and the moving head/arc/readout have wearer-confirmed results below. Build 26's unlock-before-return brightness failure remains documented. Build 27 passed the full automated suite, was installed and verified, and restored original brightness in **four wearer-confirmed cases: both AirPods return orders after manual lock and after actual Apple-menu Sleep**. These are the recorded physical passes, not a claim of reliability in all conditions. Automatic departure sleep under the current low-light conditions remains unresolved.
 
 | Change | Current behavior | Remaining installed or physical acceptance |
 |---|---|---|
-| Restore brightness after departure and lock | Build 26 retains journals that cross suspension, but a new post-wake dim still failed on return. Installed build 27 now holds recovery until awake readings settle and retains ownership for a new dim within a bounded wake interval. | Full automated regression and installation checks pass. Repeat both physical return orders and verify original brightness each time. |
+| Restore brightness after departure and lock | Installed build 27 holds recovery until awake readings settle and retains ownership for a new dim within a bounded wake interval. | Four wearer-confirmed brightness cases pass: both return orders after manual lock and after actual Apple-menu Sleep. Automatic departure sleep in the current low-light setting remains unverified. |
 | Organize Settings | Preview, Tracking, Displays, Appearance, and Power use native tabs. Each of the 16 tour steps selects its tab and scrolls to its real control. Enable/Pause remains in the header. | Installed tabs and the first three tour steps were inspected. Remaining acceptance includes the complete live tour and minimum-window interactions. |
 | Sync head | The explicit Appearance action requests camera/AirPods alignment, then displays signed live yaw independently of onset selection and blur inversion. It does not edit onset angles or independently start desktop capture. | Build 26 is wearer-confirmed: the head, moving arc marker, and large degree readout follow correctly. Stop sync returned to the saved 11°/13° onset controls in the installed UI. |
 | Seated wear prompt and off control | Missing motion during seated monitoring shows animated AirPods Pro artwork and “Wear AirPods to continue blurring.” “Turn off feature” cancels blur and camera work, restores owned brightness, and persists an automatic-check pause. | One live off action is wearer-confirmed for brightness restoration and camera-light shutdown. Animation acceptance, persistence after relaunch, and explicit re-enable remain pending. |
@@ -145,7 +145,7 @@ The next controlled test reproduced dim brightness after unlocking before return
 
 The wearer had not requested a brightness change. Build 26's wake flag covered a journal already present during suspension, but this journal was created after unlock and lacked that protection. The result is a real failure of the required unlock-before-return flow. It supersedes any suggestion that the earlier reported success completed wake-brightness acceptance. Both return orders and repeated cycles remain open.
 
-## Build 27 correction — installed, physical acceptance pending
+## Build 27 correction — installed, four brightness cases accepted
 
 An actual suspension now keeps the existing `recoverIfNeeded()` brightness barrier pending **even when no journal exists**. New presence/dim work and heading recovery stay behind that barrier. The implemented settling contract is:
 
@@ -180,8 +180,30 @@ After a normal app quit, build 27 was installed at `/Applications/AirVeil.app`, 
 - Executable SHA-256: `afdf9303ca8d5f643836090e0613e1b02bf5c3e79c7af31de7d33a98e720f9b5`.
 - Installed executable matches the DMG; bundled policies match source; developer previews are excluded; strict signature verification passed.
 
-The wearer confirmed that the fresh camera check finished. Live diagnostics independently showed connected, fresh and armed motion, a usable seat reference, camera off after completion, and automatic checks enabled. The saved `build/validation/build27-unlock-first-ready.json` records these prerequisites. Both brightness return orders and repeated cycles remain pending. No public release was made.
+The wearer confirmed that the fresh camera check finished. Live diagnostics independently showed connected, fresh and armed motion, a usable seat reference, camera off after completion, and automatic checks enabled. The saved `build/validation/build27-unlock-first-ready.json` records these prerequisites. The source checkpoint is commit `66e4d6c` (`Stabilize wake brightness before resuming removal checks`). No public release was made.
 
 ### Build 27 low-light pretest
 
-The first attempted unlock-first sequence did not reach lock. In `build/validation/build27-low-light-pretest.jsonl`, presence initially needed its brief assist light to confirm the seat. It then dimmed the display from 0.7499998807907104 to 23%, switched the assist light off, and lost usable camera evidence. Eight seconds of uncertainty ended the check and restored the original brightness. The display-sleep counter remained zero. This confirms uncertainty cleanup, not wake restoration. The wearer was asked to add room lighting before repeating the physical wake test; darkness is not treated as proof that the seat is empty.
+The first attempted unlock-first sequence did not reach lock. In `build/validation/build27-low-light-pretest.jsonl`, presence initially needed its brief assist light to confirm the seat. It then dimmed the display from 0.7499998807907104 to 23%, switched the assist light off, and lost usable camera evidence. Eight seconds of uncertainty ended the check and restored the original brightness. The display-sleep counter remained zero. The wearer could not add room lighting. Automatic departure-triggered sleep is therefore unverified under these conditions; this attempt establishes uncertainty cleanup, not a wake-restoration pass. Darkness is not treated as proof that the seat is empty.
+
+### Build 27 manual-lock brightness accepted in both return orders
+
+The wearer confirmed that original brightness returned in both manual-lock tests:
+
+- **Unlock before returning AirPods:** `build/validation/build27-manual-lock-unlock-first-cycle1.jsonl` and `build27-manual-lock-unlock-first-cycle1-end.json` retain baseline **0.7499998807907104**, approximately 75%, through lock, a second lock, and restarted settling. Both cameras stay off during settling. Restoration verifies before resumed presence; the new post-unlock dim records the same 75% baseline, a 23% target, and wake ownership. Returning the AirPods restores the baseline and clears the journal before heading resumes. An independent trace review confirmed this ordering.
+- **Return AirPods before unlocking:** `build/validation/build27-manual-lock-return-first-cycle1.jsonl` and `build27-manual-lock-return-first-cycle1-end.json` likewise preserve the 75% journal through lock and record verified restoration after activation. The wearer confirmed original brightness returned. The final snapshot has no pending journal.
+
+These are physical **manual-lock** passes for the recorded episodes. `screensAwake` and `systemAwake` remain true throughout both traces, and AirVeil's display-sleep request count stays zero. The restore getters still report approximately 23%, so these manual-lock tests alone do not reproduce a changing wake reading or establish actual display/system sleep recovery. The separate sleep tests below provide that additional evidence.
+
+### Build 27 actual Apple-menu Sleep accepted in both return orders
+
+The wearer also confirmed original brightness returned in both **Apple menu → Sleep** tests. Both traces record `screensAwake == false` and `systemAwake == false`, distinguishing them from the manual-lock tests.
+
+- **Unlock before returning AirPods:** `build/validation/build27-sleep-unlock-first-cycle1.jsonl` and `build27-sleep-unlock-first-cycle1-end.json` retain the original **0.7499998807907104** baseline through actual sleep. The first awake restoration reads **0.20727252960205078**, which differs from the owned 0.2300000042 by more than the old 0.0125 ownership tolerance, then verifies restoration to approximately 75% before presence resumes. A new post-wake dim records that same baseline with wake ownership. It is later restored by the roughly eight-second uncertainty cleanup **while motion is still absent**; fresh AirPods motion arrives afterward. That second restoration is not attributed to rewear.
+- **Return AirPods before unlocking:** `build/validation/build27-sleep-return-first-cycle1.jsonl` and `build27-sleep-return-first-cycle1-end.json` preserve the same 75% journal through actual sleep. The awake restoration reads **0.2298305481672287**, restores the original baseline, and clears the journal before the direction camera resumes. The wearer confirmed the expected brightness result.
+
+Together with the two manual-lock episodes, these are **four wearer-confirmed brightness passes** on build 27. The actual unlock-first case also exercises a wake reading outside the former ownership tolerance. All four final snapshots have no pending brightness journal. The automatic display-sleep request count remains zero in both Apple-menu tests: the wearer initiated sleep, so these results do not verify automatic departure-triggered sleep.
+
+### Remaining low-light behavior
+
+Automatic departure sleep remains unresolved in the current room lighting. The wearer cannot add room light; the low-light pretest restored brightness after uncertain camera evidence and never locked. The wearer chose a one-time restoration of original brightness with an explanatory notch animation, followed by continued seat monitoring. That follow-up is in progress and is not part of build 27. Build 27 production source is checkpointed at `66e4d6c`; this section records its test evidence only and makes no public release.

@@ -34,6 +34,7 @@ enum PresenceCaptureError: LocalizedError {
     @Published private(set) var status = "Presence camera is off."
     @Published private(set) var isRunning = false
     @Published private(set) var isAssistLightOn = false
+    @Published private(set) var isLowLight = false
     private let capture: any PresenceCapturing
     private let faceLight: any FaceLighting
     private let now: () -> Double
@@ -173,6 +174,7 @@ enum PresenceCaptureError: LocalizedError {
     private func publish(_ snapshot: PresenceSnapshot) {
         if state != snapshot.state { state = snapshot.state }
         if status != snapshot.status { status = snapshot.status }
+        if isLowLight != snapshot.isLowLight { isLowLight = snapshot.isLowLight }
     }
 }
 
@@ -321,17 +323,17 @@ private final class PresenceCaptureWorker: NSObject, AVCaptureVideoDataOutputSam
                 captureHostTime: captured, receiptHostTime: receipt,
                 bodies: (bodies.results ?? []).map { PresenceBody(bounds: $0.boundingBox, confidence: Double($0.confidence)) },
                 faces: (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox),
-                analysisUsable: !dark, needsLightAssistance: dark))
+                analysisUsable: dark == false, needsLightAssistance: dark == true))
         } catch {
             fail("Human-body analysis could not complete.")
         }
     }
-    private static func isVeryDark(_ pixels: CVPixelBuffer) -> Bool {
-        guard CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return true }
+    private static func isVeryDark(_ pixels: CVPixelBuffer) -> Bool? {
+        guard CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
-        guard CVPixelBufferGetPlaneCount(pixels) > 0, let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return true }
+        guard CVPixelBufferGetPlaneCount(pixels) > 0, let base = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return nil }
         let width = CVPixelBufferGetWidthOfPlane(pixels, 0), height = CVPixelBufferGetHeightOfPlane(pixels, 0)
-        guard width > 0, height > 0 else { return true }
+        guard width > 0, height > 0 else { return nil }
         let stride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
         let bytes = base.assumingMemoryBound(to: UInt8.self)
         let fullRange = CVPixelBufferGetPixelFormatType(pixels) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
@@ -342,6 +344,6 @@ private final class PresenceCaptureWorker: NSObject, AVCaptureVideoDataOutputSam
                 count += 1
             }
         }
-        return count == 0 || total / count < 0.04
+        return count > 0 ? total / count < 0.04 : nil
     }
 }

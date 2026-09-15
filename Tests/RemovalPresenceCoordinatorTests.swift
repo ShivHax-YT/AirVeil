@@ -13,6 +13,7 @@ import CoreGraphics
 
 @MainActor private final class FakeRemovalPresence: RemovalPresenceMonitoring {
     var state = PresenceState.unknown
+    var isLowLight = false
     var status = "Presence uncertain"
     var starts = 0
     var stops = 0
@@ -24,14 +25,14 @@ import CoreGraphics
     func start(reference: PresenceSeatReference) async throws {
         generation += 1
         let ticket = generation
-        starts += 1; state = .unknown
+        starts += 1; state = .unknown; isLowLight = false
         if let startGate { await startGate.wait() }
         guard generation == ticket else { throw CancellationError() }
         if failStart { throw NSError(domain: "FakeCamera", code: 1) }
         running = true
     }
     func stop() async {
-        generation += 1; stops += 1; state = .unknown; running = false
+        generation += 1; stops += 1; state = .unknown; isLowLight = false; running = false
         if let stopGate { await stopGate.wait() }
     }
     func refresh() {}
@@ -86,6 +87,8 @@ import CoreGraphics
     var prepares = 0
     var sleeps = 0
     var sleepFails = false
+    var announcementGate: RemovalTestGate?
+    var announcements = 0
     lazy var coordinator = RemovalPresenceCoordinator(presence: presence, dimmer: dimmer,
         prepareCamera: { [weak self] in
             guard let self else { return }
@@ -96,9 +99,15 @@ import CoreGraphics
             sleeps += 1
             if let sleepGate { await sleepGate.wait() }
             if sleepFails { throw NSError(domain: "FakeSleep", code: 1) }
+        }, lowLightAnnouncementDelay: { [weak self] in
+            guard let self else { return }
+            announcements += 1
+            if let announcementGate { await announcementGate.wait() }
         })
-    func begin(now: Double = 100, allowSleep: Bool = true) {
-        coordinator.begin(reference: reference, now: now, allowSleepBeforePresence: allowSleep)
+    func begin(now: Double = 100, allowSleep: Bool = true, allowDimming: Bool = true,
+               allowLock: Bool = true, allowUncertainSleep: Bool = true) {
+        coordinator.begin(reference: reference, now: now, allowSleepBeforePresence: allowSleep,
+            allowDimming: allowDimming, allowUncertainSleep: allowUncertainSleep, allowLock: allowLock)
     }
 }
 
@@ -158,7 +167,8 @@ import CoreGraphics
         timeout: 2, now: { 1234 }, wakeClock: { [wake] in wake.time },
         wakeDelay: { [wake] in try await wake.wait($0) })
     lazy var coordinator = RemovalPresenceCoordinator(presence: presence, dimmer: dimmer,
-        prepareCamera: {}, requestDisplaySleep: { [weak self] in self?.sleeps += 1 })
+        prepareCamera: {}, requestDisplaySleep: { [weak self] in self?.sleeps += 1 },
+        lowLightAnnouncementDelay: { [wake] in try await wake.wait(1.2) })
     func begin(now: Double, allowSleep: Bool = true) {
         let reference = PresenceSeatReference(cameraID: "camera", configurationID: "fixed",
             faceBounds: CGRect(x: 0.35, y: 0.45, width: 0.25, height: 0.25), captureHostTime: now - 1)
@@ -408,6 +418,201 @@ import CoreGraphics
                       f.journal.saved.dropFirst(firstSaved).allSatisfy { $0.baseline == original },
                       "Both return orders complete each cycle without a dimmed baseline or stale ownership")
             }
+        }
+        do {
+            let f = RemovalFixture(); f.begin(allowUncertainSleep: false); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let initialRestores = f.dimmer.restores, stops = f.presence.stops
+            let notice = RemovalTestGate(); f.announcementGate = notice
+            let restoration = RemovalTestGate(); f.dimmer.restoreGate = restoration
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.coordinator.update(now: 102); await settle()
+            check(f.coordinator.lowLightRecoveryState == .announcing && notice.waiters == 1 &&
+                  f.dimmer.restores == initialRestores && f.dimmer.isDimmed,
+                  "The low-light explanation is visible before any brightness restoration begins")
+            check(f.presence.running && f.presence.stops == stops && !f.coordinator.canResumeHeading,
+                  "The announcement preserves camera continuity and excludes simultaneous head tracking")
+            f.coordinator.updateTarget(0.3); f.coordinator.updatePolicy(allowDimming: true, allowLock: true)
+            check(f.dimmer.targets == [0] && f.announcements == 1,
+                  "Target and unchanged policy updates cannot restart dimming during the notice")
+            f.announcementGate = nil; notice.release(); await settle()
+            check(f.coordinator.lowLightRecoveryState == .restoring && restoration.waiters == 1 && f.presence.running,
+                  "The restoring state waits for the actual brightness driver while the camera remains running")
+            restoration.release(); f.dimmer.restoreGate = nil; await settle()
+            check(f.coordinator.lowLightRecoveryState == .monitoring && !f.dimmer.hasPendingRestore &&
+                  f.presence.running && f.presence.stops == stops,
+                  "Only successful restoration switches to continuous monitoring without a camera restart")
+            for time in [103.0, 111, 160, 220] { f.coordinator.update(now: time); await settle() }
+            check(f.coordinator.isActive && f.presence.running && f.sleeps == 0 &&
+                  f.dimmer.restores == initialRestores + 1,
+                  "Continuing fresh low-light uncertainty never repeats the restore, ends monitoring, or guesses absence")
+            f.presence.isLowLight = false; f.presence.state = .present
+            f.coordinator.update(now: 221); f.coordinator.updateTarget(0.1)
+            f.coordinator.updatePolicy(allowDimming: true, allowLock: true); await settle()
+            check(f.dimmer.targets == [0] && f.coordinator.lowLightRecoveryState == .monitoring,
+                  "Fresh presence and later settings updates cannot redim the recovered removal episode")
+            f.presence.state = .absent; f.coordinator.update(now: 223); await settle()
+            check(f.sleeps == 1 && !f.presence.running && f.coordinator.lowLightRecoveryState == .none,
+                  "Confirmed absence can still lock after low-light recovery and clears the notch presentation")
+        }
+        for ending in ["rewear", "off", "suspend"] {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let notice = RemovalTestGate(); f.announcementGate = notice
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.coordinator.update(now: 102); await settle()
+            check(f.coordinator.lowLightRecoveryState == .announcing, "\(ending) fixture reaches the explanation before restoration")
+            if ending == "rewear" { _ = await f.coordinator.finishForRewear() }
+            else if ending == "off" { f.coordinator.cancel(); await settle() }
+            else { f.coordinator.suspend(); await settle() }
+            let restores = f.dimmer.restores
+            notice.release(); f.announcementGate = nil; await settle()
+            check(f.coordinator.lowLightRecoveryState == .none && !f.presence.running &&
+                  f.dimmer.restores == restores && f.sleeps == 0,
+                  "\(ending) invalidates a held notice so its late completion cannot restore or restart capture")
+        }
+        for ending in ["rewear", "off", "suspend"] {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let restoration = RemovalTestGate(); f.dimmer.restoreGate = restoration
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.coordinator.update(now: 102); await settle()
+            check(f.coordinator.lowLightRecoveryState == .restoring && restoration.waiters == 1,
+                  "\(ending) fixture reaches an outstanding brightness restoration")
+            let rewear = ending == "rewear" ? Task { await f.coordinator.finishForRewear() } : nil
+            if ending == "off" { f.coordinator.cancel() }
+            else if ending == "suspend" { f.coordinator.suspend() }
+            await settle()
+            f.dimmer.restoreGate = nil; restoration.release()
+            _ = await rewear?.value; await settle()
+            check(f.coordinator.lowLightRecoveryState == .none && !f.presence.running && !f.coordinator.isActive,
+                  "\(ending) defeats a late restore acknowledgement without reviving the monitoring presentation")
+        }
+        do {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            let restores = f.dimmer.restores
+            f.coordinator.update(now: 101); await settle()
+            check(f.announcements == 0 && f.dimmer.restores == restores,
+                  "Darkness without an owned dim cannot announce or restore somebody else's brightness")
+            f.presence.state = .present; f.presence.isLowLight = false
+            f.coordinator.update(now: 102); await settle()
+            f.presence.state = .unknown
+            f.coordinator.update(now: 103); await settle()
+            check(f.announcements == 0, "Untyped framing, stale-frame, or capture uncertainty cannot trigger low-light recovery")
+            f.presence.isLowLight = true; f.dimmer.hasPendingRestore = false
+            f.coordinator.update(now: 104); await settle()
+            check(f.announcements == 0, "A dimmed flag without restoration ownership cannot change brightness")
+            f.coordinator.cancel(); await settle()
+        }
+        do {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            f.dimmer.restoreSucceeds = false
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            let restores = f.dimmer.restores
+            f.coordinator.update(now: 102); await settle()
+            check(f.coordinator.phase == .failed && f.coordinator.lowLightRecoveryState == .none &&
+                  f.dimmer.hasPendingRestore && !f.presence.running && !f.coordinator.canResumeHeading &&
+                  f.dimmer.restores == restores + 1,
+                  "Failed low-light restoration retains ownership for retry without false success or repeated writes")
+        }
+        do {
+            let f = RemovalFixture()
+            f.begin(allowDimming: false, allowLock: false); await settle()
+            check(f.presence.starts == 0 && f.prepares == 0 && f.dimmer.targets.isEmpty && f.sleeps == 0,
+                  "Even an accidental begin with both policies off cannot capture, dim, or lock")
+        }
+        for ending in ["rewear", "off"] {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let stop = RemovalTestGate(); f.presence.stopGate = stop
+            f.dimmer.restoreSucceeds = false
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.coordinator.update(now: 102); await settle()
+            check(stop.waiters == 1 && f.coordinator.isBusy && !f.coordinator.canResumeHeading,
+                  "Failed restoration waits for the physical camera stop before reporting cleanup")
+            f.dimmer.restoreSucceeds = true
+            var completed = false
+            let rewear = ending == "rewear" ? Task {
+                let result = await f.coordinator.finishForRewear(); completed = true; return result
+            } : nil
+            if ending == "off" { f.coordinator.cancel() }
+            await settle()
+            check(!completed && !f.coordinator.canResumeHeading && f.coordinator.isBusy,
+                  "\(ending) cannot report complete while failed-recovery camera teardown is still held")
+            f.presence.stopGate = nil; stop.release()
+            _ = await rewear?.value; await settle()
+            check(f.coordinator.canResumeHeading && f.coordinator.phase == .idle &&
+                  f.coordinator.lowLightRecoveryState == .none,
+                  "\(ending) owns the final completion after shared teardown; the older failure cannot overwrite it")
+        }
+        do {
+            let f = RemovalFixture(); f.begin(allowDimming: false); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            check(f.presence.running && f.coordinator.isActive && f.dimmer.targets.isEmpty,
+                  "Lock-only monitoring keeps checking a seated occupant without dimming")
+            f.presence.state = .absent; f.coordinator.update(now: 103); await settle()
+            check(f.sleeps == 1, "Lock-only monitoring still locks on confirmed departure")
+        }
+        do {
+            let f = RemovalFixture(); f.begin(allowLock: false); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            f.presence.state = .absent; f.coordinator.update(now: 103); await settle()
+            check(f.dimmer.isDimmed && f.sleeps == 0 && f.presence.running,
+                  "Dim-only monitoring never locks on confirmed absence")
+            _ = await f.coordinator.finishForRewear()
+        }
+        do {
+            let f = RemovalFixture(); f.begin(); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 101); await settle()
+            let stops = f.presence.stops, restores = f.dimmer.restores
+            f.coordinator.updatePolicy(allowDimming: false, allowLock: true); await settle()
+            check(!f.dimmer.isDimmed && f.presence.running && f.presence.stops == stops &&
+                  f.dimmer.restores == restores + 1,
+                  "Turning dimming off restores brightness while lock monitoring keeps the same camera session")
+            f.coordinator.updateTarget(0.4); f.coordinator.update(now: 102); await settle()
+            check(f.dimmer.targets == [0], "Dim-off target updates cannot change brightness")
+            f.presence.state = .absent; f.coordinator.update(now: 104); await settle()
+            check(f.sleeps == 1, "Disabling dimming does not disable confirmed-departure locking")
+        }
+        do {
+            let f = RemovalFixture(); f.begin(); await settle()
+            let stop = RemovalTestGate(); f.presence.stopGate = stop
+            f.presence.state = .absent; f.coordinator.update(now: 101); await settle()
+            check(stop.waiters == 1 && f.sleeps == 0, "Pending departure sleep is held behind camera teardown")
+            f.coordinator.updatePolicy(allowDimming: true, allowLock: false); await settle()
+            f.presence.stopGate = nil; stop.release(); await settle()
+            check(f.sleeps == 0 && f.presence.running && f.coordinator.isActive,
+                  "Turning locking off invalidates queued sleep and resumes through the shared camera-stop barrier")
+            f.presence.state = .present; f.coordinator.update(now: 102); await settle()
+            f.presence.state = .absent; f.coordinator.update(now: 104); await settle()
+            check(f.sleeps == 0, "A later confirmed departure cannot rearm the disabled lock policy")
+            f.coordinator.updatePolicy(allowDimming: false, allowLock: false); await settle()
+            check(!f.presence.running && !f.coordinator.isActive && !f.dimmer.hasPendingRestore,
+                  "Turning both controls off stops capture and restores any owned brightness")
+        }
+        do {
+            let f = RealDimmingRemovalFixture()
+            let baseline = f.driver.value
+            f.begin(now: 450); await settle()
+            f.presence.state = .present; f.coordinator.update(now: 451); await settle()
+            check(f.driver.value == 0.02 && f.journal.record?.baseline == baseline,
+                  "Real-dimmer low-light integration begins with exact owned brightness")
+            let stops = f.presence.stops, writes = f.driver.writes.count
+            f.presence.state = .unknown; f.presence.isLowLight = true
+            f.coordinator.update(now: 452); await settle()
+            check(f.driver.value == baseline && f.journal.record == nil && !f.assertion.held &&
+                  f.presence.running && f.presence.stops == stops && f.coordinator.lowLightRecoveryState == .monitoring,
+                  "Production dimmer restores the exact baseline and releases its assertion without stopping the camera")
+            for time in [454.0, 463, 490] { f.coordinator.update(now: time); await settle() }
+            f.presence.isLowLight = false; f.presence.state = .present
+            f.coordinator.update(now: 491); f.coordinator.updateTarget(0.3); await settle()
+            check(f.driver.writes.count == writes + 1 && f.driver.value == baseline && f.presence.running && f.sleeps == 0,
+                  "Continued darkness, fresh presence, and target edits cause no repeated brightness writes or false lock")
+            let finished = await f.coordinator.finishForRewear()
+            check(finished && f.driver.writes.count == writes + 1 && f.coordinator.lowLightRecoveryState == .none,
+                  "Rewear closes recovered monitoring without another hardware write")
         }
         do {
             let f = RealDimmingRemovalFixture()

@@ -8,9 +8,9 @@ AirVeil is developed by ShivHax-YT, an individual developer based in Nevada, Uni
 
 AirVeil uses compatible AirPods head motion to place a blur or opaque cover over selected displays. Optional camera assistance helps establish screen direction and check whether you are still seated after headphone motion stops. Settings determine which features run.
 
-If automatic display management, camera assistance, and seated dimming are all enabled, a usable seat reference lets AirVeil lower supported display brightness while it detects you seated and request display sleep after it detects that you have left. An unavailable or uncertain seat check does not authorize display sleep in that mode.
+**Lock when I leave** and **Dim while I stay seated** are independent preferences. Locking defaults on, and dimming defaults off until you enable it. Both require camera assistance and a successful center check. A usable seat reference lets AirVeil lower supported display brightness while it detects you seated, if dimming is enabled, and request display sleep after confirmed departure, if locking is enabled. An unavailable or uncertain seat check does not authorize display sleep.
 
-If automatic display management remains enabled while camera assistance or seated dimming is off, sustained motion loss can request display sleep without a camera check. Turning off camera assistance alone does not turn off automatic display management. You can disable automatic display management separately in Settings.
+If dimming makes the camera view too dark, AirVeil explains the brightness restoration and continues the seat check at the restored brightness without dimming again during that removal episode. Turning both preferences off stops removal checks. Disabling camera assistance does not fall back to display sleep without a seat check.
 
 ## Using the app
 

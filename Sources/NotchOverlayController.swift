@@ -25,6 +25,11 @@ private final class NotchPanel: NSPanel {
     private var demoTask: Task<Void, Never>?
     private var active = true
     private var pointerInside = false
+    private var wearReminderDismissed = false
+    private var recoveryNoticeDismissed = false
+    private var lastRecoveryState: NotchBrightnessRecoveryStage = .none
+    private var recoveryStage: NotchBrightnessRecoveryStage = .none
+    private var recoveryCompletionWork: DispatchWorkItem?
     private var contentHeight: CGFloat = 190
     var windowLevel: Int { panel?.level.rawValue ?? -1 }
 
@@ -38,9 +43,10 @@ private final class NotchPanel: NSPanel {
         presentation.settings = { [weak self] in self?.model.showWindow?() }
         presentation.toggleAssistLight = { [weak self] in self?.model.cameraHeading.toggleAssistLight() }
         presentation.turnOffFeature = { [weak self] in self?.model.cancelWearWait() }
+        presentation.dismissReminder = { [weak self] in self?.dismissReminder() }
         presentation.toggleEffect = { [weak self] in
             guard let self else { return }
-            if model.wearAirPodsPrompt { model.cancelWearWait() }
+            if model.wearAirPodsPrompt || model.removalPresence.lowLightRecoveryState != .none { model.cancelWearWait() }
             else if model.enabled || model.starting { model.pause() } else { model.enable() }
             updateControls()
         }
@@ -55,6 +61,11 @@ private final class NotchPanel: NSPanel {
             // A queued old idle/wait event must not replace a newer camera check.
             self.receive(self.model.cameraHeading.coach)
         }.store(in: &subscriptions)
+        model.removalPresence.$lowLightRecoveryState
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                guard let self else { return }
+                self.receive(self.model.cameraHeading.coach)
+            }.store(in: &subscriptions)
         rebuildPanel()
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                  object: nil, queue: .main) { [weak self] _ in
@@ -76,7 +87,9 @@ private final class NotchPanel: NSPanel {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.active = true
-                    if self.model.wearAirPodsPrompt { self.receive(self.model.cameraHeading.coach) }
+                    if self.model.wearAirPodsPrompt || self.model.removalPresence.lowLightRecoveryState != .none {
+                        self.receive(self.model.cameraHeading.coach)
+                    }
                     else if self.presentation.tutorialStep != nil { self.show() }
                 }
             })
@@ -95,12 +108,16 @@ private final class NotchPanel: NSPanel {
         presentation.cameraEnabled = model.cameraHeading.isEnabled
         presentation.canEnable = model.canRequestEnable
         presentation.enabled = model.enabled
+        presentation.canTurnOffFeature = model.wearAirPodsPrompt || model.removalPresence.lowLightRecoveryState != .none
     }
     func showControls() {
         guard active else { return }
-        if model.wearAirPodsPrompt { receive(model.cameraHeading.coach); return }
-        if model.cameraHeading.coach.phase != .idle { receive(model.cameraHeading.coach); return }
-        updateControls(); presentation.demo = false; presentation.wearAirPodsPrompt = false; presentation.controls = true
+        if model.removalPresence.lowLightRecoveryState != .none, !recoveryNoticeDismissed { receive(model.cameraHeading.coach); return }
+        if model.wearAirPodsPrompt, !wearReminderDismissed { receive(model.cameraHeading.coach); return }
+        if !model.wearAirPodsPrompt, model.removalPresence.lowLightRecoveryState == .none,
+           model.cameraHeading.coach.phase != .idle { receive(model.cameraHeading.coach); return }
+        updateControls(); presentation.demo = false; presentation.wearAirPodsPrompt = false
+        presentation.brightnessRecovery = .none; presentation.controls = true
         show()
     }
     private func setCenter() {
@@ -131,29 +148,72 @@ private final class NotchPanel: NSPanel {
         else { updateControls(); presentation.controls = true; show() }
     }
     private func cancel() {
-        if model.wearAirPodsPrompt { model.cancelWearWait(); return }
+        if model.wearAirPodsPrompt || model.removalPresence.lowLightRecoveryState != .none { model.cancelWearWait(); return }
         // Stopping a camera check never dismisses the teaching surface.
         if presentation.tutorialStep != nil { model.pause(); return }
         if presentation.demo { demoTask?.cancel(); presentation.demo = false; hide(); return }
         model.pause()
         hide()
     }
+    private func dismissReminder() {
+        guard model.wearAirPodsPrompt || model.removalPresence.lowLightRecoveryState != .none else { return }
+        wearReminderDismissed = model.wearAirPodsPrompt
+        recoveryNoticeDismissed = model.removalPresence.lowLightRecoveryState != .none
+        // This only retracts the panel. The model keeps monitoring, and a real
+        // AirPods return still takes ownership with its camera check.
+        hide(dismissingReminder: true)
+    }
     private func receive(_ snapshot: NotchCoachSnapshot) {
         guard active else { return }
-        if model.wearAirPodsPrompt {
+        if !model.wearAirPodsPrompt { wearReminderDismissed = false }
+        let recovery = NotchBrightnessRecoveryStage(rawValue: model.removalPresence.lowLightRecoveryState.rawValue) ?? .none
+        if recovery != lastRecoveryState {
+            lastRecoveryState = recovery
+            recoveryCompletionWork?.cancel(); recoveryCompletionWork = nil
+            // A display dimmed to zero cannot show the advance notice. Keep
+            // the reason legible after successful restoration before the camera.
+            recoveryStage = recovery == .monitoring ? .restored : recovery
+            if recovery == .monitoring {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.active, !self.recoveryNoticeDismissed,
+                          self.model.removalPresence.lowLightRecoveryState == .monitoring else { return }
+                    self.recoveryStage = .monitoring
+                    self.receive(self.model.cameraHeading.coach)
+                }
+                recoveryCompletionWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+            }
+        }
+        if recovery == .none { recoveryNoticeDismissed = false }
+        if recovery != .none {
+            guard !recoveryNoticeDismissed else { return }
             demoTask?.cancel(); presentation.demo = false
+            presentation.controls = false; presentation.wearAirPodsPrompt = false
+            presentation.brightnessRecovery = recoveryStage
+            updateControls(); show()
+            return
+        }
+        if model.wearAirPodsPrompt {
+            guard !wearReminderDismissed else {
+                if presentation.brightnessRecovery != .none { hide(dismissingReminder: true) }
+                return
+            }
+            demoTask?.cancel(); presentation.demo = false
+            presentation.brightnessRecovery = .none
             presentation.controls = false; presentation.wearAirPodsPrompt = true
             updateControls(); show()
             return
         }
-        let wasWaiting = presentation.wearAirPodsPrompt
+        let wasWaiting = presentation.wearAirPodsPrompt || presentation.brightnessRecovery != .none
         if snapshot.phase != .idle {
             demoTask?.cancel(); presentation.demo = false
             presentation.wearAirPodsPrompt = false
+            presentation.brightnessRecovery = .none
             presentation.controls = false; presentation.snapshot = snapshot
             show()
         } else if wasWaiting, presentation.tutorialStep != nil {
             presentation.wearAirPodsPrompt = false
+            presentation.brightnessRecovery = .none
             show()
         } else if !presentation.demo {
             // Keep the accepted face (or last guidance) while the silhouette
@@ -191,7 +251,7 @@ private final class NotchPanel: NSPanel {
         if presentation.expanded && active { window.orderFrontRegardless() }
     }
     private func show() {
-        if !presentation.wearAirPodsPrompt, presentation.tutorialStep == nil,
+        if !presentation.wearAirPodsPrompt, presentation.brightnessRecovery == .none, presentation.tutorialStep == nil,
            !defaults.bool(forKey: Self.tutorialCompletionKey) {
             presentation.tutorialStep = .tracking
         }
@@ -201,10 +261,10 @@ private final class NotchPanel: NSPanel {
         presentation.expanded = true
         updateHitTesting()
     }
-    private func hide(immediately: Bool = false) {
+    private func hide(immediately: Bool = false, dismissingReminder: Bool = false) {
         // Only End tutorial records completion. Sleep hides it temporarily;
         // idle callbacks, pointer exit, and delayed closes cannot dismiss it.
-        if presentation.tutorialStep != nil, !immediately { return }
+        if presentation.tutorialStep != nil, !immediately, !dismissingReminder { return }
         hoverWork?.cancel(); hoverWork = nil; pointerInside = false
         closeWork?.cancel()
         presentation.expanded = false
@@ -216,7 +276,8 @@ private final class NotchPanel: NSPanel {
             return
         }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.presentation.expanded, self.presentation.tutorialStep == nil else { return }
+            guard let self, !self.presentation.expanded,
+                  self.presentation.tutorialStep == nil || dismissingReminder else { return }
             self.panel?.orderOut(nil)
             self.clearDismissedSnapshot()
         }
@@ -225,8 +286,10 @@ private final class NotchPanel: NSPanel {
     }
     private func clearDismissedSnapshot() {
         guard !presentation.expanded, !presentation.demo,
-              !model.wearAirPodsPrompt, model.cameraHeading.coach.phase == .idle else { return }
+              !model.wearAirPodsPrompt, model.removalPresence.lowLightRecoveryState == .none,
+              model.cameraHeading.coach.phase == .idle else { return }
         presentation.wearAirPodsPrompt = false
+        presentation.brightnessRecovery = .none
         presentation.snapshot = NotchCoachSnapshot()
     }
     private var visibleContentRect: CGRect? {
@@ -251,8 +314,10 @@ private final class NotchPanel: NSPanel {
     func updatePointerPosition(_ point: CGPoint) {
         guard active, let geometry else { return }
         updateHitTesting()
-        guard !model.wearAirPodsPrompt, presentation.tutorialStep == nil,
-              model.cameraHeading.coach.phase == .idle, !presentation.demo else { return }
+        guard (!model.wearAirPodsPrompt || wearReminderDismissed),
+              (model.removalPresence.lowLightRecoveryState == .none || recoveryNoticeDismissed), presentation.tutorialStep == nil,
+              (model.wearAirPodsPrompt || model.removalPresence.lowLightRecoveryState != .none || model.cameraHeading.coach.phase == .idle),
+              !presentation.demo else { return }
         let inside = geometry.hoverRect.contains(point) || (presentation.expanded && contentContains(point))
         guard inside != pointerInside else { return }
         pointerInside = inside
@@ -267,7 +332,8 @@ private final class NotchPanel: NSPanel {
 
     /// Explicit visual preview. Never touches camera, AirPods, saved center or blur.
     func previewAnimation() {
-        guard active, !model.wearAirPodsPrompt, !model.cameraHeading.isBusy else { return }
+        guard active, !model.wearAirPodsPrompt, model.removalPresence.lowLightRecoveryState == .none,
+              !model.cameraHeading.isBusy else { return }
         demoTask?.cancel()
         presentation.controls = false; presentation.demo = true
         demoTask = Task { [weak self] in
@@ -288,7 +354,7 @@ private final class NotchPanel: NSPanel {
         }
     }
     func shutdown() {
-        demoTask?.cancel(); hoverWork?.cancel(); closeWork?.cancel()
+        demoTask?.cancel(); hoverWork?.cancel(); closeWork?.cancel(); recoveryCompletionWork?.cancel()
         presentation.expanded = false
         if let globalMouse { NSEvent.removeMonitor(globalMouse) }
         if let localMouse { NSEvent.removeMonitor(localMouse) }

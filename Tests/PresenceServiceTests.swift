@@ -134,6 +134,31 @@ import CoreGraphics
             }
             await f.service.stop()
         }
+        do {
+            let f = PresenceFixture(); try await f.service.start(reference: f.reference)
+            f.frame(occupied: false, dark: true)
+            check(f.service.isLowLight && f.service.state == .unknown,
+                  "Fresh dark unusable camera evidence reaches the typed service state")
+            f.time += 2; f.service.refresh()
+            check(!f.service.isLowLight, "Refresh clears actionable low light when its frame is stale")
+            f.frame(occupied: false, dark: true)
+            check(f.service.isLowLight, "A new fresh measured dark frame can become actionable again")
+            f.capture.holdStop = true
+            let stopped = Task { await f.service.stop() }; await settle()
+            check(!f.service.isLowLight && !f.service.isAssistLightOn && !f.service.isRunning,
+                  "Stopping clears low light and screen illumination before awaiting physical camera teardown")
+            f.frame(occupied: false, dark: true)
+            check(!f.service.isLowLight && !f.service.isAssistLightOn,
+                  "A late dark callback cannot revive illumination or trigger another brightness recovery")
+            f.capture.releaseStop(); await stopped.value
+        }
+        do {
+            let f = PresenceFixture(); try await f.service.start(reference: f.reference)
+            f.frame(occupied: false, dark: true)
+            f.capture.failures[0]("Camera interrupted"); await settle()
+            check(!f.service.isLowLight && !f.service.isRunning,
+                  "Capture failure clears low light instead of treating a failed provider as darkness")
+        }
         print("PASS: \(checks) presence capture lifecycle checks; injected capture and light only")
     }
 }

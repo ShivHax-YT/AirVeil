@@ -33,6 +33,9 @@ struct PresenceSnapshot: Equatable, Sendable {
     var state: PresenceState = .unknown
     var status = "Checking the foreground seat."
     var bodyBounds: CGRect?
+    /// Fresh measured darkness with no usable foreground evidence. Other
+    /// uncertainty (stale frames, framing changes, analysis failure) is false.
+    var isLowLight = false
 }
 
 /// Spatial continuity, not person recognition. A background/side person must
@@ -112,7 +115,8 @@ struct PresenceTracker {
         if !observation.analysisUsable, plausible.isEmpty, foregroundFaces.isEmpty {
             candidate = nil; candidateCount = 0; candidateStarted = nil
             missingSince = nil; missingFrames = 0
-            snapshot = PresenceSnapshot(status: "The camera cannot reliably check the foreground seat in this view.")
+            snapshot = PresenceSnapshot(status: "The camera cannot reliably check the foreground seat in this view.",
+                isLowLight: observation.needsLightAssistance)
             return snapshot
         }
         // Never silently select a different member of an overlapping crowd.

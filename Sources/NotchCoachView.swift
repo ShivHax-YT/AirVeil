@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+enum NotchBrightnessRecoveryStage: String, Equatable {
+    case none, announcing, restoring, restored, monitoring
+}
+
 enum NotchTutorialStep: Int, CaseIterable {
     case tracking, center, light, controls
     var title: String {
@@ -28,6 +32,7 @@ enum NotchTutorialStep: Int, CaseIterable {
     @Published var controls = false
     @Published var demo = false
     @Published var wearAirPodsPrompt = false
+    @Published var brightnessRecovery: NotchBrightnessRecoveryStage = .none
     @Published var tutorialStep: NotchTutorialStep?
     var endTutorial: () -> Void = {}
     @Published var topInset: CGFloat = 32
@@ -36,6 +41,7 @@ enum NotchTutorialStep: Int, CaseIterable {
     @Published var canEnable = false
     @Published var cameraEnabled = false
     @Published var enabled = false
+    @Published var canTurnOffFeature = false
     @Published var hovering = false
     /// Deterministic visual-fixture time; nil for every live presentation.
     var animationTime: Double?
@@ -47,15 +53,16 @@ enum NotchTutorialStep: Int, CaseIterable {
     var toggleEffect: () -> Void = {}
     var toggleAssistLight: () -> Void = {}
     var turnOffFeature: () -> Void = {}
+    var dismissReminder: () -> Void = {}
     var contentHeightChanged: (CGFloat) -> Void = { _ in }
     var contentWidth: CGFloat {
-        if wearAirPodsPrompt { return 280 }
+        if wearAirPodsPrompt || brightnessRecovery != .none { return 280 }
         return tutorialStep != nil || controls ? 360 : min(248, max(212, hardwareWidth + 32))
     }
     // Grow the black surround without resizing the camera, motion rail, or glyph.
-    var canopyWidth: CGFloat { !wearAirPodsPrompt && (tutorialStep != nil || controls) ? contentWidth : min(360, contentWidth + 24) }
+    var canopyWidth: CGFloat { !wearAirPodsPrompt && brightnessRecovery == .none && (tutorialStep != nil || controls) ? contentWidth : min(360, contentWidth + 24) }
     var contentHeight: CGFloat {
-        if wearAirPodsPrompt { return 280 }
+        if wearAirPodsPrompt || brightnessRecovery != .none { return 280 }
         if tutorialStep != nil { return 360 }
         if controls { return 118 }
         switch snapshot.phase {
@@ -111,6 +118,7 @@ struct NotchCanopy: Shape {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var successStarted = Date()
     @State private var wearStarted = Date()
+    @State private var recoveryStarted = Date()
     private var snapshot: NotchCoachSnapshot { presentation.snapshot }
     private var success: Bool { snapshot.phase == .success }
     private var accent: Color {
@@ -134,7 +142,8 @@ struct NotchCanopy: Shape {
         VStack(spacing: 0) {
             Color.clear.frame(height: presentation.topInset)
             ZStack {
-                if presentation.wearAirPodsPrompt { wearAirPodsContent.transition(.opacity) }
+                if presentation.brightnessRecovery != .none { brightnessRecoveryContent.transition(.opacity) }
+                else if presentation.wearAirPodsPrompt { wearAirPodsContent.transition(.opacity) }
                 else if let step = presentation.tutorialStep { tutorial(step).transition(.opacity) }
                 else if presentation.controls { controls.transition(.opacity) }
                 else if success { successContent.transition(.opacity) }
@@ -143,7 +152,20 @@ struct NotchCanopy: Shape {
             }
             .frame(width: presentation.contentWidth, height: presentation.contentHeight, alignment: .top)
             .overlay(alignment: .topTrailing) {
-                if !presentation.wearAirPodsPrompt, presentation.tutorialStep == nil, !presentation.controls, !success {
+                if presentation.wearAirPodsPrompt || presentation.brightnessRecovery != .none {
+                    Button(action: presentation.dismissReminder) {
+                        Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss reminder. Your settings stay on.")
+                    .accessibilityLabel("Dismiss reminder")
+                    .accessibilityHint("Keeps your settings on. AirPods can still resume the camera check.")
+                    .accessibilityIdentifier("notch-reminder-dismiss")
+                    .padding(.trailing, 3).padding(.top, 2)
+                } else if presentation.tutorialStep == nil, !presentation.controls, !success {
                     actions.opacity(presentation.hovering || snapshot.isAssistLightOn ? 1 : 0)
                         .animation(.easeInOut(duration: 0.16), value: presentation.hovering)
                         .padding(.trailing, 9).padding(.top, 5)
@@ -164,13 +186,16 @@ struct NotchCanopy: Shape {
         .animation(morph, value: presentation.canopyWidth)
         .animation(.easeInOut(duration: reduceMotion ? 0.16 : 0.22), value: snapshot.phase)
         .animation(.easeInOut(duration: reduceMotion ? 0.16 : 0.22), value: presentation.wearAirPodsPrompt)
+        .animation(.easeInOut(duration: reduceMotion ? 0.16 : 0.38), value: presentation.brightnessRecovery)
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
         .onAppear { presentation.contentHeightChanged(presentation.contentHeight); successStarted = Date() }
         .onChange(of: presentation.contentHeight) { _, height in presentation.contentHeightChanged(height) }
         .onChange(of: success) { _, accepted in if accepted { successStarted = Date() } }
         .onChange(of: presentation.wearAirPodsPrompt) { _, waiting in if waiting { wearStarted = Date() } }
-        .accessibilityAction(named: Text(presentation.wearAirPodsPrompt ? "Turn off feature" : "Cancel check"), presentation.cancel)
+        .onChange(of: presentation.brightnessRecovery) { _, _ in recoveryStarted = Date() }
+        .accessibilityAction(named: Text(presentation.wearAirPodsPrompt || presentation.brightnessRecovery != .none ? "Turn off feature" : "Cancel check"), presentation.cancel)
+        .accessibilityAction(named: Text("Dismiss reminder"), presentation.dismissReminder)
         .accessibilityAction(named: Text("Open settings"), presentation.settings)
     }
     private var wearAirPodsContent: some View {
@@ -190,18 +215,49 @@ struct NotchCanopy: Shape {
                     .font(.system(size: 11)).foregroundStyle(.white.opacity(0.68))
             }
             .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-            Button("Turn off feature", action: presentation.turnOffFeature)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundStyle(.black)
-                .background(.white.opacity(0.94), in: Capsule())
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("notch-wear-turn-off")
-                .accessibilityHint("Restores brightness and turns off blur and camera checks until you enable them again.")
+            turnOffFeatureButton
         }
         .padding(.horizontal, 24).padding(.top, 14).padding(.bottom, 18)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("notch-wear-airpods")
+    }
+    private var turnOffFeatureButton: some View {
+        Button("Turn off feature", action: presentation.turnOffFeature)
+            .font(.system(size: 12, weight: .semibold))
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .foregroundStyle(.black)
+            .background(.white.opacity(0.94), in: Capsule())
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("notch-wear-turn-off")
+            .accessibilityHint("Restores brightness and turns off blur and camera checks until you enable them again.")
+    }
+    private var brightnessRecoveryContent: some View {
+        let monitoring = presentation.brightnessRecovery == .monitoring
+        let restored = presentation.brightnessRecovery == .restored
+        return VStack(spacing: 12) {
+            TimelineView(.animation(minimumInterval: 1.0 / 30,
+                                    paused: reduceMotion || !presentation.expanded || presentation.animationTime != nil)) { context in
+                let time = reduceMotion ? 0 : (presentation.animationTime ?? max(0, context.date.timeIntervalSince(recoveryStarted)))
+                NotchBrightnessRecoveryGlyph(stage: presentation.brightnessRecovery, elapsed: time, moving: !reduceMotion)
+                    .frame(width: 160, height: 100)
+            }
+            .accessibilityHidden(true)
+            VStack(spacing: 6) {
+                Text(monitoring ? "Checking your seat" : (restored ? "Brightness restored" : "Too dark to check"))
+                    .font(.system(size: 16, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text(monitoring ? "Brightness restored.\nKeeping your seat in view."
+                     : (restored ? "It was too dark at the dimmed level.\nYour seat check will continue."
+                        : "Restoring your display brightness\nso the camera can check your seat."))
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.72))
+            }
+            .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            turnOffFeatureButton
+        }
+        .padding(.horizontal, 24).padding(.top, 14).padding(.bottom, 18)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("notch-brightness-recovery")
     }
     private func tutorial(_ step: NotchTutorialStep) -> some View {
         VStack(spacing: 12) {
@@ -331,7 +387,7 @@ struct NotchCanopy: Shape {
                 Image(systemName: "circle.lefthalf.filled").foregroundStyle(.white.opacity(0.7))
                 Text("AirVeil").font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Text(presentation.enabled ? "Following your head" : "Blur paused")
+                Text(presentation.canTurnOffFeature ? "Waiting for AirPods" : (presentation.enabled ? "Following your head" : "Blur paused"))
                     .font(.system(size: 10)).foregroundStyle(.white.opacity(0.48))
                 Button(action: presentation.settings) { Image(systemName: "slider.horizontal.3") }
                     .buttonStyle(NotchTextButton()).help("Settings")
@@ -344,12 +400,54 @@ struct NotchCanopy: Shape {
                 }
                 .buttonStyle(.plain).background(.white.opacity(0.14), in: Capsule())
                 .disabled(presentation.cameraEnabled && !presentation.canCenter)
-                Button(presentation.enabled ? "Pause" : "Enable blur", action: presentation.toggleEffect)
+                Button(presentation.canTurnOffFeature ? "Turn off feature" : (presentation.enabled ? "Pause" : "Enable blur"), action: presentation.toggleEffect)
                     .buttonStyle(NotchTextButton())
-                    .disabled(!presentation.enabled && !presentation.canEnable)
+                    .disabled(!presentation.canTurnOffFeature && !presentation.enabled && !presentation.canEnable)
             }
         }
         .padding(.horizontal, 24).padding(.vertical, 18)
+    }
+}
+
+/// Explain a brightness change before showing the ongoing camera check.
+struct NotchBrightnessRecoveryGlyph: View {
+    let stage: NotchBrightnessRecoveryStage
+    let elapsed: Double
+    let moving: Bool
+    private var pulse: Double { moving ? 0.5 + 0.5 * sin(elapsed * .pi) : 0.5 }
+    var body: some View {
+        ZStack {
+            Circle().stroke(.white.opacity(0.08 + pulse * 0.06), lineWidth: 7)
+                .blur(radius: 5).frame(width: 74, height: 74)
+                .scaleEffect(moving ? 0.97 + pulse * 0.06 : 1)
+            if stage == .monitoring {
+                Circle().stroke(.white.opacity(0.17), lineWidth: 1).frame(width: 76, height: 76)
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle().fill(Color(red: 0.34, green: 0.82, blue: 0.46))
+                            .frame(width: 6, height: 6).offset(x: 7, y: 5)
+                    }
+            } else if stage == .restored {
+                Image(systemName: "sun.max")
+                    .font(.system(size: 47, weight: .ultraLight)).foregroundStyle(.white.opacity(0.95))
+                    .overlay(alignment: .bottomTrailing) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 17, weight: .medium))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.black, Color(red: 0.34, green: 0.82, blue: 0.46))
+                            .background(.black, in: Circle()).offset(x: 9, y: 5)
+                    }
+            } else {
+                Image(systemName: "sun.max")
+                    .font(.system(size: 47, weight: .ultraLight))
+                    .foregroundStyle(.white.opacity(0.70 + pulse * 0.28))
+                    .rotationEffect(.degrees(moving ? min(1, elapsed / 2.4) * 12 : 0))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityHidden(true)
     }
 }
 

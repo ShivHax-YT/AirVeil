@@ -329,8 +329,10 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
     /// Use real removal debounce and coordinator policy, injecting only the
     /// accepted face geometry and the physical acquisition results.
     private static func beginPresence(_ model: AppModel, now: Double,
-                                      rememberSeat: Bool = true) async {
-        model.sleepDisplaysOnRemoval = true
+                                      rememberSeat: Bool = true,
+                                      dim: Bool = true, lock: Bool = true) async {
+        model.sleepDisplaysOnRemoval = lock
+        model.dimWhilePresent = dim
         useCamera(model)
         if rememberSeat { acceptSeat(model, now: now) }
         model.checkAirPodsRemoval(now: now)
@@ -582,8 +584,10 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         do {
             let model = makeModel()
             let now = ProcessInfo.processInfo.systemUptime
-            check(!model.sleepDisplaysOnRemoval, "Removal action starts off until chosen")
-            model.sleepDisplaysOnRemoval = true
+            check(model.sleepDisplaysOnRemoval && !model.dimWhilePresent,
+                  "Locking defaults on and dimming requires an explicit opt-in")
+            useCamera(model)
+            acceptSeat(model, now: now)
             model.checkAirPodsRemoval(now: now)
             model.motion.isFresh = false
             model.motion.isCalibrated = false
@@ -597,7 +601,12 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.displaySleep.requests == 0, "Actual disconnect waits for debounce")
             model.checkAirPodsRemoval(now: now + 12.6)
             await drainTasks()
-            check(model.displaySleep.requests == 1 && !model.enabled, "Confirmed disconnect requests display sleep with blur paused")
+            check(model.displaySleep.requests == 0 && model.presence.isRunning,
+                  "Confirmed disconnect starts the seat camera before any display-sleep action")
+            model.presence.state = .absent
+            model.checkAirPodsRemoval(now: now + 12.7)
+            await drainTasks()
+            check(model.displaySleep.requests == 1 && !model.enabled, "Confirmed empty seat requests display sleep with blur paused")
             model.checkAirPodsRemoval(now: now + 100)
             await drainTasks()
             check(model.displaySleep.requests == 1, "Remaining disconnected does not repeatedly sleep displays")
@@ -605,22 +614,19 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             let restored = AppModel()
             check(restored.sleepDisplaysOnRemoval, "Chosen removal behavior persists")
             restored.resetDefaults()
-            check(!restored.sleepDisplaysOnRemoval, "Reset defaults disables removal action")
+            check(restored.sleepDisplaysOnRemoval && !restored.dimWhilePresent,
+                  "Reset defaults restores independent locking-on and dimming-off preferences")
             restored.shutdown()
         }
         for cancellation in ["reconnect", "new-disconnect", "pause", "off", "shutdown"] {
             let model = makeModel()
             let now = ProcessInfo.processInfo.systemUptime
-            model.sleepDisplaysOnRemoval = true
-            model.checkAirPodsRemoval(now: now)
-            model.motion.isFresh = false
-            model.motion.connectionState = .disconnected
-            model.motion.disconnectEventCount = 1
-            model.checkAirPodsRemoval(now: now + 1)
-            model.checkAirPodsRemoval(now: now + 3)
+            await beginPresence(model, now: now, dim: false)
+            model.presence.state = .absent
+            model.checkAirPodsRemoval(now: now + 3.1)
             switch cancellation {
-            case "reconnect": model.motion.connectionState = .connected
-            case "new-disconnect": model.motion.disconnectEventCount = 2
+            case "reconnect": freshWear(model)
+            case "new-disconnect": model.motion.disconnectEventCount += 1
             case "pause": model.pause()
             case "off": model.sleepDisplaysOnRemoval = false
             default: model.shutdown()
@@ -633,17 +639,18 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             let model = makeModel()
             let now = ProcessInfo.processInfo.systemUptime
             model.sleepDisplaysOnRemoval = true
+            useCamera(model)
+            acceptSeat(model, now: now)
             model.enable()
             await drainTasks()
             model.checkAirPodsRemoval(now: now)
-            model.motion.isFresh = false
-            model.motion.isCalibrated = false
-            model.motion.connectionState = .disconnected
-            model.motion.disconnectEventCount = 1
-            model.checkTrackingSafety()
+            removeAirPods(model)
             check(!model.enabled, "Tracking loss clears blur promptly before removal delay")
             model.checkAirPodsRemoval(now: now + 1)
             model.checkAirPodsRemoval(now: now + 3)
+            await drainTasks()
+            model.presence.state = .absent
+            model.checkAirPodsRemoval(now: now + 3.1)
             await drainTasks()
             check(model.displaySleep.requests == 1, "Automatic blur recovery does not cancel the chosen removal action")
             model.shutdown()
@@ -1130,18 +1137,132 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
         }
         do {
             let model = makeModel()
-            check(model.dimWhilePresent && model.removalBrightness == 0 && !model.sleepDisplaysOnRemoval,
-                  "Presence defaults to zero brightness within an opt-in removal master switch")
+            check(!model.dimWhilePresent && model.removalBrightness == 0 && model.sleepDisplaysOnRemoval,
+                  "The saved dim target defaults to zero while dimming starts off and locking starts on")
             check(!model.presenceReady && model.presence.startReferences.isEmpty && model.dimming.brightnessWrites == 0,
                   "Cold initialization neither invents a seat nor starts presence or brightness")
-            model.dimWhilePresent = false; model.removalBrightness = 0.12
+            model.dimWhilePresent = true; model.sleepDisplaysOnRemoval = false; model.removalBrightness = 0.12
             let restored = AppModel()
-            check(!restored.dimWhilePresent && restored.removalBrightness == 0.12,
-                  "Presence preference and chosen brightness persist")
+            check(restored.dimWhilePresent && !restored.sleepDisplaysOnRemoval && restored.removalBrightness == 0.12,
+                  "Independent removal preferences and chosen brightness persist")
             restored.resetDefaults()
-            check(restored.dimWhilePresent && restored.removalBrightness == 0 && !restored.sleepDisplaysOnRemoval,
-                  "Reset restores presence defaults and disables the removal master switch")
+            check(!restored.dimWhilePresent && restored.removalBrightness == 0 && restored.sleepDisplaysOnRemoval,
+                  "Reset restores locking on, dimming off, and the zero target")
             model.shutdown(); restored.shutdown()
+        }
+        for priorLock in [false, true] {
+            UserDefaults.standard.clear()
+            UserDefaults.standard.set(priorLock, forKey: "sleepDisplaysOnRemoval")
+            UserDefaults.standard.set(true, forKey: "dimWhilePresent")
+            UserDefaults.standard.set(0.23, forKey: "removalBrightnessV2")
+            let model = AppModel()
+            check(model.sleepDisplaysOnRemoval == priorLock && !model.dimWhilePresent && model.removalBrightness == 0.23,
+                  "Legacy lock choices survive migration; an old implicit dim default does not opt in")
+            model.sleepDisplaysOnRemoval = !priorLock
+            model.dimWhilePresent = true
+            let restored = AppModel()
+            check(restored.sleepDisplaysOnRemoval == !priorLock && restored.dimWhilePresent,
+                  "New independent removal preferences take precedence over stale legacy keys")
+            model.shutdown(); restored.shutdown()
+        }
+        for dim in [false, true] {
+            for lock in [false, true] {
+                let model = makeModel()
+                let now = ProcessInfo.processInfo.systemUptime
+                await beginPresence(model, now: now, dim: dim, lock: lock)
+                check(model.presence.isRunning == (dim || lock),
+                      "dim=\(dim), lock=\(lock): removal starts a seat check only when a feature is on")
+                model.presence.state = .present
+                model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+                check(model.dimming.isDimmed == dim,
+                      "dim=\(dim), lock=\(lock): occupied seat obeys only the dim toggle")
+                check(model.displaySleep.requests == 0,
+                      "dim=\(dim), lock=\(lock): an occupied seat never requests display sleep")
+                if dim || lock {
+                    check(model.presence.isRunning,
+                          "A lock-only check continues watching an occupied seat without dimming")
+                }
+                model.presence.state = .absent
+                model.checkAirPodsRemoval(now: now + 4); await drainTasks()
+                check(model.displaySleep.requests == (lock ? 1 : 0),
+                      "dim=\(dim), lock=\(lock): confirmed departure obeys only the lock toggle")
+                if !lock {
+                    freshWear(model); model.checkAirPodsRemoval(now: now + 5); await drainTasks()
+                    check(!model.dimming.isDimmed && !model.presence.isRunning,
+                          "Returning AirPods ends a dim-only episode and restores brightness")
+                }
+                model.shutdown()
+            }
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            let starts = model.presence.startReferences.count
+            let stops = model.presence.stopCalls
+            model.dimWhilePresent = false; await drainTasks()
+            check(!model.dimming.isDimmed && !model.dimming.hasPendingRestore,
+                  "Turning dimming off during removal restores the owned brightness")
+            check(model.presence.isRunning && model.presence.startReferences.count == starts && model.presence.stopCalls == stops,
+                  "Turning dimming off keeps the existing lock camera monitoring without a restart")
+            model.presence.state = .absent; model.checkAirPodsRemoval(now: now + 4); await drainTasks()
+            check(model.displaySleep.requests == 1,
+                  "Locking still responds to a departure after dimming is switched off")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now, dim: false)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            let starts = model.presence.startReferences.count
+            model.dimWhilePresent = true
+            model.checkAirPodsRemoval(now: now + 3.3); await drainTasks()
+            check(model.dimming.isDimmed && model.presence.startReferences.count == starts,
+                  "Dimming can be enabled during an existing occupied-seat check without another wear cycle")
+            model.sleepDisplaysOnRemoval = false
+            model.presence.state = .absent; model.checkAirPodsRemoval(now: now + 4); await drainTasks()
+            check(model.displaySleep.requests == 0 && model.presence.isRunning,
+                  "Turning locking off keeps the dim-only episode running without requesting sleep")
+            model.dimWhilePresent = false; await drainTasks()
+            check(!model.presence.isRunning && !model.dimming.isDimmed && !model.dimming.hasPendingRestore,
+                  "Turning both removal options off stops the camera and restores owned brightness")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            await beginPresence(model, now: now)
+            model.presence.state = .present; model.checkAirPodsRemoval(now: now + 3.2); await drainTasks()
+            model.presence.state = .absent; model.checkAirPodsRemoval(now: now + 4)
+            model.sleepDisplaysOnRemoval = false
+            await drainTasks()
+            check(model.displaySleep.requests == 0 && model.removalPresence.isActive && model.presence.isRunning,
+                  "Lock-off cancels a queued departure action while the dim-only seat check resumes safely")
+            model.shutdown()
+        }
+        do {
+            let model = makeModel()
+            let now = ProcessInfo.processInfo.systemUptime
+            model.dimWhilePresent = true
+            model.checkAirPodsRemoval(now: now)
+            removeAirPods(model)
+            model.checkAirPodsRemoval(now: now + 1); model.checkAirPodsRemoval(now: now + 3)
+            await drainTasks()
+            check(model.presence.startReferences.isEmpty && model.displaySleep.requests == 0 && !model.dimming.isDimmed,
+                  "Camera assistance being off cannot bypass the seat check and lock or dim on disconnection")
+            check(model.removalStatus.contains("camera assistance"),
+                  "Unavailable removal checks explain that camera assistance and a center are required")
+            model.cancelWearWait()
+            model.sleepDisplaysOnRemoval = false; model.sleepDisplaysOnRemoval = true
+            model.dimWhilePresent = false; model.dimWhilePresent = true
+            freshWear(model); model.checkAirPodsRemoval(now: now + 4)
+            removeAirPods(model); model.checkAirPodsRemoval(now: now + 5); model.checkAirPodsRemoval(now: now + 8)
+            await drainTasks()
+            check(model.automaticFeaturesPaused && model.displaySleep.requests == 0 && !model.presence.isRunning,
+                  "Changing independent removal preferences does not override the global feature-off action")
+            model.shutdown()
         }
         for (stored, expected) in [(-0.1, 0.0), (0.01, 0.01), (0.99, 0.5), (Double.nan, 0.0)] {
             UserDefaults.standard.clear()
@@ -1202,10 +1323,12 @@ func CGPreflightScreenCaptureAccess() -> Bool { false }
             check(model.dimming.dimTargets == [0, 0.1], "Slider changes reach the active dim episode")
             model.dimWhilePresent = false
             await drainTasks()
-            check(!model.presence.isRunning && !model.dimming.hasPendingRestore && !model.dimming.keepsDisplayAwake,
-                  "Turning presence dimming off stops capture, restores brightness, and releases the assertion")
+            check(model.presence.isRunning && !model.dimming.hasPendingRestore && !model.dimming.keepsDisplayAwake,
+                  "Turning dimming off restores brightness and releases the assertion while locking keeps watching")
+            model.sleepDisplaysOnRemoval = false
+            await drainTasks()
             check(model.removalPresence.canResumeHeading && model.displaySleep.requests == 0,
-                  "Disabling presence cancels the consumed event without an unexpected sleep request")
+                  "Disabling both options cancels the consumed event without an unexpected sleep request")
             model.shutdown()
         }
         do {

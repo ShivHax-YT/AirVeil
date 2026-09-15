@@ -13,9 +13,10 @@ import CoreGraphics
         let side = PresenceBody(bounds: CGRect(x: 0.72, y: 0.1, width: 0.27, height: 0.75), confidence: 0.99)
         let background = PresenceBody(bounds: CGRect(x: 0.43, y: 0.45, width: 0.14, height: 0.3), confidence: 0.99)
         func frame(_ time: Double, bodies: [PresenceBody], faces: [CGRect] = [], usable: Bool = true,
-                   camera: String = "builtin", config: String = "fixed-vga") -> PresenceObservation {
+                   camera: String = "builtin", config: String = "fixed-vga", dark: Bool = false) -> PresenceObservation {
             PresenceObservation(cameraID: camera, configurationID: config, captureHostTime: time,
-                receiptHostTime: time + 0.02, bodies: bodies, faces: faces, analysisUsable: usable)
+                receiptHostTime: time + 0.02, bodies: bodies, faces: faces, analysisUsable: usable,
+                needsLightAssistance: dark)
         }
         for posture in ["front", "profile", "back"] {
             var tracker = PresenceTracker(reference: reference)
@@ -89,6 +90,34 @@ import CoreGraphics
             check(tracker.snapshot.state == .unknown, "A lit bystander cannot prove that the dark foreground seat is empty")
             for i in 0..<3 { let t = 78.38 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: [seated], usable: false), now: t + 0.02) }
             check(tracker.snapshot.state == .present, "A confident foreground detection stays useful even with a dark overall frame")
+        }
+        do {
+            var tracker = PresenceTracker(reference: reference)
+            _ = tracker.observe(frame(90, bodies: [], usable: false, dark: true), now: 90.02)
+            check(tracker.snapshot.isLowLight && tracker.snapshot.state == .unknown,
+                  "Fresh measured darkness exposes a typed low-light condition without declaring absence")
+            check(!tracker.tick(now: 92).isLowLight, "A stale dark frame cannot request brightness recovery")
+            _ = tracker.observe(frame(92.2, bodies: [], usable: false), now: 92.22)
+            check(!tracker.snapshot.isLowLight, "Unusable analysis without measured darkness is not low light")
+            _ = tracker.observe(frame(92.54, bodies: [], usable: false, config: "changed", dark: true), now: 92.56)
+            check(!tracker.snapshot.isLowLight, "A mismatched camera configuration cannot report actionable low light")
+        }
+        do {
+            var tracker = PresenceTracker(reference: reference)
+            for i in 0..<3 { let t = 100 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: [seated]), now: t + 0.02) }
+            for i in 0..<35 {
+                let t = 101.02 + Double(i) * 0.34
+                _ = tracker.observe(frame(t, bodies: [], usable: false, dark: true), now: t + 0.02)
+                check(tracker.snapshot.isLowLight && tracker.snapshot.state == .unknown,
+                      "Continuous fresh darkness never becomes absent even beyond the old eight-second cleanup")
+            }
+            _ = tracker.observe(frame(112.92, bodies: [seated]), now: 112.94)
+            check(tracker.snapshot.state == .present && !tracker.snapshot.isLowLight,
+                  "Restored illumination can resume the same foreground track without restarting capture")
+            for i in 0..<4 { let t = 113.26 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: []), now: t + 0.02) }
+            check(tracker.snapshot.state == .unknown, "New usable empty frames must still satisfy the ordinary absence hold")
+            for i in 4..<6 { let t = 113.26 + Double(i) * 0.34; _ = tracker.observe(frame(t, bodies: []), now: t + 0.02) }
+            check(tracker.snapshot.state == .absent, "Only sufficient fresh usable empty-seat evidence confirms departure")
         }
         do {
             var tracker = PresenceTracker(reference: reference)

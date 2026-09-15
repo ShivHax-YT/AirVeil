@@ -39,12 +39,18 @@ and uses a separate permission. Screen Recording permission is only
 needed for live desktop blur; removal, brightness and display-off
 features work without it. Images and screen frames stay on the Mac.
 
-Automatic display management uses a sustained loss of headphone motion
-for the both-AirPods workflow. A connection interruption can produce
-the same signal; individual earbuds are not identified. With camera
-assistance and seated dimming enabled, a seat check can dim the built-in
-display while you remain seated and request display sleep after confirmed
-absence. An uncertain or unavailable check does not request sleep.
+Lock when I leave and Dim while I stay seated are separate switches in
+Power. Locking defaults on; dimming is off until you turn it on. Both
+need camera assistance and a successful center check. Turning both off
+stops removal checks. Sustained motion loss after a stable wearing
+session starts a seat check; a connection interruption can produce the
+same signal, and individual earbuds are not identified.
+
+Confirmed presence dims only when dimming is enabled. Confirmed absence
+requests display sleep only when locking is enabled. Missing camera
+setup never falls back to immediate display sleep. If dimming makes the
+camera view too dark, a notch notice explains the brightness restoration.
+The seat check continues, without dimming again during that removal.
 Returning motion restores owned brightness, even if only one bud is in.
 If the Mac is locked or asleep, restoration waits until the session and
 display are active. Verify both unlock/reinsert orders on your hardware.
@@ -55,16 +61,16 @@ the head illustration follow live AirPods turns without changing your
 blur thresholds. Enable blur while AirPods are out waits for motion,
 checks alignment with the camera, then starts blur after valid tracking.
 
-The wear-AirPods reminder includes Turn off feature. It restores owned
-brightness and pauses blur and automatic camera/removal checks until
-you explicitly enable a feature again. This choice persists at relaunch.
+The wear-AirPods reminder includes a dismiss button and Turn off feature.
+Dismiss only hides the reminder: monitoring and return alignment continue.
+Turn off feature restores owned brightness and pauses blur and automatic
+camera/removal checks until you explicitly enable a feature again. This
+choice persists at relaunch.
 
-If automatic display management remains on while camera assistance or
-seated dimming is off, sustained motion loss requests display sleep
-directly, without a camera check. Disable automatic display management
-separately if you do not want this. Password-on-wake follows your macOS
-Lock Screen settings. Keep Automatic Ear Detection on and verify the
-behavior on your own hardware before relying on this prerelease.
+Password-on-wake follows your macOS Lock Screen settings. Choose
+Immediately to require a password when displays turn off. Keep Automatic
+Ear Detection on and verify behavior on your own hardware before relying
+on this prerelease.
 
 Terms of Use, Privacy Policy, and Cookies & Local Storage are available
 offline from the footer in AirVeil. There are no advertising or analytics

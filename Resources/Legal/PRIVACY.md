@@ -39,13 +39,13 @@ Camera assistance starts disabled unless enabled during setup or previously enab
 
 If removal-related presence checking is enabled, the built-in camera can stay active while AirPods are removed to assess the foreground seat. This is separate from a brief direction check. Disabling camera assistance stops camera features. Closing or hiding Settings alone does not turn off enabled background features.
 
-With automatic display management, camera assistance, and seated dimming enabled together, the seat check distinguishes seated dimming from confirmed-absence display sleep; an unavailable or uncertain check does not request sleep. If automatic display management remains enabled while camera assistance or seated dimming is off, sustained headphone-motion loss can request display sleep without a camera check. Disable automatic display management separately if you do not want that behavior.
+**Lock when I leave** and **Dim while I stay seated** are independent preferences, with locking on and dimming off by default. Both require camera assistance and a successful center check. Valid seated presence permits enabled dimming; confirmed absence permits enabled display sleep. An unavailable or uncertain check does not request sleep. If dimming makes the camera view too dark, the app shows an explanatory notice, restores brightness, and continues the seat check without dimming again during that removal episode. Turning both preferences off stops removal checks. Disabling camera assistance does not cause immediate display sleep instead.
 
 AirVeil explains camera, screen-capture, and head-tracking access during setup and lets you continue without each feature. A head-tracking permission request may briefly start a motion session to obtain the macOS decision. Camera and desktop-capture setup do not start a live camera check or desktop effect merely to read a policy.
 
 macOS controls access to the camera, screen capture, and motion. You can review or revoke available permissions in **System Settings → Privacy & Security**. Permission names and available controls depend on your macOS version. Revoking access prevents the corresponding feature from working. The screen-capture permission's name may mention audio, but AirVeil's capture configuration disables audio. [Apple's screen-capture permission guidance](https://support.apple.com/en-gb/guide/mac-help/mchl592e5686/mac)
 
-Use AirVeil's settings to disable automatic display management or camera assistance. **Pause & Clear Screen** cancels the current effect and pending camera/removal work; it does not permanently switch off the saved automatic-display-management preference. Quit AirVeil to stop its running features.
+Use AirVeil's settings to disable dimming, locking, or camera assistance. **Pause & Clear Screen** cancels the current effect and pending camera/removal work; it does not permanently switch off the saved removal preferences. The reminder’s dismiss button only hides its presentation; **Turn off feature** pauses automatic checks until an explicit re-enable. Quit AirVeil to stop its running features.
 
 ## Local storage and retention
 
