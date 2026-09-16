@@ -21,7 +21,7 @@ ditto "$TASK_ROOT/build/AirVeil.app" "$TASK_STAGE/AirVeil.app"
 codesign --verify --strict "$TASK_STAGE/AirVeil.app"
 ln -s /Applications "$TASK_STAGE/Applications"
 cat > "$TASK_STAGE/Install AirVeil.txt" <<'EOF'
-AirVeil for Apple silicon — prerelease
+AirVeil for Apple silicon
 
 1. Quit an older AirVeil version normally before replacing it.
 2. Drag AirVeil.app onto the Applications shortcut.
@@ -70,7 +70,7 @@ choice persists at relaunch.
 Password-on-wake follows your macOS Lock Screen settings. Choose
 Immediately to require a password when displays turn off. Keep Automatic
 Ear Detection on and verify behavior on your own hardware before relying
-on this prerelease.
+on automatic display management.
 
 Terms of Use, Privacy Policy, and Cookies & Local Storage are available
 offline from the footer in AirVeil. There are no advertising or analytics

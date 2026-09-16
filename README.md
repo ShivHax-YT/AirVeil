@@ -1,16 +1,16 @@
 # AirVeil
 
-**[Download AirVeil 0.16.0 RC 1 — macOS DMG](https://github.com/ShivHax-YT/AirVeil/releases/download/v0.16.0-rc.1/AirVeil-0.16.0-apple-silicon.dmg)** · [Latest release and installation notes](https://github.com/ShivHax-YT/AirVeil/releases/latest)
+**[Download AirVeil 0.16.1 — macOS DMG](https://github.com/ShivHax-YT/AirVeil/releases/download/v0.16.1/AirVeil-0.16.1-apple-silicon.dmg)** · [Latest release and installation notes](https://github.com/ShivHax-YT/AirVeil/releases/latest)
 
-**Source version: 0.16.0, build 33.** Combines the settings and permissions motion improvements, native trackpad feedback, and the low-light face-search fallback. See [release notes](release-notes-0.16.0-rc.1.md) for verification scope and remaining hardware checks.
+**Source version: 0.16.1, build 36.** Combines the settings and permissions motion improvements, native trackpad feedback, and the low-light face-search fallback. See [release notes](release-notes-0.16.1.md) for verification scope and remaining hardware checks.
 
 AirVeil is a native macOS app with Dock, Settings, and menu-bar controls. It uses AirPods head motion to progressively obscure the opposite side of your desktop. Turn left to blur the right side; turn right to blur the left. The untouched side stays transparent. Clicks and scrolling are blocked in blurred areas by default, with a control to block the entire affected display instead.
 
 ## Download
 
-The release download is [AirVeil 0.16.0 RC 1](https://github.com/ShivHax-YT/AirVeil/releases/tag/v0.16.0-rc.1). Open its matching `.dmg`, drag AirVeil into Applications, then launch AirVeil from Applications. It is an Apple silicon release candidate for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
+The release download is [AirVeil 0.16.1](https://github.com/ShivHax-YT/AirVeil/releases/tag/v0.16.1). Open its matching `.dmg`, drag AirVeil into Applications, then launch AirVeil from Applications. It is an Apple silicon release for macOS 14 or later; hardware acceptance is still pending. It is development-signed, not Apple-notarized, so macOS may block its first launch on another Mac. Repository access is required while this repository is private.
 
-Build the current 0.16.0 distributable locally with `bash scripts/package-dmg.sh`; it produces a DMG and SHA-256 checksum under `build/releases/`. The package includes the app with its bundled legal documents, an Applications shortcut, and installation notes. Maintainer preferences, diagnostic files, and signing secrets are excluded. Packaging does not publish a GitHub release.
+Build the current 0.16.1 distributable locally with `bash scripts/package-dmg.sh`; it produces a DMG and SHA-256 checksum under `build/releases/`. The package includes the app with its bundled legal documents, an Applications shortcut, and installation notes. Maintainer preferences, diagnostic files, and signing secrets are excluded. Packaging does not publish a GitHub release.
 
 ## Requirements
 
