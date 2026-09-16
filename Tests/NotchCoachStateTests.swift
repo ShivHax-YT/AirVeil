@@ -9,10 +9,10 @@ import Foundation
         }
         func frame(faces: Int = 1, yaw: Double? = 0, pitch: Double? = 0, confidence: Float = 0.95,
                    bounds: CGRect? = CGRect(x: 0.35, y: 0.3, width: 0.3, height: 0.4),
-                   luminance: Double? = nil) -> CameraAnchorFrame {
+                   luminance: Double? = nil, centerLuminance: Double? = nil) -> CameraAnchorFrame {
             CameraAnchorFrame(cameraID: "test", configurationID: "fixed", faceCount: faces,
                 yawDegrees: yaw, pitchDegrees: pitch, rollDegrees: 0, detectionConfidence: confidence,
-                faceBounds: bounds, captureHostTime: 10, receiptHostTime: 10, processedHostTime: 10, luminance: luminance)
+                faceBounds: bounds, captureHostTime: 10, receiptHostTime: 10, processedHostTime: 10, luminance: luminance, centerLuminance: centerLuminance)
         }
         let centered = NotchCoachGuidance.observation(frame(), requiresFrontalPose: true)
         check(centered.phase == .holding && centered.progress == 0 && centered.direction == nil,
@@ -50,6 +50,17 @@ import Foundation
               "Multiple visible faces request one wearer even in a dim frame")
         check(NotchCoachGuidance.observation(frame(bounds: CGRect(x: 0.48, y: 0.48, width: 0.05, height: 0.05)), requiresFrontalPose: true).issue == .framing,
               "A distant tiny face cannot provide a usable hold")
+        let darkSearch = NotchCoachGuidance.observation(frame(faces: 0, yaw: nil, bounds: nil, centerLuminance: 0.05), requiresFrontalPose: true)
+        check(darkSearch.phase == .lighting && darkSearch.needsLightHelp && darkSearch.progress == 0,
+              "Central darkness can offer light without claiming a detected face")
+        for brightness: Double? in [nil, .nan, .infinity, -1, 0.16, 0.5, 1.2] {
+            check(NotchCoachGuidance.observation(frame(faces: 0, centerLuminance: brightness), requiresFrontalPose: true).issue == .faceMissing,
+                  "Invalid or bright central measurements cannot offer light")
+        }
+        check(NotchCoachGuidance.observation(frame(faces: 2, centerLuminance: 0.01), requiresFrontalPose: true).issue == .multipleFaces,
+              "Dark central readings never override multiple-face guidance")
+        check(NotchCoachGuidance.observation(frame(centerLuminance: 0.01), requiresFrontalPose: true).phase == .holding,
+              "A usable face takes priority over central darkness")
         let dimPose = NotchCoachGuidance.observation(frame(yaw: nil, luminance: 0.08), requiresFrontalPose: true)
         check(dimPose.phase == .lighting && dimPose.needsLightHelp && !dimPose.isAssistLightOn,
               "A visible close face with unreadable pose in measured darkness offers a default-off light card")

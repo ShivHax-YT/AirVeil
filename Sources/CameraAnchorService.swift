@@ -31,6 +31,8 @@ struct CameraAnchorFrame: Sendable {
     let processedHostTime: TimeInterval
     /// Mean luminance inside the detected face, excluding surrounding background.
     var luminance: Double? = nil
+    /// Image brightness in the central search area; never evidence of presence.
+    var centerLuminance: Double? = nil
 }
 
 enum CameraAnchorError: LocalizedError {
@@ -416,7 +418,8 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
                 faceCount: faces.count, yawDegrees: degrees(face?.yaw), pitchDegrees: degrees(face?.pitch),
                 rollDegrees: degrees(face?.roll), detectionConfidence: face?.confidence ?? 0,
                 faceBounds: face?.boundingBox, captureHostTime: captureTime,
-                receiptHostTime: receipt, processedHostTime: Self.hostTime(), luminance: luminance))
+                receiptHostTime: receipt, processedHostTime: Self.hostTime(), luminance: luminance,
+                centerLuminance: CameraLuminance.mean(pixels, normalizedRegion: CameraLuminance.searchRegion)))
         } catch {
             onFailure("Face analysis could not complete."); stop()
         }
@@ -435,10 +438,11 @@ private final class CameraAnchorWorker: NSObject, AVCaptureVideoDataOutputSample
 }
 
 /// Sparse brightness measurement from the existing analysis frame. It is used
-/// only inside a detected face during a failed pose scan, never as a replacement
-/// for confidence. Vision regions have a lower-left normalized origin; luma
+/// for face-local pose failures and a central no-face lighting offer, never
+/// as a replacement for confidence. Vision regions have a lower-left normalized origin; luma
 /// planes are addressed from the top left.
 enum CameraLuminance {
+    static let searchRegion = CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6)
     static func mean(_ pixels: CVPixelBuffer, normalizedRegion: CGRect? = nil) -> Double? {
         guard CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }

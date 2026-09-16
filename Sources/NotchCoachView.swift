@@ -368,7 +368,7 @@ struct NotchCanopy: Shape {
             .accessibilityValue(snapshot.isAssistLightOn ? "On" : "Off")
             .accessibilityHint(presentation.demo ? "Visual preview only. The light stays off." : "Lights the edge of your display to help the camera see your face.")
             VStack(spacing: 4) {
-                Text("Light too low").font(.system(size: 12, weight: .medium))
+                Text(snapshot.title).font(.system(size: 12, weight: .medium))
                 Text(presentation.demo ? "Preview · light stays off" : "Click to turn on Face light")
                     .font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
             }

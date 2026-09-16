@@ -44,6 +44,10 @@ import CoreMedia
     private var lastLowLightCapture: Double?
     private var hadLiveAlignment = false
     private var lightMissingFaceFrames = 0
+    private var darkSearchFrames = 0
+    private var firstDarkSearchCapture: Double?
+    private var lastDarkSearchCapture: Double?
+    private var lightAcquisitionDeadline: Double?
 
     private enum Phase { case center, recovery }
     private struct StoredCenter: Codable {
@@ -254,7 +258,7 @@ import CoreMedia
         engine.invalidate(); isAligned = false
         startBurst(.center)
     }
-    /// The card is offered only from repeated face-local low-light evidence.
+    /// Repeated local darkness offers light without claiming a face is present.
     /// Turning on the light continues this same check; it cannot set center.
     func toggleAssistLight() {
         if camera.isAssistLightOn {
@@ -272,6 +276,8 @@ import CoreMedia
                 needsLightHelp: true))
             return
         }
+        automaticLightAttempted = true
+        lightAcquisitionDeadline = now() + 2
         clearEvidence(); lowLightFrames = 0; lightMissingFaceFrames = 0
         present(NotchCoachSnapshot(phase: .seeking, title: "Reading your direction",
             detail: "Face light is on. Keep looking at the camera."))
@@ -342,6 +348,8 @@ import CoreMedia
         pendingFaceBounds.removeAll()
         burstConfiguration = ""; isBusy = false
         holdEvidence.removeAll(); lastFrameReceipt = nil; lowLightFrames = 0; lightMissingFaceFrames = 0
+        darkSearchFrames = 0; firstDarkSearchCapture = nil; lastDarkSearchCapture = nil
+        lightAcquisitionDeadline = nil
         if clearCoach { present(NotchCoachSnapshot()) }
     }
     private func receive(_ frame: CameraAnchorFrame, generation: UInt64) {
@@ -356,7 +364,22 @@ import CoreMedia
             guidance.phase = .seeking; guidance.issue = .camera; guidance.needsLightHelp = false
             guidance.title = "Waiting for a clear frame"; guidance.detail = "Keep facing the camera."
         }
-        if guidance.issue == .lowLight, fresh, let capture = frame.captureHostTime {
+        let darkSearch = guidance.issue == .lowLight && frame.faceCount == 0
+        if darkSearch, fresh, let capture = frame.captureHostTime {
+            if let last = lastDarkSearchCapture, capture < last || capture - last > 0.8 {
+                darkSearchFrames = 0; firstDarkSearchCapture = nil
+            }
+            if lastDarkSearchCapture.map({ capture > $0 }) ?? true {
+                if firstDarkSearchCapture == nil { firstDarkSearchCapture = capture }
+                darkSearchFrames = min(3, darkSearchFrames + 1)
+                lastDarkSearchCapture = capture
+            }
+        } else {
+            darkSearchFrames = 0; firstDarkSearchCapture = nil; lastDarkSearchCapture = nil
+        }
+        let darkSearchReady = darkSearchFrames >= 3
+            && (lastDarkSearchCapture ?? 0) - (firstDarkSearchCapture ?? 0) >= 0.6
+        if guidance.issue == .lowLight, !darkSearch, fresh, let capture = frame.captureHostTime {
             if lastLowLightCapture.map({ capture > $0 }) ?? true {
                 lowLightFrames = min(2, lowLightFrames + 1)
                 lastLowLightCapture = capture
@@ -371,16 +394,27 @@ import CoreMedia
                 clearEvidence(); lightMissingFaceFrames = 0
             }
         }
-        if guidance.issue == .lowLight && (lowLightFrames < 2 || camera.isAssistLightOn) {
+        let faceStillVisible = fresh && frame.faceCount == 1 && frame.faceBounds != nil && frame.detectionConfidence >= 0.3
+        lightMissingFaceFrames = faceStillVisible ? 0 : min(2, lightMissingFaceFrames + 1)
+        if faceStillVisible { lightAcquisitionDeadline = nil }
+        let acquiringFace = fresh && time < (lightAcquisitionDeadline ?? 0)
+        if camera.isAssistLightOn && (!fresh || (lightMissingFaceFrames >= 2 && !acquiringFace)) {
+            camera.setAssistLightEnabled(false)
+            lightAcquisitionDeadline = nil
+        }
+        let lightEvidenceReady = darkSearch ? darkSearchReady : lowLightFrames >= 2
+        if guidance.issue == .lowLight && (!lightEvidenceReady || camera.isAssistLightOn) {
             guidance.phase = .seeking
             guidance.title = "Reading your direction"
             guidance.detail = camera.isAssistLightOn ? "Face light is on. Keep facing the camera." : "Keep facing the camera."
             guidance.issue = .pose
             guidance.needsLightHelp = false
         }
-        let faceStillVisible = fresh && frame.faceCount == 1 && frame.faceBounds != nil && frame.detectionConfidence >= 0.3
-        lightMissingFaceFrames = faceStillVisible ? 0 : min(2, lightMissingFaceFrames + 1)
-        if camera.isAssistLightOn && lightMissingFaceFrames >= 2 { camera.setAssistLightEnabled(false) }
+        if camera.isAssistLightOn && frame.faceCount == 0 {
+            guidance.phase = .seeking; guidance.issue = .faceMissing; guidance.needsLightHelp = false
+            guidance.title = "Looking for your face"
+            guidance.detail = "Face light is on. Keep facing the camera."
+        }
         guard let capture = frame.captureHostTime, let yaw = frame.yawDegrees,
               let pitch = frame.pitchDegrees, let roll = frame.rollDegrees,
               let bounds = frame.faceBounds, bounds.width >= 0.12, bounds.height >= 0.12 else {

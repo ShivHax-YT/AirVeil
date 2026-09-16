@@ -24,6 +24,9 @@ import SwiftUI
             p.animationTime = 1
             try render(name, p, camera, destination)
         }
+        p.snapshot = .init(phase: .lighting, title: "Too dark to find your face",
+                           detail: "Try Face light, then keep facing the camera.", issue: .lowLight, needsLightHelp: true)
+        try render("dark-no-face", p, camera, destination)
         p.snapshot = states[5].1
         for (index, time) in [0.0, 0.12, 0.3, 0.48, 0.6, 0.75].enumerated() {
             p.animationTime = time
