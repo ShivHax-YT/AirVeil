@@ -2,33 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<key>CFBundleDisplayName</key>
+	<string>AirVeil</string>
 	<key>CFBundleExecutable</key>
 	<string>AirVeil</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.shivhax.airveil</string>
 	<key>CFBundleName</key>
 	<string>AirVeil</string>
-	<key>CFBundleDisplayName</key>
-	<string>AirVeil</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.15.0</string>
+	<string>0.16.0</string>
 	<key>CFBundleVersion</key>
-	<string>32</string>
+	<string>33</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>Optional camera checks align returning AirPods with your screen. If seated dimming is enabled, the camera also checks foreground presence while AirPods are removed. Images stay on this Mac and are discarded, never recorded or uploaded.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMotionUsageDescription</key>
 	<string>AirVeil uses AirPods head motion to blur the opposite side of your screen when you turn your head. Motion is processed locally.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>AirVeil processes your desktop locally to display a live directional blur. Screen frames are never recorded or uploaded.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>Optional camera checks align returning AirPods with your screen. If seated dimming is enabled, the camera also checks foreground presence while AirPods are removed. Images stay on this Mac and are discarded, never recorded or uploaded.</string>
 </dict>
 </plist>
