@@ -130,7 +130,7 @@ struct PermissionOnboardingView: View {
                 Text("Three short cards explain what AirVeil needs and what stays on your Mac. You choose what to allow.")
                     .font(.system(size: 14)).lineSpacing(4).foregroundStyle(.black.opacity(0.78))
             }
-            Button(action: { onboarding.begin() }) {
+            HapticButton(action: { onboarding.begin() }) {
                 HStack { Text("Review permissions"); Spacer(); Image(systemName: "arrow.right") }
                     .font(.system(size: 14, weight: .semibold))
                     .frame(minHeight: 44).padding(.horizontal, 16)
@@ -169,14 +169,14 @@ struct PermissionOnboardingView: View {
                     }.font(.system(size: 13, weight: .medium))
                 }
             }.padding(.vertical, 6)
-            Button(action: { onboarding.finish() }) {
+            HapticButton(action: { onboarding.finish() }) {
                 HStack { Text("Start the tour"); Spacer(); Image(systemName: "arrow.right") }
                     .font(.system(size: 14, weight: .semibold))
                     .frame(minHeight: 44).padding(.horizontal, 16)
 
             }.modifier(PermissionPrimaryAction()).keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("permission-finish")
-            Button("Back to permissions") {
+            HapticButton("Back to permissions") {
                 if onboarding.phase == .summary { onboarding.back() }
             }
                 .buttonStyle(.plain).font(.system(size: 13)).frame(minHeight: 44)
@@ -308,7 +308,7 @@ private struct PermissionConsentCard: View {
                     }
                 }
                 if !reviewed {
-                    Button {
+                    HapticButton {
                         detailsFocused = true
                         withAnimation(motionReduced ? nil : PermissionMotion.scroll) {
                             proxy.scrollTo("permission-end", anchor: .bottom)
@@ -335,11 +335,11 @@ private struct PermissionConsentCard: View {
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
                 if !requesting && snapshot.authorization != .notDetermined {
-                    Button("Check again") { if isCurrent { onboarding.refresh() } }
+                    HapticButton("Check again") { if isCurrent { onboarding.refresh() } }
                         .buttonStyle(.plain).font(.system(size: 11)).frame(minHeight: 44)
                         .accessibilityIdentifier("permission-check-again")
                     if permission == .screenRecording && snapshot.authorization == .notGranted {
-                        Button("System Settings") { if isCurrent { onboarding.openCurrentSettings() } }
+                        HapticButton("System Settings") { if isCurrent { onboarding.openCurrentSettings() } }
                             .buttonStyle(.plain).font(.system(size: 11)).frame(minHeight: 44)
                             .disabled(!reviewed)
                             .accessibilityLabel("Open Screen Recording in System Settings")
@@ -352,7 +352,7 @@ private struct PermissionConsentCard: View {
                 Text(message).font(.system(size: 11)).lineSpacing(2).foregroundStyle(.black.opacity(0.75))
                     .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
             }
-            Button(action: primaryAction) {
+            HapticButton(action: primaryAction) {
                 HStack {
                     Text(primaryTitle); Spacer()
                     Image(systemName: snapshot.authorization.allowsAccess ? "arrow.right" : (settingsRequired ? "arrow.up.right" : "plus"))
@@ -363,10 +363,10 @@ private struct PermissionConsentCard: View {
                 .accessibilityIdentifier("permission-primary")
                 .accessibilityHint(reviewed ? "" : "Scroll to the end of the permission details first.")
             HStack(spacing: 12) {
-                Button("Back") { if isCurrent { onboarding.back() } }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
+                HapticButton("Back") { if isCurrent { onboarding.back() } }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
                     .accessibilityIdentifier("permission-back")
                 Spacer(minLength: 0)
-                Button(permission.skipTitle) { if isCurrent { onboarding.continueWithoutAccess() } }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
+                HapticButton(permission.skipTitle) { if isCurrent { onboarding.continueWithoutAccess() } }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
                     .accessibilityIdentifier("permission-skip")
             }
             .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(.black.opacity(0.78))

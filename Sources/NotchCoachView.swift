@@ -174,7 +174,7 @@ struct NotchCanopy: Shape {
             .frame(width: presentation.contentWidth, height: presentation.contentHeight, alignment: .top)
             .overlay(alignment: .topTrailing) {
                 if presentation.wearAirPodsPrompt || presentation.brightnessRecovery != .none {
-                    Button(action: presentation.dismissReminder) {
+                    HapticButton(action: presentation.dismissReminder) {
                         Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.75))
                             .frame(width: 44, height: 44)
@@ -243,7 +243,7 @@ struct NotchCanopy: Shape {
         .accessibilityIdentifier("notch-wear-airpods")
     }
     private var turnOffFeatureButton: some View {
-        Button("Turn off feature", action: presentation.turnOffFeature)
+        HapticButton("Turn off feature", action: presentation.turnOffFeature)
             .font(.system(size: 12, weight: .semibold))
             .frame(maxWidth: .infinity, minHeight: 44)
             .foregroundStyle(.black)
@@ -311,14 +311,14 @@ struct NotchCanopy: Shape {
             Text(camera.isRunning ? "Camera check running · tour stays open" : "Illustration · camera stays off for this tour")
                 .font(.system(size: 9)).foregroundStyle(.white.opacity(0.6))
             HStack(spacing: 8) {
-                Button("Back") {
+                HapticButton("Back") {
                     presentation.tutorialStep = NotchTutorialStep(rawValue: step.rawValue - 1)
                 }.disabled(step == .tracking).frame(minWidth: 48, minHeight: 44)
-                Button("Next") {
+                HapticButton("Next") {
                     presentation.tutorialStep = NotchTutorialStep(rawValue: step.rawValue + 1)
                 }.disabled(step == .controls).frame(minWidth: 48, minHeight: 44)
                 Spacer(minLength: 0)
-                Button("End tutorial", action: presentation.endTutorial)
+                HapticButton("End tutorial", action: presentation.endTutorial)
                     .font(.system(size: 12, weight: .semibold))
                     .frame(minWidth: 112, minHeight: 44)
                     .background(Color.blue, in: Capsule())
@@ -337,7 +337,7 @@ struct NotchCanopy: Shape {
                                 isDemo: presentation.demo, accent: accent)
                 .frame(width: presentation.contentWidth - 42)
             if snapshot.phase == .failure {
-                Button("Try again", action: presentation.refresh)
+                HapticButton("Try again", action: presentation.refresh)
                     .font(.system(size: 11, weight: .medium)).buttonStyle(.plain)
                     .padding(.horizontal, 16).padding(.vertical, 7)
                     .background(.white.opacity(0.12), in: Capsule())
@@ -350,7 +350,7 @@ struct NotchCanopy: Shape {
     }
     private var lightingContent: some View {
         VStack(spacing: 12) {
-            Button(action: presentation.demo ? {} : presentation.toggleAssistLight) {
+            HapticButton(action: presentation.demo ? {} : presentation.toggleAssistLight) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 15).stroke(accent.opacity(0.16), lineWidth: 14).blur(radius: 6)
                     RoundedRectangle(cornerRadius: 15).stroke(accent.opacity(0.9), lineWidth: 3)
@@ -387,10 +387,10 @@ struct NotchCanopy: Shape {
     }
     private var actions: some View {
         Menu {
-            if snapshot.phase == .failure { Button("Try again", action: presentation.refresh) }
-            if snapshot.isAssistLightOn { Button("Turn Face light off", action: presentation.toggleAssistLight) }
-            Button("Cancel check", action: presentation.cancel)
-            Button("Settings…", action: presentation.settings)
+            if snapshot.phase == .failure { HapticButton("Try again", action: presentation.refresh) }
+            if snapshot.isAssistLightOn { HapticButton("Turn Face light off", action: presentation.toggleAssistLight) }
+            HapticButton("Cancel check", action: presentation.cancel)
+            HapticButton("Settings…", action: presentation.settings)
         } label: {
             Image(systemName: "ellipsis").font(.system(size: 12, weight: .semibold))
                 .frame(width: 28, height: 24)
@@ -406,12 +406,12 @@ struct NotchCanopy: Shape {
                 Spacer()
                 Text(presentation.canTurnOffFeature ? "Waiting for AirPods" : (presentation.enabled ? "Following your head" : "Blur paused"))
                     .font(.system(size: 10)).foregroundStyle(.white.opacity(0.48))
-                Button(action: presentation.settings) { Image(systemName: "slider.horizontal.3") }
+                HapticButton(action: presentation.settings) { Image(systemName: "slider.horizontal.3") }
                     .buttonStyle(NotchTextButton()).help("Settings")
                     .accessibilityLabel("Open AirVeil settings")
             }
             HStack(spacing: 10) {
-                Button(action: presentation.toggleEffect) {
+                HapticButton(action: presentation.toggleEffect) {
                     Text(presentation.canTurnOffFeature ? "Turn off feature" : (presentation.enabled ? "Pause" : "Enable blur"))
                         .font(.system(size: 12, weight: .semibold))
                         .frame(maxWidth: .infinity).frame(height: 44)
@@ -420,7 +420,7 @@ struct NotchCanopy: Shape {
                 .buttonStyle(.plain).background(.white.opacity(0.14), in: Capsule())
                 .disabled(!presentation.canTurnOffFeature && !presentation.enabled && !presentation.canEnable)
                 .accessibilityIdentifier("notch-toggle-blur")
-                Button(action: presentation.center) {
+                HapticButton(action: presentation.center) {
                     Text(presentation.cameraEnabled ? "Set center" : "Set up camera")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.white.opacity(0.7))

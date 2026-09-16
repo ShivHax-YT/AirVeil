@@ -7,5 +7,6 @@ mkdir -p "$TASK_ROOT/build/tests" "$TASK_ROOT/.build/module-cache"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   -module-cache-path "$TASK_ROOT/.build/module-cache" \
   "$TASK_ROOT/Sources/BlurOnsetDial.swift" "$TASK_ROOT/Tests/BlurOnsetDialRender.swift" \
+  "$TASK_ROOT/Sources/InteractionHaptics.swift" \
   -o "$TASK_ROOT/build/tests/settings-head-render"
 "$TASK_ROOT/build/tests/settings-head-render" "$TASK_ROOT/build/settings-head-previews"

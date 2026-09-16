@@ -107,7 +107,7 @@ struct BlurOnsetDial: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Picker("Head turn", selection: $side) {
+                Picker("Head turn", selection: $side.hapticSelection()) {
                     ForEach(BlurTurnSide.allCases) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().frame(width: 160)
                     .disabled(syncRequested)
@@ -144,7 +144,7 @@ struct BlurOnsetDial: View {
                 Text(syncStatus).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 4)
-                Button(syncRequested ? "Stop sync" : "Sync head") { toggleSync?() }
+                HapticButton(syncRequested ? "Stop sync" : "Sync head") { toggleSync?() }
                     .controlSize(.large).frame(minHeight: 44).disabled(toggleSync == nil)
                     .accessibilityIdentifier("onset-head-sync")
                     .accessibilityHint(syncRequested ? "Stops live feedback and returns to editing starting angles."
@@ -166,13 +166,13 @@ private struct OnsetArc: View {
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
                     if let edit = feedback.acceptedEdit(BlurDialGeometry.value(at: drag.location, side: side, center: center).rounded()) {
-                        value = edit
+                        $value.hapticMovement(in: 0...60, step: 1).wrappedValue = edit
                     }
                 })
                 .accessibilityLabel("\(side.rawValue) turn blur starting angle")
                 .accessibilityHint("Adjust between zero and sixty degrees. Zero is straight ahead.")
                 .accessibilityAdjustableAction { direction in
-                    if let edit = feedback.acceptedEdit(value + (direction == .increment ? 1 : -1)) { value = edit }
+                    if let edit = feedback.acceptedEdit(value + (direction == .increment ? 1 : -1)) { $value.hapticMovement(in: 0...60, step: 1).wrappedValue = edit }
                 }
         } else {
             artwork
@@ -183,7 +183,7 @@ private struct OnsetArc: View {
     private var artwork: some View {
         OnsetArcArtwork(yaw: feedback.arcYaw, showsMarker: feedback.showsMarker,
                         editingSide: feedback.allowsEditing ? side : nil)
-            .animation(reduceMotion ? nil : .linear(duration: 0.1), value: feedback.arcYaw)
+            .animation(reduceMotion || feedback.allowsEditing ? nil : .linear(duration: 0.1), value: feedback.arcYaw)
             .accessibilityElement(children: .ignore)
             .accessibilityValue(feedback.accessibilityValue)
             .accessibilityIdentifier("onset-angle-arc")

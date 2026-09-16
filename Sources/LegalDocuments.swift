@@ -34,7 +34,7 @@ struct LegalFooter: View {
     }
     private var links: some View {
         ForEach(LegalDocument.allCases) { document in
-            Button { selected = document } label: {
+            HapticButton { selected = document } label: {
                 Text(document.title).underline().font(.caption)
                     .frame(minHeight: 44)
             }
@@ -54,7 +54,7 @@ struct LegalDocumentView: View {
                 Text(document.title).font(.title2.weight(.semibold))
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 20)
-                Button("Done") { dismiss() }
+                HapticButton("Done") { dismiss() }
                     .controlSize(.large).keyboardShortcut(.cancelAction)
                     .frame(minHeight: 44)
             }.padding(24)

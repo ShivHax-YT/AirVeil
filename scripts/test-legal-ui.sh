@@ -14,5 +14,6 @@ ditto "$TASK_ROOT/Resources/Legal" "$TASK_APP/Contents/Resources/Legal"
 swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   -module-cache-path "$TASK_ROOT/.build/module-cache" \
   "$TASK_ROOT/Sources/LegalDocuments.swift" "$TASK_ROOT/Tests/LegalDocumentsRender.swift" \
+  "$TASK_ROOT/Sources/InteractionHaptics.swift" \
   -o "$TASK_APP/Contents/MacOS/LegalReader"
 "$TASK_APP/Contents/MacOS/LegalReader" "$TASK_ROOT/build/legal-previews"

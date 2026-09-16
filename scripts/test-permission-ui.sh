@@ -14,6 +14,7 @@ ditto "$TASK_ROOT/Resources/Legal" "$TASK_APP/Contents/Resources/Legal"
 swiftc -O -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   -module-cache-path "$TASK_ROOT/.build/module-cache" \
   "$TASK_ROOT/Sources/PermissionOnboarding.swift" "$TASK_ROOT/Sources/PermissionOnboardingView.swift" \
+  "$TASK_ROOT/Sources/InteractionHaptics.swift" \
   "$TASK_ROOT/Sources/PermissionStarfieldBackground.swift" \
   "$TASK_ROOT/Sources/LegalDocuments.swift" "$TASK_ROOT/Tests/PermissionOnboardingRender.swift" \
   -o "$TASK_APP/Contents/MacOS/PermissionReader"

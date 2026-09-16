@@ -179,7 +179,7 @@ struct SettingsTourCard: View {
                             .accessibilityAddTraits(.isHeader).accessibilityFocused($titleFocused)
                     }
                     Spacer()
-                    Button(action: { tour.finish() }) {
+                    HapticButton(action: { tour.finish() }) {
                         Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
                             .frame(width: 44, height: 44).contentShape(Rectangle())
                     }.buttonStyle(.plain).foregroundStyle(.secondary)
@@ -190,7 +190,7 @@ struct SettingsTourCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 16) {
                     if let showHighlightedControl {
-                        Button("Show control", action: showHighlightedControl).controlSize(.large)
+                        HapticButton("Show control", action: showHighlightedControl).controlSize(.large)
                             .accessibilityHint("Returns to the tab for this tutorial step.")
                     } else {
                         ProgressView(value: Double(tour.index + 1), total: Double(SettingsTourStep.allCases.count))
@@ -198,11 +198,11 @@ struct SettingsTourCard: View {
                             .accessibilityLabel("Tour progress")
                     }
                     Spacer()
-                    Button(action: { tour.back() }) {
+                    HapticButton(action: { tour.back() }) {
                         Text("Back").frame(minWidth: 64, minHeight: 44).contentShape(Rectangle())
                     }.buttonStyle(.plain).disabled(tour.index == 0)
                         .accessibilityIdentifier("tour-back")
-                    Button(action: { tour.next() }) {
+                    HapticButton(action: { tour.next() }) {
                         Text(step == .ready ? "Get started" : "Continue")
                             .frame(minWidth: 104, minHeight: 32)
                     }.buttonStyle(.borderedProminent).controlSize(.large)

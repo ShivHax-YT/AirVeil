@@ -57,7 +57,7 @@ private struct EnableEffectButton: View {
     @ObservedObject var presentation: TrackingPresentation
     let model: AppModel
     var body: some View {
-        Button("Enable blur") { model.enable() }.modifier(SettingsPrimaryAction())
+        HapticButton("Enable blur") { model.enable() }.modifier(SettingsPrimaryAction())
             .disabled(!presentation.snapshot.canEnable)
     }
 }
@@ -65,7 +65,7 @@ private struct RefreshDirectionButton: View {
     @ObservedObject var presentation: TrackingPresentation
     let model: AppModel
     var body: some View {
-        Button("Refresh direction") { model.refreshCameraDirection() }
+        HapticButton("Refresh direction") { model.refreshCameraDirection() }
             .disabled(!presentation.snapshot.hasSavedCenter || !presentation.snapshot.canSetCenter)
     }
 }
@@ -84,14 +84,14 @@ private struct HeadTrackingControls: View {
             Text(model.cameraHeading.isEnabled ? "Face straight ahead within 5°. A brief camera and AirPods check establishes center after setup or a supported return event." : "AirPods can change their reference after removal. Use Set center again, or enable camera assistance below.")
                 .font(.caption2).foregroundStyle(.secondary)
             if model.startupTourActive || !model.motionAccessAllowedByOnboarding {
-                Button(model.motionAccessAllowedByOnboarding ? "Start head tracking" : "Review head-tracking access") { model.startTrackingFromTour() }
+                HapticButton(model.motionAccessAllowedByOnboarding ? "Start head tracking" : "Review head-tracking access") { model.startTrackingFromTour() }
                     .controlSize(.large)
                 Text(model.motionAccessAllowedByOnboarding
                      ? "Starts AirPods motion tracking so you can set your center during the tour."
                      : "Review Motion & Fitness access before starting AirPods tracking.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
-            Button(presentation.snapshot.centerBusy ? "Checking direction…" : "Set center") { model.calibrate() }
+            HapticButton(presentation.snapshot.centerBusy ? "Checking direction…" : "Set center") { model.calibrate() }
                 .disabled(!presentation.snapshot.canSetCenter).controlSize(.large)
             if !presentation.snapshot.source.isEmpty {
                 Text("≈\(presentation.snapshot.sampleRate) samples/s · \(presentation.snapshot.source)")
@@ -125,7 +125,7 @@ struct EnergySettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Energy use", systemImage: "leaf").font(.headline)
-            Picker("Energy use", selection: $energy.mode) {
+            Picker("Energy use", selection: $energy.mode.hapticSelection()) {
                 ForEach(EnergyMode.allCases, id: \.self) { mode in
                     Text(mode.label).tag(mode)
                 }
@@ -152,6 +152,7 @@ struct SettingsView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedSection: SettingsSection
     var onTourTargetResolved: ((SettingsSection, SettingsTourStep, CGRect?, CGSize) -> Void)? = nil
+    @AppStorage(InteractionHaptics.preferenceKey) private var trackpadFeedback = true
     @State private var advanced = false
     @State private var advancedBeforeTour = false
     @State private var tourSimulation = true
@@ -180,7 +181,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
                 header
-                TabView(selection: $selectedSection) {
+                TabView(selection: $selectedSection.hapticSelection()) {
                     ForEach(SettingsSection.allCases) { section in
                         sectionPage(section)
                             .tabItem { Label(section.rawValue, systemImage: section.symbol) }
@@ -250,13 +251,13 @@ struct SettingsView: View {
             Spacer()
             Group {
                 if model.enabled || model.starting {
-                    Button("Pause & clear screen") { model.pause() }
+                    HapticButton("Pause & clear screen") { model.pause() }
                         .modifier(SettingsPrimaryAction())
                 } else { EnableEffectButton(presentation: model.presentation, model: model) }
             }.tourTarget(.ready)
             Menu {
-                if let showPermissions { Button("Permissions", action: showPermissions) }
-                Button("Take a tour") { tour.replay() }
+                if let showPermissions { HapticButton("Permissions", action: showPermissions) }
+                HapticButton("Take a tour") { tour.replay() }
             } label: {
                 Image(systemName: "ellipsis.circle").font(.title3).frame(width: 32, height: 32)
             }.menuStyle(.borderlessButton).fixedSize().help("Setup and tutorial")
@@ -333,14 +334,14 @@ struct SettingsView: View {
                             .font(.system(size:10,weight:.semibold)).foregroundStyle(.secondary)
                     }
                     if !model.enabled || tour.isActive {
-                        Toggle("Simulate a head turn",isOn:simulation).toggleStyle(.switch).controlSize(.small)
+                        Toggle("Simulate a head turn",isOn:simulation.hapticSelection()).toggleStyle(.switch).controlSize(.small)
                             .accessibilityIdentifier("preview-simulation")
                         HStack {
                             Text("Right").font(.caption).foregroundStyle(.secondary)
-                            Slider(value:previewAngle,in:-60...60).accessibilityLabel("Simulated head angle")
+                            HapticSlider(value:previewAngle,in:-60...60).accessibilityLabel("Simulated head angle")
                                 .accessibilityIdentifier("preview-angle")
                             Text("Left").font(.caption).foregroundStyle(.secondary)
-                            Button("Center") { previewAngle.wrappedValue = 0 }
+                            HapticButton("Center") { previewAngle.wrappedValue = 0 }
                                 .modifier(SettingsSecondaryAction())
                                 .accessibilityIdentifier("preview-center")
                         }
@@ -355,7 +356,7 @@ struct SettingsView: View {
                         Text(model.permissionGranted ? "Screen capture allowed. Frames stay on this Mac." : "Allow screen capture for live blur. Preview needs no permission.")
                             .font(.caption).foregroundStyle(.secondary).frame(minHeight:34,alignment:.topLeading)
                         HStack {
-                            Button(model.checkingAccess ? "Checking…" : (model.permissionGranted ? "Check access" : "Allow screen capture")) {
+                            HapticButton(model.checkingAccess ? "Checking…" : (model.permissionGranted ? "Check access" : "Allow screen capture")) {
                                 model.requestScreenPermission()
                             }.controlSize(.large).disabled(model.checkingAccess)
                         }
@@ -376,15 +377,15 @@ struct SettingsView: View {
                         HStack {
                             RefreshDirectionButton(presentation:model.presentation,model:model)
                             if model.cameraHeading.isBusy {
-                                Button("Stop check") { model.cameraHeading.cancelPendingRecovery() }
+                                HapticButton("Stop check") { model.cameraHeading.cancelPendingRecovery() }
                             }
                             Spacer()
-                            Button("Turn camera assistance off") { model.disableCameraAssistance() }
+                            HapticButton("Turn camera assistance off") { model.disableCameraAssistance() }
                         }
                         Text("Face straight ahead, within 5° of center, and hold briefly. Each check finishes in one pass. If repeated camera frames show your face needs more light, a rounded edge light turns on. Turn it off in the notch controls; it switches off after the check.")
                             .font(.caption2).foregroundStyle(.secondary)
                     } else {
-                        Button(model.cameraHeading.isBusy ? "Waiting for camera permission…" : "Enable camera assistance") { model.enableCameraAssistance() }
+                        HapticButton(model.cameraHeading.isBusy ? "Waiting for camera permission…" : "Enable camera assistance") { model.enableCameraAssistance() }
                             .disabled(model.cameraHeading.isBusy)
                         Text(model.cameraHeading.status).font(.caption2).foregroundStyle(.secondary)
                     }
@@ -400,18 +401,18 @@ struct SettingsView: View {
                         Spacer()
                         Text("\(model.overlay.availableDisplays.count) connected · \(model.selectedDisplayCount) selected")
                             .font(.caption).foregroundStyle(.secondary)
-                        Button("Check displays",systemImage:"arrow.clockwise") { model.overlay.refreshDisplays() }
+                        HapticButton("Check displays",systemImage:"arrow.clockwise") { model.overlay.refreshDisplays() }
                     }
                     ForEach(model.overlay.availableDisplays) { display in
-                        Toggle(isOn:Binding(get:{model.isDisplaySelected(display)},set:{model.selectDisplay(display,selected:$0)})) {
+                        Toggle(isOn:Binding(get:{model.isDisplaySelected(display)},set:{model.selectDisplay(display,selected:$0)}).hapticSelection()) {
                             Text(display.name)
                         }.toggleStyle(.checkbox)
                     }
                     }.tourTarget(.displays)
                     VStack(alignment:.leading,spacing:12) {
-                    Toggle("Block clicks and scrolling while blurred",isOn:$model.blockInput).toggleStyle(.switch).controlSize(.small)
+                    Toggle("Block clicks and scrolling while blurred",isOn:$model.blockInput.hapticSelection()).toggleStyle(.switch).controlSize(.small)
                     if model.blockInput || tour.step == .input {
-                        Picker("Block interaction in",selection:$model.blocksEntireDisplay) {
+                        Picker("Block interaction in",selection:$model.blocksEntireDisplay.hapticSelection()) {
                             Text("Blurred area").tag(false)
                             Text("Entire affected display").tag(true)
                         }.pickerStyle(.segmented)
@@ -430,20 +431,23 @@ struct SettingsView: View {
                     HStack {
                         Text("Make it feel right").font(.headline)
                         Spacer()
-                        Button("Reset defaults",systemImage:"arrow.counterclockwise") { model.resetDefaults() }.controlSize(.small)
+                        HapticButton("Reset defaults",systemImage:"arrow.counterclockwise") { model.resetDefaults() }.controlSize(.small)
                     }
-                    Picker("Screen coverage",selection:$model.wholeScreen) {
+                    Picker("Screen coverage",selection:$model.wholeScreen.hapticSelection()) {
                         Text("Directional half").tag(false)
                         Text("Whole-screen sweep").tag(true)
                     }.pickerStyle(.segmented).accessibilityLabel("Screen coverage").tourTarget(.coverage)
                     SyncedBlurOnsetDial(model: model, sync: model.headPreviewSync, compact: tour.isActive).tourTarget(.onset)
                     setting("Fully obscured",value:$model.fullAngle,range:model.minimumFullAngle...70,unit:"°").tourTarget(.full)
                     HStack {
-                        Toggle("Opaque cover",isOn:$model.opaque).toggleStyle(.switch)
+                        Toggle("Opaque cover",isOn:$model.opaque.hapticSelection()).toggleStyle(.switch)
                         Spacer()
-                        Toggle("Invert direction",isOn:$model.inverted).toggleStyle(.switch)
+                        Toggle("Invert direction",isOn:$model.inverted.hapticSelection()).toggleStyle(.switch)
                     }.controlSize(.small).tourTarget(.appearance)
-                    DisclosureGroup("Fine-tune the animation",isExpanded:$advanced) {
+                    Toggle("Trackpad feedback", isOn: $trackpadFeedback.hapticSelection())
+                        .toggleStyle(.switch).controlSize(.small)
+                        .help("Light feedback for buttons, switches, and slider adjustments on a Force Touch trackpad.")
+                    DisclosureGroup("Fine-tune the animation",isExpanded:$advanced.hapticSelection()) {
                         VStack(spacing:14) {
                             setting("Blur strength",value:$model.blurPoints,range:8...64,unit:" pt")
                             setting("Soft edge",value:Binding(get:{model.feather*100},set:{model.feather=$0/100}),range:2...30,unit:"%")
@@ -460,7 +464,7 @@ struct SettingsView: View {
                     Label("When you remove both AirPods",systemImage:"airpodspro").font(.headline)
                     Text("Choose what happens after the camera checks your seat.")
                         .font(.subheadline).foregroundStyle(.secondary)
-                    Toggle("Lock when I leave",isOn:$model.sleepDisplaysOnRemoval)
+                    Toggle("Lock when I leave",isOn:$model.sleepDisplaysOnRemoval.hapticSelection())
                         .toggleStyle(.switch).controlSize(.small)
                         .accessibilityIdentifier("lock-on-removal")
                     Text("Turn off displays when the camera confirms your seat is empty. On by default.")
@@ -469,7 +473,7 @@ struct SettingsView: View {
                     }.tourTarget(.removal)
                         VStack(alignment:.leading,spacing:12) {
                         Divider()
-                        Toggle("Dim while I stay seated", isOn: $model.dimWhilePresent)
+                        Toggle("Dim while I stay seated", isOn: $model.dimWhilePresent.hapticSelection())
                             .toggleStyle(.switch).controlSize(.small)
                             .accessibilityIdentifier("dim-on-removal")
                         Text("Lower the built-in display's brightness while your seat is occupied. Off until you turn it on.")
@@ -477,7 +481,7 @@ struct SettingsView: View {
                         if model.dimWhilePresent || tour.step == .seated {
                             HStack {
                                 Text("Screen brightness while seated")
-                                Slider(value: $model.removalBrightness, in: 0...0.50, step: 0.01)
+                                HapticSlider(value: $model.removalBrightness, in: 0...0.50, step: 0.01)
                                     .accessibilityLabel("Dimmed brightness")
                                     .accessibilityIdentifier("seated-brightness")
                                 Text("\(Int((model.removalBrightness * 100).rounded()))%")
@@ -503,7 +507,7 @@ struct SettingsView: View {
                         Text("macOS controls locking after displays turn off. Set Require password to Immediately in Lock Screen settings to lock as soon as you leave.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Spacer()
-                        Button("Lock Screen settings") { model.openLockScreenSettings() }
+                        HapticButton("Lock Screen settings") { model.openLockScreenSettings() }
                     }
                 }.modifier(SettingsContentSurface())
 
@@ -514,7 +518,7 @@ struct SettingsView: View {
     private func setting(_ title:String,value:Binding<Double>,range:ClosedRange<Double>,unit:String) -> some View {
         HStack {
             Text(title).font(.subheadline).frame(width:126,alignment:.leading)
-            Slider(value:value,in:range).accessibilityLabel(title)
+            HapticSlider(value:value,in:range).accessibilityLabel(title)
             Text(String(format:"%.0f",value.wrappedValue)+unit).font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary).frame(width:60,alignment:.trailing)
         }
