@@ -11,10 +11,10 @@ cat > "$TASK_APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0"><dict><key>CFBundleExecutable</key><string>PermissionReader</string><key>CFBundleIdentifier</key><string>com.shivhax.airveil.permission-render</string></dict></plist>
 PLIST
 ditto "$TASK_ROOT/Resources/Legal" "$TASK_APP/Contents/Resources/Legal"
-swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
+swiftc -O -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   -module-cache-path "$TASK_ROOT/.build/module-cache" \
   "$TASK_ROOT/Sources/PermissionOnboarding.swift" "$TASK_ROOT/Sources/PermissionOnboardingView.swift" \
   "$TASK_ROOT/Sources/PermissionStarfieldBackground.swift" \
   "$TASK_ROOT/Sources/LegalDocuments.swift" "$TASK_ROOT/Tests/PermissionOnboardingRender.swift" \
   -o "$TASK_APP/Contents/MacOS/PermissionReader"
-"$TASK_APP/Contents/MacOS/PermissionReader" "$TASK_ROOT/build/permission-previews"
+"$TASK_APP/Contents/MacOS/PermissionReader" "$TASK_ROOT/build/permission-previews" "$@"

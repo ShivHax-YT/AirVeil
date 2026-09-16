@@ -18,4 +18,10 @@ swiftc -sdk "$TASK_SDK" -target "$(uname -m)-apple-macos14.0" -swift-version 5 \
   "$TASK_ROOT/Sources/LegalDocuments.swift" \
   "$TASK_ROOT/Tests/PermissionStarfieldLifecycleTests.swift" \
   -o "$TASK_APP/Contents/MacOS/StarfieldLifecycle"
-"$TASK_APP/Contents/MacOS/StarfieldLifecycle" "$TASK_ROOT/build/starfield-previews"
+# Launch the bundled fixture without activating it or another user's app.
+TASK_LOG="$TASK_ROOT/build/tests/starfield-lifecycle.log"
+: > "$TASK_LOG"
+open -g -n -W --stdout "$TASK_LOG" --stderr "$TASK_LOG" "$TASK_APP" --args "$TASK_ROOT/build/starfield-previews"
+cat "$TASK_LOG"
+# LaunchServices does not forward the child's exit code.
+if ! rg -q '^PASS: six full permission stages' "$TASK_LOG" || rg -q '^FAIL:' "$TASK_LOG"; then exit 1; fi

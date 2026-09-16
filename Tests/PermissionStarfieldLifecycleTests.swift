@@ -109,13 +109,25 @@ private struct StarfieldPixels {
         throw StarfieldHarnessFailure(description: "A visible, unfocused native window did not receive animation ticks")
     }
 
+    private static func starfield(in view: NSView) -> StarfieldLayerView? {
+        if let field = view as? StarfieldLayerView { return field }
+        return view.subviews.lazy.compactMap { starfield(in: $0) }.first
+    }
+
     private static func capture(_ host: NSView, to url: URL) throws -> StarfieldPixels {
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
         guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
             throw StarfieldHarnessFailure(description: "Could not allocate generated-art bitmap")
         }
-        host.cacheDisplay(in: host.bounds, to: bitmap)
+        guard let graphics = NSGraphicsContext(bitmapImageRep: bitmap), let presentation = host.layer?.presentation() else {
+            throw StarfieldHarnessFailure(description: "Could not read actual presentation layers")
+        }
+        // CALayer uses the host's flipped geometry. Bitmap contexts start at
+        // the lower-left; flip once so exported rows and header checks agree.
+        graphics.cgContext.translateBy(x: 0, y: host.bounds.height)
+        graphics.cgContext.scaleBy(x: 1, y: -1)
+        presentation.render(in: graphics.cgContext)
         guard let data = bitmap.bitmapData,
               let png = bitmap.representation(using: .png, properties: [:]) else {
             throw StarfieldHarnessFailure(description: "Could not read generated-art pixels")
@@ -127,6 +139,9 @@ private struct StarfieldPixels {
     }
 
     private static func run(_ app: NSApplication) async throws {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        try require((session?["CGSSessionScreenIsLocked"] as? Bool) != true,
+                    "Visible starfield verification requires an unlocked desktop; the session is locked. No visible-render gates were run or skipped as passing.")
         let output = URL(fileURLWithPath: CommandLine.arguments[1])
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let state = StarfieldHarnessState(), ticks = StarfieldTickRecorder()
@@ -139,6 +154,7 @@ private struct StarfieldPixels {
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.level = .floating
         panel.ignoresMouseEvents = true
         panel.contentView = host
@@ -146,27 +162,31 @@ private struct StarfieldPixels {
         defer { panel.close() }
 
         // Exercise a real visible AppKit window while another app owns focus.
-        // Captures below contain this generated Canvas only, never the desktop.
+        // Captures contain generated presentation layers only, never the desktop.
         // Keep accessory policy: prohibited applications cannot create windows.
         // Deactivation is asynchronous, so await the actual fixture state.
         app.deactivate()
         panel.orderFrontRegardless()
+        try await pause(0.25)
+        app.deactivate()
         try await awaitState("Fixture could not become inactive after deactivation; unfocused animation was not tested") {
             !app.isActive
         }
-        try await awaitState("Harness window never became visibly unoccluded") {
+        try await awaitState("Harness window never became visibly unoccluded (visible=\(panel.isVisible), occlusion=\(panel.occlusionState.rawValue), activeSpace=\(panel.isOnActiveSpace), hidden=\(app.isHidden))") {
             panel.isVisible && panel.occlusionState.contains(.visible)
         }
         try require(panel.isVisible && panel.occlusionState.contains(.visible),
                     "Harness must be truly visible and unoccluded")
         try await awaitTicks(ticks, after: ticks.count)
+        try require(starfield(in: host)?.activeAnimationCount ?? 0 > 0,
+                    "Visible artwork must have real compositor animations")
         let first = try capture(host, to: output.appendingPathComponent("visible-a.png"))
         let movingCount = ticks.count
         try await pause(1.2)
         let second = try capture(host, to: output.appendingPathComponent("visible-b.png"))
         let changedBytes = zip(first.bytes, second.bytes).reduce(0) { $0 + ($1.0 == $1.1 ? 0 : 1) }
         try require(!app.isActive && ticks.count > movingCount,
-                    "Visible animation must continue while the app lacks focus")
+                    "Visible animation must continue while the app lacks focus (active=\(app.isActive), ticks=\(ticks.count), prior=\(movingCount), visible=\(panel.occlusionState.contains(.visible)))")
         try require(first.bytes.count == second.bytes.count && changedBytes >= 48,
                     "Actual generated star pixels must change over time")
         print("PASS: visible inactive window animates; \(ticks.count - movingCount) ticks, \(changedBytes) changed pixel bytes")
@@ -178,6 +198,7 @@ private struct StarfieldPixels {
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         cover.isReleasedWhenClosed = false
         cover.hidesOnDeactivate = false
+        cover.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         cover.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
         cover.isOpaque = true
         cover.backgroundColor = .black
@@ -193,7 +214,9 @@ private struct StarfieldPixels {
         try await pause(0.8)
         try require(panel.isVisible && !panel.occlusionState.contains(.visible) && ticks.count == coveredCount,
                     "Fully occluded window must stop animation ticks even though isVisible remains true")
-        print("PASS: fully covered ordered-in window stops animation ticks")
+        try require(starfield(in: host)?.activeAnimationCount == 0,
+                    "Full occlusion must remove compositor animations, not just stop the observer")
+        print("PASS: fully covered ordered-in window removes compositor animations and stops observations")
         cover.orderOut(nil)
         try await awaitState("Uncovering did not restore native visibility") {
             panel.occlusionState.contains(.visible)
@@ -209,8 +232,10 @@ private struct StarfieldPixels {
         try await pause(0.8)
         let reducedB = try capture(host, to: output.appendingPathComponent("reduced-motion-repeat.png"))
         try require(ticks.count == reducedCount && reducedA.bytes == reducedB.bytes,
-                    "Reduce Motion must stop timeline ticks and keep identical artwork")
-        print("PASS: Reduce Motion stops animation ticks and preserves static pixels")
+                    "Reduce Motion must stop diagnostic observations and keep identical artwork")
+        try require(starfield(in: host)?.activeAnimationCount == 0,
+                    "Reduce Motion must remove all compositor animations")
+        print("PASS: Reduce Motion removes animations and preserves static pixels")
 
         state.reduceMotion = false
         try await pause(0.2)
@@ -268,6 +293,7 @@ private struct StarfieldPixels {
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.level = .floating
         panel.ignoresMouseEvents = true
         panel.contentView = host

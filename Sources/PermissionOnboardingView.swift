@@ -1,12 +1,23 @@
 import SwiftUI
 import AppKit
 
+private enum PermissionMotion {
+    static let settle = Animation.spring(duration: 0.34, bounce: 0.02)
+    static let scroll = Animation.smooth(duration: 0.24)
+}
+
 struct PermissionOnboardingView: View {
     @ObservedObject var onboarding: PermissionOnboarding
     var onBackgroundAnimationTick: ((TimeInterval) -> Void)? = nil
+    var reduceMotionOverride: Bool? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @AccessibilityFocusState private var headingFocused: Bool
-    private var transition: Animation? { reduceMotion ? nil : .spring(response: 0.90, dampingFraction: 0.90) }
+    private var motionReduced: Bool { reduceMotion || reduceMotionOverride == true }
+    private var transition: Animation? { motionReduced ? nil : PermissionMotion.settle }
+    private var cardTransition: AnyTransition {
+        motionReduced ? .identity : .opacity.combined(with: .offset(y: 12))
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -17,16 +28,26 @@ struct PermissionOnboardingView: View {
                     .padding(.top, 24).padding(.horizontal, 32).padding(.bottom, 12)
                 ZStack {
                     ForEach(Array(AirVeilPermission.allCases.enumerated()), id: \.element.id) { index, permission in
-                        permissionCard(permission, index: index, width: cardWidth, height: cardHeight)
+                        permissionPreview(permission, index: index, width: cardWidth, height: cardHeight)
                     }
-                    if onboarding.phase == .welcome {
-                        welcome(width: cardWidth)
-                            .transition(.opacity.combined(with: .scale(scale: reduceMotion ? 1 : 0.96)))
+                    // Only the selected reading surface participates in the transition.
+                    // Its dimensions never animate, so text is measured at its final width.
+                    ZStack {
+                        if let permission = onboarding.currentPermission {
+                            PermissionConsentCard(onboarding: onboarding, permission: permission, motionReduced: motionReduced)
+                                .frame(width: cardWidth, height: cardHeight)
+                                .id(permission)
+                                .transition(cardTransition)
+                        }
+                        if onboarding.phase == .welcome {
+                            welcome(width: cardWidth).transition(cardTransition)
+                        }
+                        if onboarding.phase == .summary {
+                            summary(width: cardWidth).transition(cardTransition)
+                        }
                     }
-                    if onboarding.phase == .summary {
-                        summary(width: cardWidth)
-                            .transition(.opacity.combined(with: .scale(scale: reduceMotion ? 1 : 0.96)))
-                    }
+                    .animation(transition, value: onboarding.phase)
+                    .zIndex(10)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
@@ -34,11 +55,10 @@ struct PermissionOnboardingView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
-        .background(PermissionStarfieldBackground(onAnimationTick: onBackgroundAnimationTick))
+        .background(PermissionStarfieldBackground(reduceMotionOverride: motionReduced, onAnimationTick: onBackgroundAnimationTick))
         .environment(\.colorScheme, .dark)
         .tint(.white)
         .frame(minWidth: 740, idealWidth: 800, minHeight: 660, idealHeight: 850)
-        .animation(transition, value: onboarding.phase)
         .onAppear { onboarding.refresh(); headingFocused = true }
         .onChange(of: onboarding.phase) { _, _ in headingFocused = true }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in onboarding.refresh() }
@@ -51,50 +71,53 @@ struct PermissionOnboardingView: View {
                 Text("AirVeil").font(.system(size: 20, weight: .semibold))
             }.foregroundStyle(.white)
             Spacer()
-            Text(onboarding.currentIndex.map { "Permission \($0 + 1) of 3" } ?? "A little setup. Then your space.")
-                .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.72))
+            VStack(alignment: .trailing, spacing: 8) {
+                Text(onboarding.currentIndex.map { "Permission \($0 + 1) of 3" } ?? "A little setup. Then your space.")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.78))
+                HStack(spacing: 5) {
+                    ForEach(AirVeilPermission.allCases) { permission in
+                        Capsule().fill(.white.opacity(onboarding.currentPermission == permission ? 0.92 : 0.22))
+                            .frame(width: 24, height: 3)
+                    }
+                }.accessibilityHidden(true)
+            }
         }
     }
 
-    private func permissionCard(_ permission: AirVeilPermission, index: Int, width: CGFloat, height: CGFloat) -> some View {
+    private func permissionPreview(_ permission: AirVeilPermission, index: Int, width: CGFloat, height: CGFloat) -> some View {
         let selected = onboarding.currentPermission == permission
         let activeIndex = onboarding.currentIndex ?? (onboarding.phase == .summary ? 3 : -1)
         let past = index < activeIndex
         let rank = max(0, past ? activeIndex - index - 1 : index - activeIndex - 1)
-        let offset = selected ? 0 : (past ? -1.0 : 1.0) * (width / 2 + 28 + Double(rank) * 32)
-        let depthScale = max(0.72, 0.90 - Double(rank) * 0.08)
-        let sideHeight = height * 0.72
-        let sharedBottom = 8 + sideHeight * 0.90 / 2
-        let sideOffsetY = sharedBottom - sideHeight * depthScale / 2
-        return Group {
-            if selected {
-                PermissionConsentCard(onboarding: onboarding, permission: permission)
-            } else {
-                // A separate compact composition keeps the label and corners
-                // natural as the full permission card moves into the stack.
-                VStack(spacing: 12) {
-                    Image(systemName: permission.symbol).font(.system(size: 30, weight: .light))
-                    Text(permission.title).font(.system(size: 13, weight: .medium))
-                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(width: 106)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: past ? .leading : .trailing)
-                .padding(20)
-                .modifier(PermissionGlassSurface())
-            }
+        let offset = (past ? -1.0 : 1.0) * (width / 2 + 60 + Double(rank) * 30)
+        let scale = max(0.78, 0.94 - Double(rank) * 0.06)
+        return VStack(spacing: 14) {
+            Image(systemName: permission.symbol).font(.system(size: 28, weight: .light))
+            Text(permission.title).font(.system(size: 12, weight: .medium))
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
         }
-        .frame(width: selected ? width : 216, height: selected ? height : sideHeight)
-        // Rotate around the bottom before scaling so perspective cannot tilt
-        // that edge; compensate each depth scale against one shared baseline.
-        .rotation3DEffect(.degrees(reduceMotion || selected ? 0 : (past ? -1 : 1) * (12 + Double(rank) * 2)),
-                          axis: (x: 0, y: 1, z: 0), anchor: .bottom, perspective: 0.28)
-        .scaleEffect(selected ? 1 : depthScale)
-        .offset(x: offset, y: selected ? 0 : sideOffsetY)
-        .opacity(selected ? 1 : (onboarding.phase == .welcome ? 0.34 : max(0.30, 0.46 - Double(rank) * 0.07)))
-        .blur(radius: selected ? 0 : (onboarding.phase == .welcome ? 4.5 : 4.0))
-        .zIndex(selected ? 10 : Double(3 - rank))
-        .allowsHitTesting(selected)
-        .accessibilityHidden(!selected)
+        .foregroundStyle(.white.opacity(0.78))
+        .opacity(rank == 0 ? 1 : 0)
+        .padding(18)
+        .frame(width: 176, height: height * 0.72)
+        .background {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(LinearGradient(colors: reduceTransparency ? [Color(white: 0.14), Color(white: 0.10)] : [.white.opacity(0.11), .white.opacity(0.035)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(.white.opacity(0.13), lineWidth: 0.75)
+        }
+        .animation(transition) { content in
+            content
+                .scaleEffect(motionReduced ? 1 : scale)
+                .offset(x: offset, y: motionReduced ? 0 : 16 + Double(rank) * 8)
+                .opacity(selected ? 0 : max(0.24, 0.60 - Double(rank) * 0.12))
+        }
+        .zIndex(-Double(rank))
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private func welcome(width: CGFloat) -> some View {
@@ -111,15 +134,18 @@ struct PermissionOnboardingView: View {
                 HStack { Text("Review permissions"); Spacer(); Image(systemName: "arrow.right") }
                     .font(.system(size: 14, weight: .semibold))
                     .frame(minHeight: 44).padding(.horizontal, 16)
-                    .foregroundStyle(.white).background(.black.opacity(0.88), in: Capsule())
-            }.buttonStyle(.plain).keyboardShortcut(.defaultAction)
+
+            }.modifier(PermissionPrimaryAction()).keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("permission-begin")
             Text("Nothing starts until you choose.")
                 .font(.system(size: 12)).foregroundStyle(.black.opacity(0.68))
         }
         .padding(32).frame(width: width)
-        .modifier(PermissionGlassSurface())
+        .modifier(PermissionReadingSurface())
         .zIndex(20)
+        .disabled(onboarding.phase != .welcome)
+        .allowsHitTesting(onboarding.phase == .welcome)
+        .accessibilityHidden(onboarding.phase != .welcome)
     }
 
     private func summary(width: CGFloat) -> some View {
@@ -147,19 +173,26 @@ struct PermissionOnboardingView: View {
                 HStack { Text("Start the tour"); Spacer(); Image(systemName: "arrow.right") }
                     .font(.system(size: 14, weight: .semibold))
                     .frame(minHeight: 44).padding(.horizontal, 16)
-                    .foregroundStyle(.white).background(.black.opacity(0.88), in: Capsule())
-            }.buttonStyle(.plain).keyboardShortcut(.defaultAction)
+
+            }.modifier(PermissionPrimaryAction()).keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("permission-finish")
-            Button("Back to permissions") { onboarding.back() }
+            Button("Back to permissions") {
+                if onboarding.phase == .summary { onboarding.back() }
+            }
                 .buttonStyle(.plain).font(.system(size: 13)).frame(minHeight: 44)
                 .foregroundStyle(.black.opacity(0.78))
         }
         .padding(32).frame(width: width)
-        .modifier(PermissionGlassSurface()).zIndex(20)
+        .modifier(PermissionReadingSurface()).zIndex(20)
+        .disabled(onboarding.phase != .summary)
+        .allowsHitTesting(onboarding.phase == .summary)
+        .accessibilityHidden(onboarding.phase != .summary)
     }
 }
 
-private struct PermissionGlassSurface: ViewModifier {
+/// Reading content gets one calm material, leaving Liquid Glass to actions.
+/// Side previews use simple fills and never sample or blur the animated sky.
+private struct PermissionReadingSurface: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
     func body(content: Content) -> some View {
@@ -167,26 +200,31 @@ private struct PermissionGlassSurface: ViewModifier {
             .foregroundStyle(.black.opacity(0.88))
             .tint(.black)
             .background {
-                if reduceTransparency {
-                    RoundedRectangle(cornerRadius: 26).fill(Color(white: 0.94))
-                } else if #available(macOS 26.0, *) {
-                    // Let the real background pass through the system glass.
-                    // The regular variant preserves legibility for this text-heavy card.
-                    RoundedRectangle(cornerRadius: 26).fill(.clear)
-                        .glassEffect(.regular.tint(.white.opacity(contrast == .increased ? 0.28 : 0.10)),
-                                     in: RoundedRectangle(cornerRadius: 26))
+                let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+                if reduceTransparency || contrast == .increased {
+                    shape.fill(Color(white: 0.96))
                 } else {
-                    RoundedRectangle(cornerRadius: 26).fill(.ultraThinMaterial)
-                        .overlay(RoundedRectangle(cornerRadius: 26).fill(.white.opacity(contrast == .increased ? 0.50 : 0.18)))
+                    shape.fill(.regularMaterial)
+                        .overlay(shape.fill(.white.opacity(0.16)))
                 }
             }
-            .overlay(RoundedRectangle(cornerRadius: 26).stroke(
-                LinearGradient(colors: [.white.opacity(reduceTransparency ? 1 : 0.72),
-                                        .white.opacity(reduceTransparency ? 1 : 0.14),
-                                        .white.opacity(reduceTransparency ? 1 : 0.42)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
-            .shadow(color: .black.opacity(0.35), radius: 24, y: 12)
+            .overlay {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(.white.opacity(contrast == .increased ? 1 : 0.52), lineWidth: 0.75)
+            }
+            .shadow(color: .black.opacity(0.22), radius: 16, y: 8)
             .environment(\.colorScheme, .light)
+    }
+}
+
+private struct PermissionPrimaryAction: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 26.0, *), !reduceTransparency {
+            content.buttonStyle(.glassProminent).tint(.black).buttonBorderShape(.capsule)
+        } else {
+            content.buttonStyle(.borderedProminent).tint(.black).buttonBorderShape(.capsule)
+        }
     }
 }
 
@@ -198,9 +236,10 @@ private struct PermissionEndPositionKey: PreferenceKey {
 private struct PermissionConsentCard: View {
     @ObservedObject var onboarding: PermissionOnboarding
     let permission: AirVeilPermission
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let motionReduced: Bool
     @AccessibilityFocusState private var headingFocused: Bool
     @FocusState private var detailsFocused: Bool
+    private var isCurrent: Bool { onboarding.currentPermission == permission }
     private var snapshot: PermissionAccessSnapshot { onboarding.status(for: permission) }
     private var reviewed: Bool { onboarding.reviewed.contains(permission) }
     private var requesting: Bool { onboarding.requestingPermission == permission }
@@ -224,8 +263,13 @@ private struct PermissionConsentCard: View {
             footer
         }
         .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
-        .modifier(PermissionGlassSurface())
-        .onAppear { headingFocused = true }
+        .modifier(PermissionReadingSurface())
+        // Outgoing cards may remain visible while their transition settles.
+        // They must never dispatch an action against the newly selected card.
+        .disabled(!isCurrent)
+        .allowsHitTesting(isCurrent)
+        .accessibilityHidden(!isCurrent)
+        .onAppear { headingFocused = isCurrent }
     }
 
     private var permissionDetails: some View {
@@ -254,11 +298,11 @@ private struct PermissionConsentCard: View {
                         }.padding(.trailing, 8).padding(.bottom, 2)
                     }
                     .coordinateSpace(name: permission.rawValue)
-                    .focusable().focused($detailsFocused).focusEffectDisabled()
+                    .focusable().focused($detailsFocused)
                     .accessibilityLabel("\(permission.title) permission details")
                     .accessibilityHint("Scroll to the end to enable Allow. You can choose to continue without access at any time.")
                     .onPreferenceChange(PermissionEndPositionKey.self) { bottom in
-                        if bottom.isFinite && bottom <= viewport.size.height + 2 && bottom >= 0 {
+                        if isCurrent && !reviewed && bottom.isFinite && bottom <= viewport.size.height + 2 && bottom >= 0 {
                             onboarding.markReviewed(permission)
                         }
                     }
@@ -266,7 +310,7 @@ private struct PermissionConsentCard: View {
                 if !reviewed {
                     Button {
                         detailsFocused = true
-                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
+                        withAnimation(motionReduced ? nil : PermissionMotion.scroll) {
                             proxy.scrollTo("permission-end", anchor: .bottom)
                         }
                     } label: {
@@ -291,18 +335,19 @@ private struct PermissionConsentCard: View {
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
                 if !requesting && snapshot.authorization != .notDetermined {
-                    Button("Check again") { onboarding.refresh() }
+                    Button("Check again") { if isCurrent { onboarding.refresh() } }
                         .buttonStyle(.plain).font(.system(size: 11)).frame(minHeight: 44)
                         .accessibilityIdentifier("permission-check-again")
                     if permission == .screenRecording && snapshot.authorization == .notGranted {
-                        Button("System Settings") { onboarding.openCurrentSettings() }
+                        Button("System Settings") { if isCurrent { onboarding.openCurrentSettings() } }
                             .buttonStyle(.plain).font(.system(size: 11)).frame(minHeight: 44)
                             .disabled(!reviewed)
                             .accessibilityLabel("Open Screen Recording in System Settings")
                             .accessibilityIdentifier("permission-system-settings")
                     }
                 }
-            }.foregroundStyle(.black.opacity(0.82)).accessibilityElement(children: .contain)
+            }.frame(minHeight: 44)
+                .foregroundStyle(.black.opacity(0.82)).accessibilityElement(children: .contain)
             if let message = snapshot.message {
                 Text(message).font(.system(size: 11)).lineSpacing(2).foregroundStyle(.black.opacity(0.75))
                     .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
@@ -313,15 +358,15 @@ private struct PermissionConsentCard: View {
                     Image(systemName: snapshot.authorization.allowsAccess ? "arrow.right" : (settingsRequired ? "arrow.up.right" : "plus"))
                 }
                 .font(.system(size: 13, weight: .semibold)).frame(minHeight: 44).padding(.horizontal, 16)
-                .foregroundStyle(.white).background(.black.opacity(reviewed && !requesting ? 0.88 : 0.22), in: Capsule())
-            }.buttonStyle(.plain).disabled(!reviewed || requesting).keyboardShortcut(.defaultAction)
+
+            }.modifier(PermissionPrimaryAction()).disabled(!reviewed || requesting).keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("permission-primary")
                 .accessibilityHint(reviewed ? "" : "Scroll to the end of the permission details first.")
             HStack(spacing: 12) {
-                Button("Back") { onboarding.back() }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
+                Button("Back") { if isCurrent { onboarding.back() } }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
                     .accessibilityIdentifier("permission-back")
                 Spacer(minLength: 0)
-                Button(permission.skipTitle) { onboarding.continueWithoutAccess() }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
+                Button(permission.skipTitle) { if isCurrent { onboarding.continueWithoutAccess() } }.disabled(requesting).frame(minHeight: 44).contentShape(Rectangle())
                     .accessibilityIdentifier("permission-skip")
             }
             .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(.black.opacity(0.78))
@@ -336,8 +381,12 @@ private struct PermissionConsentCard: View {
         return permission.allowTitle
     }
     private func primaryAction() {
+        guard isCurrent else { return }
         if snapshot.authorization.allowsAccess { onboarding.continueWithAccess() }
         else if settingsRequired { onboarding.openCurrentSettings() }
-        else { Task { await onboarding.requestCurrentPermission() } }
+        else { Task {
+            guard onboarding.currentPermission == permission else { return }
+            await onboarding.requestCurrentPermission()
+        } }
     }
 }

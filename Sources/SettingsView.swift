@@ -57,7 +57,7 @@ private struct EnableEffectButton: View {
     @ObservedObject var presentation: TrackingPresentation
     let model: AppModel
     var body: some View {
-        Button("Enable blur") { model.enable() }.buttonStyle(.borderedProminent).controlSize(.large)
+        Button("Enable blur") { model.enable() }.modifier(SettingsPrimaryAction())
             .disabled(!presentation.snapshot.canEnable)
     }
 }
@@ -140,7 +140,7 @@ struct EnergySettingsView: View {
             Text("Reduced energy refreshes the desktop image less often. Head tracking and the cover stay responsive; camera and AirPod removal checks keep their normal timing.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 20))
+        .modifier(SettingsContentSurface())
     }
 }
 
@@ -207,7 +207,7 @@ struct SettingsView: View {
                 SettingsTourCard(tour: tour, showHighlightedControl: tour.step?.section != selectedSection ? {
                     if let section = tour.step?.section { selectedSection = section }
                 } : nil)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
         }
         .onChange(of: tour.step) { old, step in
@@ -224,13 +224,13 @@ struct SettingsView: View {
         }
         .onDisappear { model.stopHeadPreviewSync() }
         // Keep the main settings surface visually connected to the permission
-        // flow, while the cards retain the familiar native material above it.
-        // The starfield already stops its timeline when this window is hidden
+        // flow. Content surfaces remain inexpensive to composite; native controls
+        // supply the refractive glass. The starfield suspends when hidden
         // or Reduce Motion is enabled.
         .background(PermissionStarfieldBackground(placement: .settings, onAnimationTick: onBackgroundAnimationTick))
         .environment(\.colorScheme, .dark)
         .tint(.white)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: tour.isActive)
+        .animation(reduceMotion ? nil : SettingsMotion.reveal, value: tour.isActive)
         .frame(minWidth: 740, idealWidth: 800, minHeight: 660, idealHeight: 850)
         .onAppear { model.refreshPermission() }
     }
@@ -251,7 +251,7 @@ struct SettingsView: View {
             Group {
                 if model.enabled || model.starting {
                     Button("Pause & clear screen") { model.pause() }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
+                        .modifier(SettingsPrimaryAction())
                 } else { EnableEffectButton(presentation: model.presentation, model: model) }
             }.tourTarget(.ready)
             Menu {
@@ -273,6 +273,7 @@ struct SettingsView: View {
                     }.padding(20).frame(maxWidth: 720).frame(maxWidth: .infinity)
                 }
             }
+            .modifier(SettingsScrollEdge())
             .accessibilityIdentifier("settings-page-" + section.rawValue.lowercased())
             .task(id: "\(selectedSection.rawValue)-\(tour.step?.rawValue ?? "none")") {
                 guard selectedSection == section, let step = tour.step, step.section == section else { return }
@@ -280,7 +281,7 @@ struct SettingsView: View {
                 await Task.yield()
                 try? await Task.sleep(nanoseconds: 30_000_000)
                 guard !Task.isCancelled else { return }
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                withAnimation(reduceMotion ? nil : SettingsMotion.reveal) {
                     proxy.scrollTo(step, anchor: .center)
                 }
             }
@@ -298,7 +299,7 @@ struct SettingsView: View {
             Text(model.pauseHint).font(.caption2).foregroundStyle(.secondary)
         case .tracking:
             HeadTrackingControls(presentation: model.presentation, model: model)
-                .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 20)).tourTarget(.tracking)
+                .modifier(SettingsContentSurface()).tourTarget(.tracking)
             cameraCard
         case .displays:
             accessCard
@@ -339,11 +340,12 @@ struct SettingsView: View {
                             Slider(value:previewAngle,in:-60...60).accessibilityLabel("Simulated head angle")
                                 .accessibilityIdentifier("preview-angle")
                             Text("Left").font(.caption).foregroundStyle(.secondary)
-                            Button("Center") { previewAngle.wrappedValue = 0 }.controlSize(.large)
+                            Button("Center") { previewAngle.wrappedValue = 0 }
+                                .modifier(SettingsSecondaryAction())
                                 .accessibilityIdentifier("preview-center")
                         }
                     }
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.preview)
+                }.modifier(SettingsContentSurface()).tourTarget(.preview)
 
     }
 
@@ -360,7 +362,7 @@ struct SettingsView: View {
                         Text("Screen Recording permission is only needed for live blur. AirPods removal checks use Camera and Head Tracking permissions.")
                             .font(.caption2).foregroundStyle(.secondary)
                         Text(model.overlay.status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                    }.frame(maxWidth:.infinity,alignment:.leading).padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.access)
+                    }.frame(maxWidth:.infinity,alignment:.leading).modifier(SettingsContentSurface()).tourTarget(.access)
     }
 
     @ViewBuilder private var cameraCard: some View {
@@ -386,7 +388,7 @@ struct SettingsView: View {
                             .disabled(model.cameraHeading.isBusy)
                         Text(model.cameraHeading.status).font(.caption2).foregroundStyle(.secondary)
                     }
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20)).tourTarget(.camera)
+                }.modifier(SettingsContentSurface()).tourTarget(.camera)
 
     }
 
@@ -419,7 +421,7 @@ struct SettingsView: View {
                          : "Choose an area, then turn on blocking to apply it. The menu bar and notch controls remain available.")
                         .font(.caption2).foregroundStyle(.secondary)
                     }.tourTarget(.input)
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+                }.modifier(SettingsContentSurface())
 
     }
 
@@ -448,7 +450,7 @@ struct SettingsView: View {
                             setting("Response",value:Binding(get:{model.response*1000},set:{model.response=$0/1000}),range:25...200,unit:" ms")
                         }.padding(.top,14)
                     }.font(.subheadline).tourTarget(.tuning)
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+                }.modifier(SettingsContentSurface())
 
     }
 
@@ -503,7 +505,7 @@ struct SettingsView: View {
                         Spacer()
                         Button("Lock Screen settings") { model.openLockScreenSettings() }
                     }
-                }.padding(20).background(.background,in:RoundedRectangle(cornerRadius:20))
+                }.modifier(SettingsContentSurface())
 
                 EnergySettingsView(energy: model.energy, overlay: model.overlay).tourTarget(.energy)
 
@@ -534,5 +536,69 @@ private struct SyncedBlurOnsetDial: View {
                           if sync.snapshot.requested { model.stopHeadPreviewSync() }
                           else { model.startHeadPreviewSync() }
                       })
+    }
+}
+
+
+private enum SettingsMotion {
+    static let reveal = Animation.smooth(duration: 0.24)
+}
+
+/// Content is a quiet surface beneath the native glass controls. No live blur
+/// is applied to the full card, so stars do not force a large material resample.
+private struct SettingsContentSurface: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let dark = colorScheme == .dark
+        content
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: dark
+                            ? [Color(white: 0.115), Color(white: 0.075)]
+                            : [Color(white: 0.99), Color(white: 0.95)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .opacity(reduceTransparency ? 1 : 0.96)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(.primary.opacity(contrast == .increased ? 0.38 : 0.09), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
+private struct SettingsPrimaryAction: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.buttonStyle(.glassProminent).controlSize(.large)
+        } else {
+            content.buttonStyle(.borderedProminent).controlSize(.large)
+        }
+    }
+}
+
+private struct SettingsSecondaryAction: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.buttonStyle(.glass).controlSize(.large)
+        } else {
+            content.buttonStyle(.bordered).controlSize(.large)
+        }
+    }
+}
+
+private struct SettingsScrollEdge: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            content
+        }
     }
 }
