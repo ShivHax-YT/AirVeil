@@ -43,8 +43,16 @@ enum NotchCoachGuidance {
         if frame.faceCount > 1 {
             return snapshot(.seeking, "One face at a time", "Keep only your face in the camera view.", .multipleFaces)
         }
-        // A dark empty room is not evidence of a face needing illumination.
-        // Require one plausible face before evaluating its local luminance.
+        // Darkness cannot establish presence. This only offers a manual light
+        // during an already-active check; the coordinator debounces the offer.
+        if frame.faceCount == 0, let brightness = frame.centerLuminance,
+           brightness.isFinite, brightness >= 0, brightness < 0.16 {
+            var result = snapshot(.lighting, "Too dark to find your face",
+                "Try Face light, then keep facing the camera.", .lowLight)
+            result.needsLightHelp = true
+            return result
+        }
+        // Face-local automatic lighting still requires a plausible face.
         guard frame.faceCount == 1, let bounds,
               [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }),
               bounds.width > 0, bounds.height > 0,

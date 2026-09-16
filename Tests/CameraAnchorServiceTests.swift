@@ -268,6 +268,26 @@ import CoreVideo
             check(CameraLuminance.mean(buffer, normalizedRegion: CGRect(x: 0, y: 0, width: 0, height: 0)) == nil,
                   "An empty face region cannot produce a brightness claim")
         }
+        for format in [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] {
+            for brightCenter in [false, true] {
+                var pixels: CVPixelBuffer?
+                CVPixelBufferCreate(kCFAllocatorDefault, 100, 100, format, nil, &pixels)
+                let buffer = pixels!
+                CVPixelBufferLockBaseAddress(buffer, [])
+                let bytes = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!.assumingMemoryBound(to: UInt8.self)
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+                let black: UInt8 = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ? 16 : 0
+                let white: UInt8 = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ? 235 : 255
+                memset(bytes, Int32(brightCenter ? black : white), stride * 100)
+                for y in 20..<80 { for x in 20..<80 { bytes[y * stride + x] = brightCenter ? white : black } }
+                CVPixelBufferUnlockBaseAddress(buffer, [])
+                let central = CameraLuminance.mean(buffer, normalizedRegion: CameraLuminance.searchRegion)!
+                // Fractional ROI edges may include one boundary row. Assert the
+                // lighting decision remains robust rather than exact black/white.
+                check(brightCenter ? central > 0.9 : central < 0.1,
+                      "Central search brightness ignores opposite background brightness in both pixel ranges")
+            }
+        }
         for (pixelValue, expected) in [(UInt8(0), 0.0), (UInt8(128), 128.0 / 255), (UInt8(255), 1.0)] {
             var pixels: CVPixelBuffer?
             check(CVPixelBufferCreate(kCFAllocatorDefault, 32, 24, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,

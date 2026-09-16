@@ -106,14 +106,14 @@ private struct StoredCameraProbe: Codable {
         }
     }
     func frame(yaw: Double?, faces: Int = 1, handler: Int? = nil,
-               confidence: Float = 0.95, luminance: Double? = nil,
+               confidence: Float = 0.95, luminance: Double? = nil, centerLuminance: Double? = nil, captureAge: Double = 0,
                bounds: CGRect = CGRect(x: 0.3, y: 0.25, width: 0.3, height: 0.4)) {
         let index = handler ?? capture.handlers.count - 1
         guard index >= 0 else { fatalError("Camera burst has not started") }
         capture.handlers[index](CameraAnchorFrame(cameraID: capture.cameraID, configurationID: capture.configurationID,
             faceCount: faces, yawDegrees: yaw, pitchDegrees: 0, rollDegrees: 0, detectionConfidence: confidence,
-            faceBounds: bounds, captureHostTime: time,
-            receiptHostTime: time, processedHostTime: time, luminance: luminance))
+            faceBounds: bounds, captureHostTime: time - captureAge,
+            receiptHostTime: time, processedHostTime: time, luminance: luminance, centerLuminance: centerLuminance))
     }
     func frames(_ count: Int, cameraYaw: Double, motionYaw: Double) {
         for _ in 0..<count { frame(yaw: cameraYaw); advance(0.34, yaw: motionYaw) }
@@ -492,6 +492,51 @@ private struct StoredCameraProbe: Codable {
             f.coordinator.refreshDirection(); await settle(); f.advance(0.8)
             f.frame(yaw: nil, luminance: 0.05); f.advance(0.34); f.frame(yaw: nil, luminance: 0.05)
             check(f.light.isOn, "A new explicit camera check may evaluate its own light need")
+            f.end()
+        }
+        for finish in ["expires", "success", "manual", "sleep", "disable", "stale", "cancel", "failure"] {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8); await settle(); f.advance(0.8)
+            let starts = f.capture.starts, saved = f.defaults.data(forKey: "cameraScreenCenterV1")
+            f.frame(yaw: nil, faces: 0, centerLuminance: 0.05)
+            f.frame(yaw: nil, faces: 0, centerLuminance: 0.05)
+            check(f.coordinator.coach.phase != .lighting, "Duplicate dark frames cannot offer light")
+            f.advance(0.34); f.frame(yaw: nil, faces: 0, centerLuminance: 0.05)
+            check(f.coordinator.coach.phase != .lighting, "Two dark search frames still wait for stable darkness")
+            f.advance(0.34); f.frame(yaw: nil, faces: 0, centerLuminance: 0.05)
+            check(f.coordinator.coach.phase == .lighting && f.coordinator.coach.needsLightHelp && !f.light.isOn,
+                  "Sustained darkness without a face offers the existing manual light card")
+            check(!f.coordinator.trackingValid && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                  "Darkness cannot establish presence or change the saved center")
+            f.coordinator.toggleAssistLight()
+            for _ in 0..<3 { f.advance(0.34); f.frame(yaw: nil, faces: 0, centerLuminance: 0.05) }
+            check(f.light.isOn && f.coordinator.coach.phase == .seeking && f.coordinator.coach.isAssistLightOn,
+                  "Manual light gives missing-face acquisition time without card flicker")
+            switch finish {
+            case "expires":
+                for _ in 0..<4 { f.advance(0.34); f.frame(yaw: nil, faces: 0, centerLuminance: 0.05) }
+                for _ in 0..<3 { f.advance(0.34); f.frame(yaw: nil, luminance: 0.05) }
+            case "success": f.frames(3, cameraYaw: 0, motionYaw: 0)
+            case "manual": f.coordinator.toggleAssistLight()
+            case "sleep": f.coordinator.setSessionActive(false)
+            case "disable": f.coordinator.disable()
+            case "stale": f.frame(yaw: nil, faces: 0, centerLuminance: 0.05, captureAge: 1)
+            case "cancel": f.coordinator.cancelPendingRecovery()
+            default: f.camera.stop(); f.coordinator.update(layoutKey: f.layout)
+            }
+            check(!f.light.isOn && !f.coordinator.coach.isAssistLightOn, "Bootstrap light cleans up on \(finish)")
+            check(f.capture.starts == starts && f.defaults.data(forKey: "cameraScreenCenterV1") == saved,
+                  "Bootstrap keeps one bounded check and the durable center")
+            if finish == "success" { check(f.coordinator.trackingValid, "Real face and motion evidence completes the illuminated check") }
+            f.end()
+        }
+        for age in [1.0, -1.0] {
+            let f = CoordinatorFixture(stored: true)
+            f.advance(0.8); await settle(); f.advance(0.8)
+            for _ in 0..<4 {
+                f.frame(yaw: nil, faces: 0, centerLuminance: 0.05, captureAge: age); f.advance(0.34)
+            }
+            check(f.coordinator.coach.phase != .lighting && !f.light.isOn, "Stale or future dark frames cannot offer light")
             f.end()
         }
         for cancellation in ["manual", "sleep", "disable", "face-left", "stale", "failure"] {
