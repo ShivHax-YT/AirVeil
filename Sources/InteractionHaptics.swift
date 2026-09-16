@@ -12,6 +12,8 @@ import QuartzCore
     private let clock: () -> TimeInterval
     private let perform: @MainActor (Pulse) -> Void
     private var lastTick = -Double.infinity
+    private var tabPressActive = false
+    private var tabPressEnded = -Double.infinity
 
     init(enabled: @escaping () -> Bool = {
         UserDefaults.standard.object(forKey: preferenceKey) as? Bool ?? true
@@ -34,8 +36,15 @@ import QuartzCore
     }
 
     func selection() {
-        guard enabled() else { return }
+        guard !tabPressActive, clock() - tabPressEnded > 0.15, enabled() else { return }
         perform(.selection)
+    }
+
+    func beginTabPress() { tabPressActive = true }
+    func endTabPress() { tabPressActive = false; tabPressEnded = clock() }
+    func tabPressTick(initial: Bool) {
+        guard enabled() else { return }
+        perform(initial ? .selection : .tick)
     }
 
     /// Quantization affects feedback only; slider values remain continuous.
@@ -140,5 +149,102 @@ extension HapticButton where Label == SwiftUI.Label<Text, Image> {
         } else {
             Slider(value: $value.hapticMovement(in: range), in: range)
         }
+    }
+}
+
+/// Observe only presses in this window's native Settings tab control. The
+/// native control keeps ownership of tracking, selection, and glass animation.
+struct NativeTabPressFeedback: NSViewRepresentable {
+    let titles: [String]
+    func makeNSView(context: Context) -> TabPressObserverView {
+        let view = TabPressObserverView()
+        view.titles = titles
+        return view
+    }
+    func updateNSView(_ view: TabPressObserverView, context: Context) { view.titles = titles }
+    static func dismantleNSView(_ view: TabPressObserverView, coordinator: ()) { view.stopObserving() }
+}
+
+@MainActor final class TabPressObserverView: NSView {
+    var titles: [String] = []
+    var feedback = InteractionHaptics.shared
+    private var monitor: Any?
+    private var trackingTimer: Timer?
+    private weak var trackedControl: NSSegmentedControl?
+    private var ownsPress = false
+    private var lastSegment: Int?
+    private var lastPulse = -Double.infinity
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stopObserving()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            MainActor.assumeIsolated { self?.beginPress(event) }
+            return event
+        }
+    }
+    func stopObserving() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        endPress()
+    }
+    func beginPress(_ event: NSEvent) {
+        guard let window, event.window === window,
+              let root = window.contentView?.superview else { return }
+        var hit = root.hitTest(root.convert(event.locationInWindow, from: nil))
+        while let view = hit, !(view is NSSegmentedControl) { hit = view.superview }
+        guard let control = hit as? NSSegmentedControl, control.isEnabled,
+              control.segmentCount == titles.count,
+              (0..<control.segmentCount).map({ control.label(forSegment: $0) }) == titles else { return }
+        endPress()
+        trackedControl = control
+        ownsPress = true
+        feedback.beginTabPress()
+        sample(location: control.convert(event.locationInWindow, from: nil), initial: true)
+        // Native cells can run their own event-tracking loop. Sampling in that
+        // mode keeps boundary ticks synchronous with the glass drag, instead of
+        // waiting for the selection binding's mouse-up callback.
+        let timer = Timer(timeInterval: 1.0 / 90.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.trackPress() }
+        }
+        trackingTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+    }
+    private func trackPress() {
+        guard NSEvent.pressedMouseButtons & 1 != 0,
+              let control = trackedControl, let window = control.window,
+              window.isVisible, NSApp.isActive else { endPress(); return }
+        sample(location: control.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil), initial: false)
+    }
+    func sample(location: NSPoint, initial: Bool) {
+        guard let control = trackedControl else { return }
+        let widths = (0..<control.segmentCount).map { control.width(forSegment: $0) }
+        guard let segment = Self.segment(at: location, bounds: control.bounds, widths: widths),
+              control.isEnabled(forSegment: segment) else { lastSegment = nil; return }
+        guard segment != lastSegment else { return }
+        lastSegment = segment
+        let now = CACurrentMediaTime()
+        guard initial || now - lastPulse >= 0.045 else { return }
+        lastPulse = now
+        feedback.tabPressTick(initial: initial)
+    }
+    private func endPress() {
+        trackingTimer?.invalidate(); trackingTimer = nil
+        if ownsPress { feedback.endTabPress() }
+        ownsPress = false
+        trackedControl = nil; lastSegment = nil
+    }
+    static func segment(at point: NSPoint, bounds: NSRect, widths: [CGFloat]) -> Int? {
+        guard bounds.contains(point), !widths.isEmpty, bounds.width > 0 else { return nil }
+        let total = widths.reduce(0, +)
+        let explicit = widths.allSatisfy { $0 > 0 } && total > 0
+        var edge = bounds.minX
+        for index in widths.indices {
+            edge += explicit ? bounds.width * widths[index] / total : bounds.width / CGFloat(widths.count)
+            if point.x < edge { return index }
+        }
+        return widths.count - 1
     }
 }

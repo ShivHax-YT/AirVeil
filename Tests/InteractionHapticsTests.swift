@@ -67,6 +67,23 @@ import SwiftUI
         enabled = false
         tabBinding.wrappedValue = 3
         precondition(tab == 3 && valueWhenPulsed == nil, "Tab feedback respects opt-out")
+        enabled = true
+        tabHaptics.beginTabPress()
+        valueWhenPulsed = nil
+        tabHaptics.selection()
+        precondition(valueWhenPulsed == nil, "Pointer press owns feedback until tracking finishes")
+        tabHaptics.tabPressTick(initial: true)
+        precondition(valueWhenPulsed == tab, "Initial press emits immediately")
+        valueWhenPulsed = nil
+        tabHaptics.endTabPress()
+        tabHaptics.selection()
+        precondition(valueWhenPulsed == nil, "Mouse-up selection must not double pulse")
+        let bounds = NSRect(x: 0, y: 0, width: 500, height: 30)
+        for i in 0..<5 {
+            precondition(TabPressObserverView.segment(at: NSPoint(x: i * 100 + 50, y: 15), bounds: bounds, widths: [0,0,0,0,0]) == i)
+        }
+        precondition(TabPressObserverView.segment(at: NSPoint(x: -1, y: 15), bounds: bounds, widths: [0,0,0,0,0]) == nil)
+        precondition(TabPressObserverView.segment(at: NSPoint(x: 125, y: 15), bounds: bounds, widths: [1,3]) == 1)
         print("PASS: haptic detents, rate limiting, endpoints, reversal, silent external/rejected updates, opt-out, direct binding; injected performer only")
     }
 }

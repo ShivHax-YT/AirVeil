@@ -190,6 +190,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 12)
                 .accessibilityIdentifier("settings-sections")
+                .background(NativeTabPressFeedback(titles: SettingsSection.allCases.map(\.rawValue)))
                 if !tour.isActive { LegalFooter().padding(.horizontal, 20).padding(.vertical, 10) }
             }
             .overlayPreferenceValue(TourAnchorKey.self) { anchors in
