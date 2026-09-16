@@ -19,6 +19,16 @@ This local follow-up still carries version 0.15.0/build 31. Its executable hash 
 
 ## Remaining acceptance
 
+### Later live follow-up
+
+Restoring the window via Window > AirVeil recovered full-size capture. Permissions and the tutorial rendered normally. Fullscreen entry rendered the full tutorial, and a clean restart restored the ordinary Settings window. A live Settings screenshot showed the meteor entirely in the header gap above the preview card.
+
+Window > Move & Resize > Top Left made pointer targeting work: an actual preview slider drag changed the angle to +31.9135 degrees with matching direction text; Center restored zero. Earlier drag attempts failed in Computer Use with noWindowsAvailable/windowNotFoundAtPosition. The compact live layout also exposed a frame/content minimum mismatch: NSWindow.minSize included the title bar, reducing the available content below SwiftUI's 740×660 minimum. Changed it to contentMinSize. Twelve native window checks pass (`build/window-final.log`), including actual minimum-frame content geometry.
+
+The normal preview pointer drag and Settings meteor placement are now verified. A pointer drag inside the tutorial, installed corrected minimum-size layout, and complete Space/fullscreen navigation remain open. Capture still intermittently reports -3811/-3812. The user has now agreed to wear AirPods for physical checks; awaiting confirmation that both are inserted before starting the hardware sequence.
+
+The minimum-size fix was built and installed successfully (`build/window-fix-build.log`); strict signature verification passed and installed/build executable SHA-256 matches `5328b9b01d5ed0ff1964567306103e4e935965dc1bac5dc5934e1da083969eeb`. This supersedes the earlier executable hash above. The previous installed app is saved under `build/minimum-size-backup.*`. The first live capture after installation again returned -3811, so the installed minimum-size interaction is not claimed from the geometry test alone.
+
 Live Computer Use could inspect Settings accessibility, but subsequent screen and accessibility captures failed with ScreenCaptureKit error -3811 (audio/video capture failure). Manual tutorial dragging, live minimum-size interaction, final visual confirmation of the Settings meteor band, and Space/fullscreen interaction remain unverified. Generated renders and diagnostic ticks do not establish these live interactions.
 
 Automatic departure/lock, low-light recovery, and repeated brightness recovery in both AirPods-return/unlock orders require a wearer and physical tests. Per-ear detection while the other AirPod continues sending motion is a documented platform limitation. No Hi/voice/wake-word feature is implemented.

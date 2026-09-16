@@ -9,7 +9,8 @@ import AppKit
                    backing: .buffered, defer: false)
         title = "AirVeil"
         isReleasedWhenClosed = false
-        minSize = NSSize(width: 740, height: 660)
+        // Match the SwiftUI content minimum; the native title bar needs extra height.
+        contentMinSize = NSSize(width: 740, height: 660)
         level = .normal
         collectionBehavior = [.managed, .participatesInCycle]
         isExcludedFromWindowsMenu = false
