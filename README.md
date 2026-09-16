@@ -20,12 +20,22 @@ AirVeil is a native macOS privacy app that uses AirPods head tracking to obscure
 ## Requirements
 
 - macOS 14 or later on an Apple silicon Mac
-- AirPods with dynamic head tracking
+- Headphones that expose motion data through Apple Core Motion
 - **Motion & Fitness** permission for head tracking
 - **Screen Recording** permission for desktop blur
 - Optional **Camera** permission for alignment and presence features
 
 AirVeil does not request Bluetooth or microphone access.
+
+### Compatible headphones
+
+AirVeil is designed and tested for AirPods with dynamic head tracking:
+
+- AirPods Pro (1st, 2nd, and 3rd generation)
+- AirPods Max (Lightning and USB-C models)
+- AirPods (3rd, 4th, and 5th generation)
+
+[Apple also documents head-tracking support](https://support.apple.com/102596) for **Beats Fit Pro, Beats Studio Pro, Beats Solo 4, Powerbeats Pro 2, and Powerbeats Fit**. AirVeil checks [Core Motion availability](https://developer.apple.com/documentation/coremotion/cmheadphonemotionmanager/isdevicemotionavailable) at runtime, so these Beats models may work, but they have not yet been tested or guaranteed by this project.
 
 ## Install
 
