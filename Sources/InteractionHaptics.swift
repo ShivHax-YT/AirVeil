@@ -5,7 +5,7 @@ import QuartzCore
 /// A small UI-side effect service. Never observe model changes here: only
 /// control actions and UI binding writes are allowed to request feedback.
 @MainActor final class InteractionHaptics {
-    enum Pulse: Equatable { case action, tick, boundary }
+    enum Pulse: Equatable { case action, selection, tick, boundary }
     nonisolated static let preferenceKey = "trackpadFeedbackEnabled"
     static let shared = InteractionHaptics()
     private let enabled: () -> Bool
@@ -21,7 +21,7 @@ import QuartzCore
         switch pulse {
         case .action: pattern = .levelChange
         case .tick: pattern = .alignment
-        case .boundary: pattern = .generic
+        case .selection, .boundary: pattern = .generic
         }
         NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
     }) {
@@ -31,6 +31,11 @@ import QuartzCore
     func action() {
         guard enabled() else { return }
         perform(.action)
+    }
+
+    func selection() {
+        guard enabled() else { return }
+        perform(.selection)
     }
 
     /// Quantization affects feedback only; slider values remain continuous.
@@ -59,6 +64,17 @@ import QuartzCore
 }
 
 extension Binding where Value: Equatable {
+    /// For locally owned tab state, where every proposed selection is valid.
+    /// Request feedback before changing pages, while the input action is active.
+    /// Tour navigation writes directly to state and bypasses this binding.
+    @MainActor func hapticTabSelection(using feedback: InteractionHaptics? = nil) -> Binding<Value> {
+        let feedback = feedback ?? .shared
+        return Binding(get: { wrappedValue }, set: { next in
+            if wrappedValue != next { feedback.selection() }
+            wrappedValue = next
+        })
+    }
+
     /// The control calls this setter; programmatic model updates only hit get.
     @MainActor func hapticSelection(using feedback: InteractionHaptics? = nil) -> Binding<Value> {
         let feedback = feedback ?? .shared

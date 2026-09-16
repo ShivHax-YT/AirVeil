@@ -51,6 +51,22 @@ import SwiftUI
         // The existing system-selected step is preserved; detents never quantize input.
         now = 2; slider.wrappedValue = 51.234
         precondition(value == 51.234)
+        var tab = 0
+        var valueWhenPulsed: Int?
+        let tabHaptics = InteractionHaptics(enabled: { enabled }, perform: { pulse in
+            precondition(pulse == .selection)
+            valueWhenPulsed = tab
+        })
+        let tabBinding = Binding(get: { tab }, set: { tab = $0 }).hapticTabSelection(using: tabHaptics)
+        tabBinding.wrappedValue = 1
+        precondition(tab == 1 && valueWhenPulsed == 0, "Tab feedback precedes page mutation")
+        valueWhenPulsed = nil
+        tabBinding.wrappedValue = 1
+        tab = 2
+        precondition(valueWhenPulsed == nil, "Repeated selection and programmatic navigation stay silent")
+        enabled = false
+        tabBinding.wrappedValue = 3
+        precondition(tab == 3 && valueWhenPulsed == nil, "Tab feedback respects opt-out")
         print("PASS: haptic detents, rate limiting, endpoints, reversal, silent external/rejected updates, opt-out, direct binding; injected performer only")
     }
 }

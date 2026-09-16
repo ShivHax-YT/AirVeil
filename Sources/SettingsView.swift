@@ -181,7 +181,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
                 header
-                TabView(selection: $selectedSection.hapticSelection()) {
+                TabView(selection: $selectedSection.hapticTabSelection()) {
                     ForEach(SettingsSection.allCases) { section in
                         sectionPage(section)
                             .tabItem { Label(section.rawValue, systemImage: section.symbol) }
