@@ -148,6 +148,7 @@ struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var tour: SettingsTour
     var showPermissions: (() -> Void)? = nil
+    var onBackgroundAnimationTick: ((TimeInterval) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedSection: SettingsSection
     var onTourTargetResolved: ((SettingsSection, SettingsTourStep, CGRect?, CGSize) -> Void)? = nil
@@ -167,8 +168,10 @@ struct SettingsView: View {
     }
     init(model: AppModel, tour: SettingsTour, showPermissions: (() -> Void)? = nil,
          initialSection: SettingsSection = .preview,
+         onBackgroundAnimationTick: ((TimeInterval) -> Void)? = nil,
          onTourTargetResolved: ((SettingsSection, SettingsTourStep, CGRect?, CGSize) -> Void)? = nil) {
         self.model = model; self.tour = tour; self.showPermissions = showPermissions
+        self.onBackgroundAnimationTick = onBackgroundAnimationTick
         self.onTourTargetResolved = onTourTargetResolved
         _selectedSection = State(initialValue: tour.step?.section ?? initialSection)
     }
@@ -220,7 +223,13 @@ struct SettingsView: View {
             if old == .appearance { model.stopHeadPreviewSync() }
         }
         .onDisappear { model.stopHeadPreviewSync() }
-        .background(Color(nsColor: .windowBackgroundColor))
+        // Keep the main settings surface visually connected to the permission
+        // flow, while the cards retain the familiar native material above it.
+        // The starfield already stops its timeline when this window is hidden
+        // or Reduce Motion is enabled.
+        .background(PermissionStarfieldBackground(placement: .settings, onAnimationTick: onBackgroundAnimationTick))
+        .environment(\.colorScheme, .dark)
+        .tint(.white)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: tour.isActive)
         .frame(minWidth: 740, idealWidth: 800, minHeight: 660, idealHeight: 850)
         .onAppear { model.refreshPermission() }

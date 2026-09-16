@@ -1,5 +1,9 @@
 # AirVeil validation status
 
+## Settings starfield follow-up — 16 September 2026
+
+The Settings background update is installed. Tour/render and expanded starfield lifecycle checks pass, including actual cover/uncover behavior. Live screenshot capture currently fails with ScreenCaptureKit -3811, so manual drag/minimum-size and final meteor-position inspection remain open alongside physical acceptance. See [current evidence and limitations](SETTINGS-STARFIELD-2026-09-16.md). Historical build-31 package hashes below do not identify this local follow-up.
+
 ## Current work — 0.15.0 build 31
 
 Build 31 is installed with Enable blur as the primary notch action and Set center to the right. Focused native checks and release/package verification pass. The wearer confirmed the full direct-notch waiting/alignment/automatic-blur flow; the saved trace covers waiting only. See [whole-task checklist](GOAL-CHECKLIST-0.15.0-31.md) for completed and remaining acceptance, including automatic departure, low-light recheck, repeated recovery cycles, and manual tutorial dragging.

@@ -93,6 +93,14 @@ private struct StarfieldPixels {
         try await Task.sleep(for: .seconds(seconds))
     }
 
+    private static func awaitState(_ message: String, condition: () -> Bool) async throws {
+        for _ in 0..<30 {
+            if condition() { return }
+            try await pause(0.1)
+        }
+        throw StarfieldHarnessFailure(description: message)
+    }
+
     private static func awaitTicks(_ ticks: StarfieldTickRecorder, after count: Int) async throws {
         for _ in 0..<25 {
             if ticks.count >= count + 3 { return }
@@ -139,10 +147,16 @@ private struct StarfieldPixels {
 
         // Exercise a real visible AppKit window while another app owns focus.
         // Captures below contain this generated Canvas only, never the desktop.
+        // Keep accessory policy: prohibited applications cannot create windows.
+        // Deactivation is asynchronous, so await the actual fixture state.
         app.deactivate()
         panel.orderFrontRegardless()
-        try await pause(0.4)
-        try require(!app.isActive, "Harness must remain inactive; no focus-based animation exemption")
+        try await awaitState("Fixture could not become inactive after deactivation; unfocused animation was not tested") {
+            !app.isActive
+        }
+        try await awaitState("Harness window never became visibly unoccluded") {
+            panel.isVisible && panel.occlusionState.contains(.visible)
+        }
         try require(panel.isVisible && panel.occlusionState.contains(.visible),
                     "Harness must be truly visible and unoccluded")
         try await awaitTicks(ticks, after: ticks.count)
@@ -156,6 +170,37 @@ private struct StarfieldPixels {
         try require(first.bytes.count == second.bytes.count && changedBytes >= 48,
                     "Actual generated star pixels must change over time")
         print("PASS: visible inactive window animates; \(ticks.count - movingCount) ticks, \(changedBytes) changed pixel bytes")
+
+        // An ordered-in window can be entirely covered. Unlike orderOut, this
+        // specifically exercises the occlusion gate while isVisible stays true.
+        // Use only an opaque generated fixture; never move another app's window.
+        let cover = StarfieldHarnessPanel(contentRect: panel.frame.insetBy(dx: -12, dy: -12),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        cover.isReleasedWhenClosed = false
+        cover.hidesOnDeactivate = false
+        cover.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
+        cover.isOpaque = true
+        cover.backgroundColor = .black
+        cover.hasShadow = false
+        cover.ignoresMouseEvents = true
+        defer { cover.close() }
+        cover.orderFrontRegardless()
+        try await awaitState("Opaque fixture did not fully occlude the still-ordered-in starfield window") {
+            panel.isVisible && !panel.occlusionState.contains(.visible)
+        }
+        try await pause(0.35)
+        let coveredCount = ticks.count
+        try await pause(0.8)
+        try require(panel.isVisible && !panel.occlusionState.contains(.visible) && ticks.count == coveredCount,
+                    "Fully occluded window must stop animation ticks even though isVisible remains true")
+        print("PASS: fully covered ordered-in window stops animation ticks")
+        cover.orderOut(nil)
+        try await awaitState("Uncovering did not restore native visibility") {
+            panel.occlusionState.contains(.visible)
+        }
+        try await awaitTicks(ticks, after: ticks.count)
+        try require(!app.isActive, "Cover/uncover fixtures must not activate the harness")
+        print("PASS: uncovering resumes animation without focus")
 
         state.reduceMotion = true
         try await pause(0.35)
@@ -243,7 +288,7 @@ private struct StarfieldPixels {
         try require(!app.isActive && ticks.count > count,
                     "Background tick must reach the full unfocused permission view")
         try require(headerChanges >= 48,
-                    "Actual clear-header star/meteor pixels must change in the full permission composition")
+                    "Actual clear-header star pixels must change in the full permission composition")
         print("PASS: \(label) \(Int(size.width))×\(Int(size.height)); \(ticks.count - count) ticks, \(headerChanges) changed uncovered-header pixel bytes; frame times \(String(format: "%.2f", firstElapsed))/\(String(format: "%.2f", ticks.elapsed))s")
     }
 }

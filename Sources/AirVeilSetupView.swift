@@ -11,7 +11,8 @@ struct AirVeilSetupView: View {
             if onboarding.isActive {
                 PermissionOnboardingView(onboarding: onboarding, onBackgroundAnimationTick: onBackgroundAnimationTick)
             } else {
-                SettingsView(model: model, tour: tour, showPermissions: { onboarding.replay() })
+                SettingsView(model: model, tour: tour, showPermissions: { onboarding.replay() },
+                             onBackgroundAnimationTick: onBackgroundAnimationTick)
             }
         }
     }

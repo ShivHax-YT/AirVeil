@@ -4,19 +4,25 @@ import AppKit
 /// Quiet depth behind the permission glass. Particles are deterministic and
 /// decorative; hidden or reduced-motion views contain no animation timeline.
 struct PermissionStarfieldBackground: View {
+    enum MeteorPlacement {
+        case permissions, settings
+        var verticalFraction: Double { self == .permissions ? 0.04 : 0.075 }
+    }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
     @State private var windowIsVisible = false
     @State private var origin = Date()
     private let isVisible: Bool
+    private let placement: MeteorPlacement
     private let reduceMotionOverride: Bool?
     private let onAnimationTick: ((TimeInterval) -> Void)?
 
     /// The optional observer lets the local render harness verify that hidden
     /// windows stop ticking. Explicit local diagnostics can also observe ticks.
-    init(isVisible: Bool = true, reduceMotionOverride: Bool? = nil,
+    init(placement: MeteorPlacement = .permissions, isVisible: Bool = true, reduceMotionOverride: Bool? = nil,
          onAnimationTick: ((TimeInterval) -> Void)? = nil) {
         self.isVisible = isVisible
+        self.placement = placement
         self.reduceMotionOverride = reduceMotionOverride
         self.onAnimationTick = onAnimationTick
     }
@@ -71,7 +77,7 @@ struct PermissionStarfieldBackground: View {
                              with: .color(.white.opacity(opacity * 0.08)))
                 context.fill(Path(ellipseIn: core), with: .color(.white.opacity(opacity)))
             }
-            if moving { Self.drawMeteor(context: &context, size: size, time: time) }
+            if moving { Self.drawMeteor(context: &context, size: size, time: time, placement: placement) }
         }
         .blur(radius: 0.35)
     }
@@ -106,7 +112,7 @@ struct PermissionStarfieldBackground: View {
     }
 
     /// One faint streak, under 34 points long, with a quiet gap between passes.
-    private static func drawMeteor(context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
+    private static func drawMeteor(context: inout GraphicsContext, size: CGSize, time: TimeInterval, placement: MeteorPlacement) {
         let interval = 4.5
         let cycle = Int(time / interval)
         let elapsed = time.truncatingRemainder(dividingBy: interval) - 1
@@ -116,10 +122,9 @@ struct PermissionStarfieldBackground: View {
         let opacity = sin(progress * .pi) * 0.62
         let travel = 65 + noise(cycle, 8) * 35
         let length = 20 + noise(cycle, 9) * 13
-        // Side-card stacks reach the window edges. Keep every streak in the
-        // free band above the cards, between the logo and permission counter.
+        // Each surface has its own clear header band above the cards.
         let start = CGPoint(x: (0.25 + noise(cycle, 10) * 0.20) * size.width,
-                            y: (0.04 + noise(cycle, 11) * 0.012) * size.height)
+                            y: (placement.verticalFraction + noise(cycle, 11) * 0.012) * size.height)
         let direction = CGVector(dx: 0.995, dy: 0.10)
         let head = CGPoint(x: start.x + travel * progress * direction.dx,
                            y: start.y + travel * progress * direction.dy)
